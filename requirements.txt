@@ -1,0 +1,15 @@
+transformers>=4.43.0
+accelerate>=0.33.0
+datasets>=2.20.0
+trl>=0.9.6
+peft>=0.11.1
+bitsandbytes>=0.43.0
+sentence-transformers>=3.0.1
+evaluate>=0.4.2
+scikit-learn>=1.5.0
+matplotlib>=3.9.0
+numpy>=1.26.0
+pandas>=2.2.0
+pyyaml>=6.0.1
+openai>=1.44.0
+

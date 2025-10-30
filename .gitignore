@@ -1,0 +1,15 @@
+# data and outputs
+data/logs/**
+data/dpo/**
+data/eval/**
+outputs/**
+eval/*.png
+
+# python
+__pycache__/
+.venv/
+*.pyc
+
+# environment
+.env
+
