@@ -6,10 +6,15 @@ Setup
   - conda create -n proact python=3.10 -y
   - conda activate proact
   - pip install -r requirements.txt
+- Set up OpenAI API key (required for LLM generation):
+  - See llm/SETUP_API_KEY.md for detailed instructions
+  - Quick setup: `export OPENAI_API_KEY='sk-...'`
+  - Test: `python llm/test_openai_key.py`
 
 Structure
 
 - prompts/: behavior templates for coding and planning (low/mid/high)
+- llm/: OpenAI API provider and API key setup (see llm/SETUP_API_KEY.md)
 - simulator/: user personas and reaction rules
 - reward/: task success scoring and interrupt cost
 - policy/: DPO training and action selection
