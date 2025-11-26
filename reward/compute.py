@@ -1,15 +1,29 @@
-from typing import Dict
+from typing import Dict, Optional
 
 
-def compute_task_score(sample: Dict, domain: str) -> float:
-    """MVP task score.
+def compute_task_score(sample: Dict, domain: str, assistant_output: Optional[str] = None) -> float:
+    """Compute task success score.
 
-    coding: placeholder 0.6
-    planning: placeholder 0.6
-    Replace with tests (coding) or LLM judge (planning) later.
+    Args:
+        sample: State dict (may contain mbpp_tests for coding tasks)
+        domain: "coding" or "planning"
+        assistant_output: Generated assistant message (optional, for MBPP test execution)
+
+    Returns:
+        Task score (0.0-1.0). Higher is better.
     """
-    base = 0.6
-    return float(base)
+    # For coding with MBPP tests, use test execution if available
+    if domain == "coding" and assistant_output is not None:
+        tests = sample.get("mbpp_tests")
+        if tests:
+            try:
+                from reward.mbpp_eval import score_mbpp_passfail
+                return float(score_mbpp_passfail(assistant_output, tests))
+            except ImportError:
+                pass  # fallback to placeholder
+    
+    # Placeholder for MVP
+    return 0.6
 
 
 def compute_interrupt_cost(meta: Dict, n_questions: int, length_tokens: int, off_topic: int, alpha: float = 0.6) -> float:
