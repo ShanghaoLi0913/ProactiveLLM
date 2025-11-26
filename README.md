@@ -27,52 +27,158 @@ Structure
   - dpo/: preference tuples after reward calc (s, a+, a-)
   - eval/: final test runs, tables, figures
 
-Quickstart
+Quickstart (Two-Step Pipeline)
 
-- Option A (synthetic MVP):
-  - Generate small dataset
-    - python scripts/generate_data.py --mode synthetic --domain coding --n_states 50 --out dpo/prefs_coding.jsonl
-    - python scripts/generate_data.py --mode synthetic --domain planning --n_states 50 --out dpo/prefs_planning.jsonl
-- Option B (use your dataset):
-  - Prepare a JSONL with fields per row: {"query": str, "dialogue_turn": int, "query_clarity": float, "task_complexity": float, "prev_reject": int}
-  - Run
-    - python scripts/generate_data.py --mode dataset --domain coding --dataset_path /abs/path/to/your.jsonl --n_states 200 --out dpo/prefs_from_ds.jsonl
-  - To use OpenAI for assistant generation (e.g., GPT-4o-mini):
-    - export OPENAI_API_KEY=sk-...
-    - add flag: --llm_model gpt-4o-mini
-    - example: python scripts/generate_data.py --mode dataset --domain coding --dataset_path /abs/path/to/your.jsonl --n_states 200 --out dpo/prefs_from_ds.jsonl --llm_model gpt-4o-mini
+The data generation is split into two steps for flexibility: generate trajectories first, then compute rewards separately.
 
-MBPP quickstart (phase-1)
+Step 1: Generate Trajectories
+- Synthetic mode (quick test, no API calls):
+  ```bash
+  python scripts/generate_trajectories.py --mode synthetic --domain coding --n_states 50 --out logs/traj_synth_coding.jsonl
+  ```
+- Dataset mode (with OpenAI):
+  ```bash
+  export OPENAI_API_KEY=sk-...
+  python scripts/generate_trajectories.py --mode dataset --domain coding \
+    --dataset_path data/seeds/mbpp_states.jsonl --n_states 100 \
+    --out logs/traj_mbpp.jsonl --llm_model gpt-4o-mini
+  ```
 
-- Convert MBPP → states JSONL (derived, so saved under seeds/):
-  - python scripts/convert_mbpp_to_states.py  # writes data/seeds/mbpp_states.jsonl
-- Generate preference pairs from MBPP states:
-  - export OPENAI_API_KEY=sk-...
-  - python scripts/generate_data.py --mode dataset --domain coding --dataset_path data/seeds/mbpp_states.jsonl --n_states 100 --out dpo/prefs_mbpp_phase1.jsonl --llm_model gpt-4o-mini
-- Train policy with policy/train_dpo.py
-- Evaluate with eval/evaluate.py and plot with eval/plot_pareto.py
+**Strategy**: Mainline+Branches (default, cost-efficient)
+- Generates 1 mainline trajectory + 2 branches (other actions) per state
+- Mainline action is **auto-selected from persona** (patience/clarity/time_pressure):
+  - Low patience + high time_pressure → LOW
+  - High patience + low clarity → HIGH
+  - Otherwise → MID
+- Manual override: `--mainline_action LOW|MID|HIGH` (optional)
 
-Data generation overview
+Step 2: Compute Rewards
+- Compute rewards and generate preference pairs:
+  ```bash
+  python reward/compute_rewards.py --trajectories logs/traj_synth_coding.jsonl --out dpo/prefs_synth_coding.jsonl
+  python reward/compute_rewards.py --trajectories logs/traj_mbpp.jsonl --out dpo/prefs_mbpp_phase1.jsonl
+  ```
+- **Benefit**: You can recompute rewards multiple times with different weights without regenerating trajectories!
 
-- Purpose of modes
-  - synthetic: quick sanity check to validate the full pipeline (state → 3 behaviors → simulator feedback → reward → preference pairs). No external dataset required.
-  - dataset: use your coding/planning dataset (JSONL) as states to obtain realistic distributions and train usable policies.
+Then:
+- Train policy: `python policy/train_dpo.py`
+- Evaluate: `python eval/evaluate.py`
+- Plot: `python eval/plot_pareto.py`
 
-- Key principle
-  - Never modify `external/` datasets in place. Pipeline transforms: `seeds/ → logs/ → dpo/`.
+MBPP Quickstart (Phase-1)
 
-- Flow (both modes)
-  1) State source
-     - synthetic: scripts/generate_data.py → synth_states(...)
-     - dataset: pass --dataset_path (JSONL with fields {query, dialogue_turn, query_clarity, task_complexity, prev_reject})
-  2) Behavior candidates (LOW/MID/HIGH)
-     - prompts/: coding_*.txt, planning_*.txt
-     - generation: dummy_llm_output(...) or llm/provider.py → chat_complete(..., model=gpt-4o-mini)
-       - enable real LLM via --llm_model gpt-4o-mini
-  3) Simulator feedback
-     - simulator/simulate.py → react(...) returns structured META: answered_clarification, reject_signal, silence, off_topic_flag, satisfaction
-  4) Reward & preference pairs
-     - reward/compute.py: compute_task_score(...) (stub), compute_interrupt_cost(...), total_reward(...)
-     - rank 3 behaviors by reward → pick (chosen_action, rejected_action)
-  5) Output
-     - data/*.jsonl, each line contains: {state, chosen_action, rejected_action, chosen_text, rejected_text, rewards}
+1. Convert MBPP → states JSONL:
+   ```bash
+   python scripts/convert_mbpp_to_states.py  # writes data/seeds/mbpp_states.jsonl
+   ```
+
+2. Generate trajectories:
+   ```bash
+   export OPENAI_API_KEY=sk-...
+   python scripts/generate_trajectories.py --mode dataset --domain coding \
+     --dataset_path data/seeds/mbpp_states.jsonl --n_states 100 \
+     --out logs/traj_mbpp.jsonl --llm_model gpt-4o-mini
+   ```
+
+3. Compute rewards:
+   ```bash
+   python reward/compute_rewards.py --trajectories logs/traj_mbpp.jsonl --out dpo/prefs_mbpp_phase1.jsonl
+   ```
+
+Data Generation Pipeline (Two-Step)
+
+Key Principle
+- Never modify `external/` datasets in place. Pipeline transforms: `seeds/ → logs/ → dpo/`.
+- Two-step design allows recomputing rewards without regenerating expensive LLM calls.
+
+---
+
+### Step 1: Generate Trajectories (`scripts/generate_trajectories.py`)
+
+**Purpose**: Generate assistant outputs and simulator reactions for each (state, action) pair.
+
+**Input**:
+- **Synthetic mode**: No input file needed (generates states internally)
+- **Dataset mode**: States JSONL from `data/seeds/` (e.g., `mbpp_states.jsonl`)
+  - Required fields: `{query, dialogue_turn, query_clarity, task_complexity, prev_reject, mbpp_tests?}`
+
+**Process** (Mainline+Branches strategy):
+- **Phase 1**: Generate 1 mainline trajectory
+  - If `--mainline_action` provided: use it
+  - Otherwise: **auto-select from persona** (patience/clarity/time_pressure)
+    - Low patience + high time_pressure → LOW (direct, no questions)
+    - High patience + low clarity → HIGH (can ask more)
+    - Otherwise → MID (balanced)
+- **Phase 2**: At each decision point, generate 2 branches (the other 2 actions)
+- **Benefit**: Mainline matches persona preferences; branches provide contrastive actions for learning
+
+**Steps**:
+1. **Load states**:
+   - Synthetic: `synth_states()` generates simplified states
+   - Dataset: `load_states_from_dataset()` reads from JSONL
+
+2. **Generate assistant outputs**:
+   - Load templates: `prompts/coding_{low,mid,high}.txt` or `planning_{...}.txt`
+   - Generate `assistant_msg`:
+     - Without `--llm_model`: `dummy_llm_output()` (placeholder for testing)
+     - With `--llm_model`: `llm_output()` → `llm/provider.py` → OpenAI API
+
+3. **Get simulator reaction**:
+   - `simulator/simulate.py` → `react(user_msg, assistant_msg, persona)`
+   - Returns: `{user_reply, meta}` where `meta` contains:
+     - `answered_clarification`, `reject_signal`, `silence`, `off_topic_flag`, `satisfaction`
+
+**Output**: `data/logs/*.jsonl`
+- Each line: `{state, action, action_prompt, assistant_msg, persona, user_reaction, is_mainline?, decision_point?, mainline_action?}`
+- Format: One trajectory per line (JSONL)
+- For mainline+branches strategy: trajectories include `is_mainline` flag and `decision_point` index
+
+**Files Used**:
+- `scripts/generate_trajectories.py` (main script)
+- `prompts/coding_*.txt`, `prompts/planning_*.txt` (behavior templates)
+- `llm/provider.py` (OpenAI API calls, if `--llm_model` provided)
+- `simulator/simulate.py` (user reaction simulation)
+
+---
+
+### Step 2: Compute Rewards (`reward/compute_rewards.py`)
+
+**Purpose**: Compute rewards for each trajectory and generate DPO preference pairs.
+
+**Input**: Trajectories JSONL from `data/logs/` (generated in Step 1)
+
+**Process**:
+1. **Load trajectories** from JSONL file
+
+2. **For each trajectory, compute reward**:
+   - Extract features:
+     - `n_questions = assistant_msg.count("?")`
+     - `length_tokens = len(assistant_msg.split())`
+     - `meta` from `user_reaction`
+   - Compute `R_task`:
+     - `reward/compute.py` → `compute_task_score(state, domain, assistant_output)`
+     - For coding: can use `mbpp_tests` if present (via `reward/mbpp_eval.py`)
+   - Compute `C_interrupt`:
+     - `reward/compute.py` → `compute_interrupt_cost(meta, n_questions, length_tokens, off_topic)`
+     - Formula: `α * (w1*n_questions + w2*reject_signal + w3*long_turn + w4*off_topic)`
+   - Total reward: `R = R_task − C_interrupt`
+
+3. **Build preference pairs**:
+   - Group trajectories by `state_id`
+   - Rank 3 actions (LOW/MID/HIGH) by reward
+   - Pick highest as `chosen_action`, lowest as `rejected_action`
+
+**Output**: `data/dpo/*.jsonl`
+- Each line: `{state, chosen_action, rejected_action, chosen_text, rejected_text, rewards, task_scores, interrupt_costs}`
+- Format: One preference pair per line (JSONL)
+
+**Files Used**:
+- `reward/compute_rewards.py` (main script)
+- `reward/compute.py` (reward computation functions)
+- `reward/mbpp_eval.py` (optional: MBPP test execution for `R_task`)
+
+**Benefits of Two-Step Design**:
+- ✅ Recompute rewards without regenerating trajectories (adjust weights, fix bugs)
+- ✅ Audit intermediate trajectories for debugging
+- ✅ Reuse expensive LLM calls when tuning reward parameters
+- ✅ Separate concerns: generation vs. scoring
