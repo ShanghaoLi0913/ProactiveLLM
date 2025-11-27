@@ -152,42 +152,59 @@ Each trajectory (one per line in JSONL):
 
 ---
 
-## MBPP Conversion (`convert_mbpp_to_states.py`)
+## Dataset Conversion Scripts
 
-### Purpose
+### MBPP Conversion (`convert_mbpp_to_states.py`)
 
-Convert raw MBPP dataset to our state format for trajectory generation.
+Convert raw MBPP dataset to our state format.
 
-### Usage
-
+**Usage**:
 ```bash
 python scripts/convert_mbpp_to_states.py
 # Output: data/seeds/mbpp_states.jsonl
 ```
 
-### Process
+**Process**: Loads from Hugging Face → extracts `{text, test_list, test_imports}` → converts to state format
 
-1. Load MBPP dataset from Hugging Face (`datasets` library)
-2. Extract fields: `{text, test_list, test_imports}`
-3. Convert to state format:
-   - `query`: "Write a Python function: {text}"
-   - `mbpp_tests`: Combined `test_imports` + `test_list`
-   - Default values: `query_clarity=0.6`, `task_complexity=0.6`, `prev_reject=0`
-4. Write to `data/seeds/mbpp_states.jsonl`
+---
 
-### Output Format
+### ConvCodeWorld Conversion (`convert_convcodeworld_to_states.py`)
 
-Each line:
+Convert ConvCodeWorld/convcodebench dataset to our state format.
+
+**Dataset**: https://huggingface.co/datasets/ConvCodeWorld/convcodebench
+
+**Usage**:
+```bash
+# First time: inspect dataset structure
+python scripts/convert_convcodeworld_to_states.py --inspect
+
+# Convert dataset
+python scripts/convert_convcodeworld_to_states.py \
+  --source hf:ConvCodeWorld/convcodebench --split train \
+  --limit 200 --out data/seeds/convcodeworld_states.jsonl
+```
+
+**Process**:
+1. Load from Hugging Face (nested structure with multiple configs: CF_EF_UNIT_SNF, CF_EF_FULL_SNF, etc.)
+2. Extract tasks from nested structure (`{"ITER=1": {"task_id": [...], ...}}`)
+3. Convert to state format (adjust field mappings based on actual structure)
+4. Write to `data/seeds/convcodeworld_states.jsonl`
+
+**Note**: Run with `--inspect` first to see actual data structure, then adjust `to_state()` function if needed.
+
+**Output Format**:
 ```json
 {
-  "id": "mbpp-0",
+  "id": "convcodeworld-0",
   "domain": "coding",
-  "query": "Write a Python function: ...",
+  "query": "...",
   "dialogue_turn": 1,
   "query_clarity": 0.6,
   "task_complexity": 0.6,
   "prev_reject": 0,
-  "mbpp_tests": "import ...\nassert ..."
+  "convcodeworld_tests": "...",
+  "convcodeworld_task_id": "BigCodeBench/0"
 }
 ```
 
