@@ -65,8 +65,9 @@ Then:
 - Evaluate: `python eval/evaluate.py`
 - Plot: `python eval/plot_pareto.py`
 
-MBPP Quickstart (Phase-1)
+Dataset Quickstart
 
+**MBPP**:
 1. Convert MBPP → states JSONL:
    ```bash
    python scripts/convert_mbpp_to_states.py  # writes data/seeds/mbpp_states.jsonl
@@ -83,6 +84,32 @@ MBPP Quickstart (Phase-1)
 3. Compute rewards:
    ```bash
    python reward/compute_rewards.py --trajectories logs/traj_mbpp.jsonl --out dpo/prefs_mbpp_phase1.jsonl
+   ```
+
+**ConvCodeWorld** (https://huggingface.co/datasets/ConvCodeWorld/convcodebench):
+1. Inspect dataset structure (first time):
+   ```bash
+   python scripts/convert_convcodeworld_to_states.py --inspect
+   ```
+
+2. Convert ConvCodeWorld → states JSONL:
+   ```bash
+   python scripts/convert_convcodeworld_to_states.py \
+     --source hf:ConvCodeWorld/convcodebench --split train \
+     --limit 200 --out data/seeds/convcodeworld_states.jsonl
+   ```
+
+3. Generate trajectories:
+   ```bash
+   export OPENAI_API_KEY=sk-...
+   python scripts/generate_trajectories.py --mode dataset --domain coding \
+     --dataset_path data/seeds/convcodeworld_states.jsonl --n_states 100 \
+     --out logs/traj_convcodeworld.jsonl --llm_model gpt-4o-mini
+   ```
+
+4. Compute rewards:
+   ```bash
+   python reward/compute_rewards.py --trajectories logs/traj_convcodeworld.jsonl --out dpo/prefs_convcodeworld_phase1.jsonl
    ```
 
 Data Generation Pipeline (Two-Step)
