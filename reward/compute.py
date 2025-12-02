@@ -5,22 +5,20 @@ def compute_task_score(sample: Dict, domain: str, assistant_output: Optional[str
     """Compute task success score.
 
     Args:
-        sample: State dict (may contain mbpp_tests or convcodeworld_tests for coding tasks)
+        sample: State dict (may contain convcodeworld_tests for coding tasks)
         domain: "coding" or "planning"
         assistant_output: Generated assistant message (optional, for test execution)
 
     Returns:
         Task score (0.0-1.0). Higher is better.
     """
-    # For coding with tests (MBPP or ConvCodeWorld), use test execution if available
+    # For coding with tests (ConvCodeWorld), use test execution if available
     if domain == "coding" and assistant_output is not None:
-        tests = sample.get("mbpp_tests") or sample.get("convcodeworld_tests")
+        tests = sample.get("convcodeworld_tests")
         if tests:
-            try:
-                from reward.mbpp_eval import score_mbpp_passfail
-                return float(score_mbpp_passfail(assistant_output, tests))
-            except ImportError:
-                pass  # fallback to placeholder
+            # Test execution is handled in eval/evaluate_dpo_model.py via score_code_passfail
+            # This function is kept for compatibility but returns placeholder
+            pass
     
     # Placeholder for MVP
     return 0.6

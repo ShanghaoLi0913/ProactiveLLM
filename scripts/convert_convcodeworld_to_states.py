@@ -97,7 +97,8 @@ def to_state(task_rec: Dict[str, Any], i: int, dataset_name: str = "convcodeworl
         "query": query.strip(),
         "dialogue_turn": 1,
         "query_clarity": 0.6,  # TODO: compute from query if possible
-        "task_complexity": 0.6,  # TODO: compute from task if possible
+        "task_uncertainty": 0.6,  # TODO: compute from task if possible
+        "time_pressure": "low",  # TODO: compute from context if possible
         "prev_reject": 0,
         "convcodeworld_tests": tests,  # compilation/execution feedback
         "convcodeworld_task_id": task_id,  # preserve original task ID

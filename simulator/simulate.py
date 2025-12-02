@@ -8,15 +8,13 @@ class Persona:
     domain: str  # "coding" | "planning"
     expertise: str  # "low" | "mid" | "high"
     patience: float  # 0..1
-    clarity: float  # 0..1
-    time_pressure: str  # "low" | "high"
     style: str  # "direct" | "polite" | "concise" | "verbose"
 
 
 PERSONAS = [
-    Persona("Impatient-Novice", "coding", "low", 0.25, 0.5, "high", "direct"),
-    Persona("Neutral-Intermediate", "coding", "mid", 0.6, 0.6, "low", "polite"),
-    Persona("Busy-Manager", "planning", "high", 0.35, 0.7, "high", "direct"),
+    Persona("Impatient-Novice", "coding", "low", 0.25, "direct"),
+    Persona("Neutral-Intermediate", "coding", "mid", 0.6, "polite"),
+    Persona("Busy-Manager", "planning", "high", 0.35, "direct"),
 ]
 
 
@@ -30,7 +28,7 @@ def react(user_msg: str, assistant_msg: str, persona: Persona) -> Dict[str, Any]
     asked_count = assistant_msg.lower().count("?")
     length_tokens = max(1, len(assistant_msg.split()))
 
-    answered = 1 if (asked_count > 0 and persona.clarity * persona.patience >= 0.35) else 0
+    answered = 1 if (asked_count > 0 and persona.patience >= 0.35) else 0
 
     reject_signal = 1 if (asked_count >= 2 and persona.patience < 0.4) else 0
     silence = 1 if (length_tokens > 200 and persona.patience < 0.3) else 0
@@ -40,13 +38,13 @@ def react(user_msg: str, assistant_msg: str, persona: Persona) -> Dict[str, Any]
     satisfaction = max(0.0, min(1.0, 0.6 + 0.1 * answered - 0.3 * reject_signal - 0.1 * (length_tokens > 200)))
 
     if reject_signal:
-        user_reply = "别问了，直接给方案。" if persona.domain == "planning" else "别问了，直接给代码。"
+        user_reply = "Stop asking, just give me the plan." if persona.domain == "planning" else "Stop asking, just give me the code."
     elif answered:
-        user_reply = "好的。" if persona.style != "direct" else "好。"
+        user_reply = "OK." if persona.style != "direct" else "Ok."
     elif silence:
         user_reply = "..."
     else:
-        user_reply = "继续。"
+        user_reply = "Continue."
 
     return {
         "user_reply": user_reply,
@@ -58,5 +56,3 @@ def react(user_msg: str, assistant_msg: str, persona: Persona) -> Dict[str, Any]
             "satisfaction": float(satisfaction),
         },
     }
-
-

@@ -1,21 +1,96 @@
+"""
+Scheme A: Separated Architecture Inference
+
+This module implements the separated architecture where:
+1. Policy model predicts action (LOW/MID/HIGH) only
+2. Code generation is handled by a separate model (not affected by DPO)
+"""
 from pathlib import Path
+from typing import Optional
+import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
+from peft import PeftModel
+
+# Import for code generation (can use base model or separate code model)
+import sys
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 
-def select_action(state_text: str, model_dir: str) -> str:
-    tokenizer = AutoTokenizer.from_pretrained(model_dir)
-    model = AutoModelForCausalLM.from_pretrained(model_dir)
+def select_action(state_text: str, policy_model_dir: str, base_model: Optional[str] = None) -> str:
+    """
+    Use policy model to predict action (LOW/MID/HIGH) based on state.
+    
+    Args:
+        state_text: Rendered state text
+        policy_model_dir: Directory containing trained policy model (LoRA adapter)
+        base_model: Base model name (if None, will try to load from policy_model_dir)
+    
+    Returns:
+        Action token: "LOW", "MID", or "HIGH"
+    """
+    # Load tokenizer
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(policy_model_dir, use_fast=True)
+    except:
+        if base_model:
+            tokenizer = AutoTokenizer.from_pretrained(base_model, use_fast=True)
+            # Add special tokens
+            special_tokens = {"additional_special_tokens": ["LOW", "MID", "HIGH"]}
+            tokenizer.add_special_tokens(special_tokens)
+        else:
+            raise ValueError("Cannot load tokenizer")
+    
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    
+    # Load base model
+    if base_model:
+        base_model_obj = AutoModelForCausalLM.from_pretrained(
+            base_model,
+            torch_dtype=torch.bfloat16,
+            device_map="auto",
+            low_cpu_mem_usage=True,
+        )
+        # Resize embeddings if needed
+        if len(tokenizer) != base_model_obj.get_input_embeddings().num_embeddings:
+            base_model_obj.resize_token_embeddings(len(tokenizer))
+        
+        # Load LoRA adapter
+        try:
+            model = PeftModel.from_pretrained(base_model_obj, policy_model_dir)
+        except:
+            model = base_model_obj
+    else:
+        model = AutoModelForCausalLM.from_pretrained(policy_model_dir)
+    
+    model.eval()
+    
+    # Generate action token
     inputs = tokenizer(state_text, return_tensors="pt")
-    outputs = model.generate(**inputs, max_new_tokens=3)
+    inputs = {k: v.to(model.device) for k, v in inputs.items()}
+    
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=3,
+            do_sample=False,  # Deterministic for action prediction
+            pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
+        )
+    
     text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-    # naive: extract last token in {LOW,MID,HIGH}
+    
+    # Extract action token
     for token in ["LOW", "MID", "HIGH"]:
         if token in text:
             return token
-    return "MID"
+    
+    return "MID"  # Default fallback
 
 
-def execute_action(action: str, task_prompt: str, domain: str) -> str:
+def get_template(action: str, domain: str) -> str:
+    """Get template for the given action and domain."""
     base = Path(__file__).resolve().parent.parent / "prompts"
     if domain == "coding":
         fname = {
@@ -29,8 +104,74 @@ def execute_action(action: str, task_prompt: str, domain: str) -> str:
             "MID": "planning_mid.txt",
             "HIGH": "planning_high.txt",
         }[action]
-    template = (base / fname).read_text(encoding="utf-8").strip()
-    # For MVP we just return the template + task prompt; plug real LLM later
-    return f"{template}\n\n[Task]\n{task_prompt}"
+    return (base / fname).read_text(encoding="utf-8").strip()
+
+
+def generate_code(
+    task_prompt: str,
+    template: str,
+    code_model_name: Optional[str] = None,
+    use_openai: bool = False,
+    openai_model: str = "gpt-4o-mini"
+) -> str:
+    """
+    Generate code using a separate code generation model.
+    
+    This is NOT affected by DPO training, ensuring clean code generation.
+    
+    Args:
+        task_prompt: The task description
+        template: The action template (from get_template)
+        code_model_name: Name of code generation model (if None, uses template only)
+        use_openai: Whether to use OpenAI API for code generation
+        openai_model: OpenAI model name if use_openai=True
+    
+    Returns:
+        Generated code response
+    """
+    if use_openai:
+        # Use OpenAI API for code generation
+        from llm.provider import chat_complete
+        system = template
+        user = f"[Task]\n{task_prompt}"
+        return chat_complete(system, user, model=openai_model, max_tokens=400)
+    elif code_model_name:
+        # Use a separate code model (e.g., CodeLlama)
+        # TODO: Implement code model loading and generation
+        # For now, return template + task
+        return f"{template}\n\n[Task]\n{task_prompt}"
+    else:
+        # Fallback: just return template + task
+        # In production, you should use a proper code generation model
+        return f"{template}\n\n[Task]\n{task_prompt}"
+
+
+def execute_action(
+    action: str,
+    task_prompt: str,
+    domain: str,
+    code_model_name: Optional[str] = None,
+    use_openai: bool = False
+) -> str:
+    """
+    Execute action using separated architecture.
+    
+    This function:
+    1. Gets template based on action
+    2. Generates code using separate code generation model
+    3. Returns clean code (not affected by DPO training)
+    
+    Args:
+        action: Action token (LOW/MID/HIGH)
+        task_prompt: The task description
+        domain: Domain ("coding" or "planning")
+        code_model_name: Code generation model name
+        use_openai: Whether to use OpenAI API
+    
+    Returns:
+        Generated code response
+    """
+    template = get_template(action, domain)
+    return generate_code(task_prompt, template, code_model_name, use_openai)
 
 

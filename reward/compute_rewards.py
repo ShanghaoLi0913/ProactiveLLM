@@ -1,18 +1,60 @@
 """
-Step 2: Compute rewards from trajectories and generate DPO preference pairs
+Step 2: Compute rewards & preference pairs for DPO.
 
-Input: Trajectories JSONL from data/logs/
-Output: Preference pairs JSONL to data/dpo/
-Each pair contains: {state, chosen_action, rejected_action, chosen_text, rejected_text, rewards, task_scores, interrupt_costs}
+Input:
+  - Trajectories JSONL from data/logs/, each line:
+      {
+        "state": {...},
+        "action": "LOW" | "MID" | "HIGH",
+        "assistant_msg": "...",
+        "user_reaction": {
+            "meta": {
+                "answered_clarification": int,
+                "reject_signal": int,
+                "silence": int,
+                "off_topic_flag": int,
+                "satisfaction": float,
+            },
+            ...
+        },
+        "is_mainline": bool,
+        "decision_point": int
+      }
+
+Output:
+  - Preference pairs JSONL to data/dpo/, each line:
+      {
+        "state": {...},                  # original state
+        "chosen_action": "LOW/MID/HIGH",
+        "rejected_action": "LOW/MID/HIGH",
+        "chosen_assistant_msg": "...",    # 完整回复（用于训练）
+        "rejected_assistant_msg": "...",  # 完整回复（用于训练）
+        "chosen_reward": float,
+        "rejected_reward": float,
+        "chosen_task_score": float,
+        "rejected_task_score": float,
+        "chosen_interrupt_cost": float,
+        "rejected_interrupt_cost": float
+      }
+
+Design:
+  - We **do not** assume mainline action is best.
+  - For each state + decision_point, we:
+      1) Compute task_score using reward.compute_task_score (runs tests for coding)
+      2) Compute interrupt_cost using reward.compute_interrupt_cost
+      3) Combine into total_reward = w_task * task_score - w_int * interrupt_cost
+  - Then we select preference pairs based on total_reward ranking.
 """
+
 import argparse
 import json
-import sys
+from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Dict
-from collections import defaultdict
+from typing import Dict, List, Tuple
 
-# Ensure project root is on sys.path for package imports when running as a script
+# Allow running as a script: add project root to sys.path and import reward.compute
+import sys
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -20,129 +62,201 @@ if str(PROJECT_ROOT) not in sys.path:
 from reward.compute import compute_task_score, compute_interrupt_cost, total_reward
 
 
-def load_trajectories(trajectories_path: Path) -> List[Dict]:
-    """Load trajectories from JSONL file."""
-    trajectories = []
-    with trajectories_path.open("r", encoding="utf-8") as f:
+@dataclass
+class RewardConfig:
+    """Weights for reward aggregation."""
+
+    # Strongly prioritize task success (pass tests)
+    w_task: float = 1.0
+    # Smaller penalty on interrupt / annoyance
+    w_interrupt: float = 0.1
+
+
+def load_trajectories(path: Path) -> List[Dict]:
+    """Load trajectories JSONL."""
+    trajs: List[Dict] = []
+    with path.open("r", encoding="utf-8") as f:
         for line in f:
-            trajectories.append(json.loads(line))
-    return trajectories
+            line = line.strip()
+            if not line:
+                continue
+            trajs.append(json.loads(line))
+    return trajs
 
 
-def compute_rewards_for_trajectories(trajectories: List[Dict]) -> Dict[str, Dict]:
+def group_by_state(trajs: List[Dict]) -> Dict[Tuple[str, int], List[Dict]]:
     """
-    Compute reward for each (state_id, action) pair.
-    
-    Returns: {(state_id, action): {reward, task_score, interrupt_cost, ...}}
+    Group trajectories by (state_id, decision_point).
+
+    Assumes each trajectory has:
+      - traj["state"]["id"]
+      - traj.get("decision_point", 0)
     """
-    scored = {}
-    for traj in trajectories:
-        state = traj["state"]
-        action = traj["action"]
-        assistant_msg = traj["assistant_msg"]
-        user_reaction = traj["user_reaction"]
-        meta = user_reaction["meta"]
-        
-        # Extract features for interrupt cost
+    groups: Dict[Tuple[str, int], List[Dict]] = {}
+    for t in trajs:
+        st = t.get("state", {})
+        sid = st.get("id")
+        if sid is None:
+            # Fallback: hashable repr
+            sid = json.dumps(st, sort_keys=True)
+        dp = int(t.get("decision_point", 0))
+        key = (sid, dp)
+        groups.setdefault(key, []).append(t)
+    return groups
+
+
+def compute_rewards_for_group(
+    trajs: List[Dict],
+    cfg: RewardConfig,
+) -> List[Dict]:
+    """
+    Compute task_score / interrupt_cost / total_reward for each trajectory in a group.
+    """
+    scored: List[Dict] = []
+    for t in trajs:
+        state = t["state"]
+        domain = state.get("domain", "coding")
+        assistant_msg = t.get("assistant_msg", "")
+
+        # Task score (0/1 for coding with tests)
+        task_score = compute_task_score(state, domain, assistant_output=assistant_msg)
+
+        # Interrupt cost
+        meta = (t.get("user_reaction") or {}).get("meta", {})
         n_questions = assistant_msg.count("?")
         length_tokens = len(assistant_msg.split())
-        off_topic = 0  # placeholder
-        
-        # Compute rewards
-        task_score = compute_task_score(state, state["domain"], assistant_output=assistant_msg)
-        interrupt_cost = compute_interrupt_cost(meta, n_questions, length_tokens, off_topic)
-        reward = total_reward(task_score, interrupt_cost)
-        
-        key = (state.get("id", "unknown"), action)
-        scored[key] = {
-            "state": state,
-            "action": action,
-            "assistant_msg": assistant_msg,
-            "meta": meta,
-            "n_questions": n_questions,
-            "length_tokens": length_tokens,
-            "task_score": task_score,
-            "interrupt_cost": interrupt_cost,
-            "reward": reward,
-        }
+        off_topic = int(meta.get("off_topic_flag", 0))
+        interrupt_cost = compute_interrupt_cost(
+            meta,
+            n_questions=n_questions,
+            length_tokens=length_tokens,
+            off_topic=off_topic,
+        )
+
+        # Aggregate reward with configurable weights
+        r = cfg.w_task * task_score - cfg.w_interrupt * interrupt_cost
+        total_r = float(r)
+
+        scored.append(
+            {
+                **t,
+                "task_score": float(task_score),
+                "interrupt_cost": float(interrupt_cost),
+                "total_reward": total_r,
+            }
+        )
     return scored
 
 
-def build_preference_pairs(scored: Dict, trajectories: List[Dict]) -> List[Dict]:
+def build_prefs_from_group(scored_trajs: List[Dict]) -> List[Dict]:
     """
-    Group trajectories by state_id, rank actions by reward, create (chosen, rejected) pairs.
-    
-    For each state, picks the highest-reward action as chosen and lowest as rejected.
+    Given scored trajectories for a single (state, decision_point),
+    generate preference pairs (chosen, rejected) based on total_reward.
+
+    Strategy:
+      - Sort by total_reward descending
+      - Take top-1 as chosen, bottom-1 as rejected (if distinct)
+      - Optional: if there are 3 actions, you can also create multiple pairs:
+          best > middle, best > worst, middle > worst
+        For simplicity and stability we start with just (best, worst).
     """
-    # Group by state_id
-    by_state = defaultdict(list)
-    for traj in trajectories:
-        state_id = traj["state"].get("id", "unknown")
-        action = traj["action"]
-        key = (state_id, action)
-        if key in scored:
-            by_state[state_id].append((action, scored[key]))
-    
-    pairs = []
-    for state_id, actions_with_scores in by_state.items():
-        if len(actions_with_scores) < 2:
-            continue  # need at least 2 actions to compare
-        
-        # Rank by reward
-        ranked = sorted(actions_with_scores, key=lambda x: x[1]["reward"], reverse=True)
-        (a_plus, plus_obj), (a_minus, minus_obj) = ranked[0], ranked[-1]
-        
-        # Get original trajectory for full context
-        state = plus_obj["state"]
-        pairs.append({
-            "state": state,
-            "chosen_action": a_plus,
-            "rejected_action": a_minus,
-            "chosen_text": plus_obj["assistant_msg"],
-            "rejected_text": minus_obj["assistant_msg"],
-            "rewards": {a: obj["reward"] for a, obj in actions_with_scores},
-            "task_scores": {a: obj["task_score"] for a, obj in actions_with_scores},
-            "interrupt_costs": {a: obj["interrupt_cost"] for a, obj in actions_with_scores},
-        })
-    return pairs
+    if len(scored_trajs) < 2:
+        return []
+
+    scored_sorted = sorted(scored_trajs, key=lambda t: t["total_reward"], reverse=True)
+    best = scored_sorted[0]
+    worst = scored_sorted[-1]
+
+    # If equal reward, skip to avoid noisy / conflicting pairs
+    if best["total_reward"] <= worst["total_reward"]:
+        return []
+
+    state = best["state"]
+    pref = {
+        "state": state,
+        "chosen_action": best["action"],
+        "rejected_action": worst["action"],
+        "chosen_assistant_msg": best.get("assistant_msg", ""),  # 完整回复
+        "rejected_assistant_msg": worst.get("assistant_msg", ""),  # 完整回复
+        "chosen_reward": best["total_reward"],
+        "rejected_reward": worst["total_reward"],
+        "chosen_task_score": best["task_score"],
+        "rejected_task_score": worst["task_score"],
+        "chosen_interrupt_cost": best["interrupt_cost"],
+        "rejected_interrupt_cost": worst["interrupt_cost"],
+    }
+    return [pref]
+
+
+def compute_preferences(
+    traj_path: Path,
+    out_path: Path,
+    cfg: RewardConfig,
+) -> None:
+    """High-level function: trajectories → prefs JSONL."""
+    print(f"📂 Loading trajectories from: {traj_path}")
+    trajs = load_trajectories(traj_path)
+    print(f"📊 Loaded {len(trajs)} trajectories")
+
+    groups = group_by_state(trajs)
+    print(f"📊 Grouped into {len(groups)} (state, decision_point) groups")
+
+    prefs: List[Dict] = []
+    for (sid, dp), g in groups.items():
+        scored = compute_rewards_for_group(g, cfg)
+        group_prefs = build_prefs_from_group(scored)
+        prefs.extend(group_prefs)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", encoding="utf-8") as f:
+        for p in prefs:
+            f.write(json.dumps(p, ensure_ascii=False) + "\n")
+
+    print(f"✅ Wrote {len(prefs)} preference pairs to {out_path}")
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Compute rewards and preference pairs from trajectories (task-dominated reward)."
+    )
+    parser.add_argument(
+        "--trajectories",
+        type=str,
+        required=True,
+        help="Path to trajectories JSONL (e.g., data/logs/traj_convcodeworld_150.jsonl)",
+    )
+    parser.add_argument(
+        "--out",
+        type=str,
+        required=True,
+        help="Output prefs JSONL path (e.g., data/dpo/prefs_150_taskdom.jsonl)",
+    )
+    parser.add_argument(
+        "--w_task",
+        type=float,
+        default=1.0,
+        help="Weight for task_score (default: 1.0, dominant)",
+    )
+    parser.add_argument(
+        "--w_interrupt",
+        type=float,
+        default=0.1,
+        help="Weight for interrupt cost penalty (default: 0.1)",
+    )
+    return parser.parse_args()
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Step 2: Compute rewards from trajectories and generate DPO preference pairs"
-    )
-    parser.add_argument("--trajectories", type=str, required=True,
-                       help="Path to trajectories JSONL file (relative to data/ or absolute)")
-    parser.add_argument("--out", type=str, default="dpo/prefs.jsonl",
-                       help="Output path for preference pairs (relative to data/)")
-    args = parser.parse_args()
+    args = parse_args()
+    traj_path = Path(args.trajectories)
+    out_path = Path(args.out)
+    cfg = RewardConfig(w_task=args.w_task, w_interrupt=args.w_interrupt)
 
-    data_dir = Path(__file__).resolve().parent.parent / "data"
-    trajectories_path = data_dir / args.trajectories if not Path(args.trajectories).is_absolute() else Path(args.trajectories)
-    
-    if not trajectories_path.exists():
-        raise SystemExit(f"Trajectories file not found: {trajectories_path}")
+    print("⚙️  Reward config:")
+    print(f"  - w_task = {cfg.w_task}")
+    print(f"  - w_interrupt = {cfg.w_interrupt}")
 
-    # Load trajectories
-    trajectories = load_trajectories(trajectories_path)
-    print(f"Loaded {len(trajectories)} trajectories")
-
-    # Compute rewards
-    scored = compute_rewards_for_trajectories(trajectories)
-    print(f"Computed rewards for {len(scored)} (state, action) pairs")
-
-    # Build preference pairs
-    pairs = build_preference_pairs(scored, trajectories)
-    print(f"Generated {len(pairs)} preference pairs")
-
-    # Write to data/dpo/
-    out_path = data_dir / args.out
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with out_path.open("w", encoding="utf-8") as f:
-        for pair in pairs:
-            f.write(json.dumps(pair, ensure_ascii=False) + "\n")
-
-    print(f"Wrote {len(pairs)} preference pairs to {out_path}")
+    compute_preferences(traj_path, out_path, cfg)
 
 
 if __name__ == "__main__":

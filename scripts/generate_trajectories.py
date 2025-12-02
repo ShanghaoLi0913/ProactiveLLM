@@ -55,7 +55,8 @@ def synth_states(domain: str, n: int) -> List[Dict]:
                 "query": "帮我写个 Python 爬虫" if domain == "coding" else "帮我规划今天的待办",
                 "dialogue_turn": 1,
                 "query_clarity": 0.6,
-                "task_complexity": 0.6,
+                "task_uncertainty": 0.6,
+                "time_pressure": "low",  # default to low
                 "prev_reject": 0,
             }
         )
@@ -77,9 +78,10 @@ def load_states_from_dataset(dataset_path: Path, domain: str, limit: Optional[in
                     "query": row["query"],
                     "dialogue_turn": int(row.get("dialogue_turn", 1)),
                     "query_clarity": float(row.get("query_clarity", 0.5)),
-                    "task_complexity": float(row.get("task_complexity", 0.5)),
+                    "task_uncertainty": float(row.get("task_uncertainty", 0.5)),
+                    "time_pressure": row.get("time_pressure", "low"),  # default to low
                     "prev_reject": int(row.get("prev_reject", 0)),
-                    "mbpp_tests": row.get("mbpp_tests"),  # preserve if present
+                    "convcodeworld_tests": row.get("convcodeworld_tests"),  # preserve if present
                 }
             )
     return states
@@ -103,18 +105,21 @@ def llm_output(state: Dict, action_prompt: str, model: str) -> str:
     return chat_complete(system, user, model=model, max_tokens=400)
 
 
-def select_mainline_action_from_persona(persona) -> str:
+def select_mainline_action_from_persona(persona, state: Optional[Dict] = None) -> str:
     """
-    Select mainline action based on persona characteristics.
+    Select mainline action based on persona characteristics and state.
     
     Logic:
-    - Low patience + high time_pressure → LOW (direct, no questions)
-    - High patience + low clarity → HIGH (can ask more)
+    - Low patience + high time_pressure (from state) → LOW (direct, no questions)
+    - High patience → HIGH (can ask more)
     - Otherwise → MID (balanced)
     """
-    if persona.patience < 0.4 and persona.time_pressure == "high":
+    # Get time_pressure from state if available, otherwise default to "low"
+    time_pressure = state.get("time_pressure", "low") if state else "low"
+    
+    if persona.patience < 0.4 and time_pressure == "high":
         return "LOW"
-    elif persona.patience > 0.7 and persona.clarity < 0.5:
+    elif persona.patience > 0.7:
         return "HIGH"
     else:
         return "MID"
@@ -140,8 +145,6 @@ def generate_branch_at_state(state: Dict, action: str, action_prompt: str, domai
             "domain": persona.domain,
             "expertise": persona.expertise,
             "patience": persona.patience,
-            "clarity": persona.clarity,
-            "time_pressure": persona.time_pressure,
             "style": persona.style,
         },
         "user_reaction": reaction,
@@ -157,7 +160,7 @@ def generate_trajectories(states: List[Dict], domain: str,
     
     Phase 1: Generate 1 mainline trajectory
       - If mainline_action provided: use it
-      - Otherwise: auto-select based on persona (patience, clarity, time_pressure)
+      - Otherwise: auto-select based on persona (patience) and state (time_pressure)
     Phase 2: At each decision point, generate 2 branches (the other 2 actions)
     
     For each state: 1 mainline + 2 branches = 3 trajectories total.
@@ -167,15 +170,15 @@ def generate_trajectories(states: List[Dict], domain: str,
     trajectories = []
     persona = PERSONAS[persona_idx % len(PERSONAS)]
     
-    # Determine mainline action (once for all states, since they share the same persona)
-    if mainline_action is None:
-        # Auto-select based on persona
-        mainline_action = select_mainline_action_from_persona(persona)
-        mainline_selected_by = "persona"
-    else:
-        mainline_selected_by = "manual"
+    # Determine mainline action (can vary per state if time_pressure differs)
+    mainline_selected_by = "manual" if mainline_action else None
     
     for st in states:
+        # Determine mainline action for this state if not manually specified
+        if mainline_action is None:
+            mainline_action = select_mainline_action_from_persona(persona, st)
+            if mainline_selected_by is None:
+                mainline_selected_by = "persona+state"
         # Phase 1: Generate mainline trajectory
         mainline_prompt = prompts[mainline_action]
         mainline_traj = generate_branch_at_state(st, mainline_action, mainline_prompt, domain, llm_model, persona_idx)
@@ -190,13 +193,13 @@ def generate_trajectories(states: List[Dict], domain: str,
         # Generate all 3 actions (LOW/MID/HIGH) as branches
         for action, tpl in prompts.items():
             # Skip mainline action (already generated above)
-            if action == mainline_action:
+            if action == state_mainline_action:
                 continue
             
             branch_traj = generate_branch_at_state(st, action, tpl, domain, llm_model, persona_idx)
             branch_traj["is_mainline"] = False
             branch_traj["decision_point"] = 0  # same decision point as mainline
-            branch_traj["mainline_action"] = mainline_action  # reference to mainline
+            branch_traj["mainline_action"] = state_mainline_action  # reference to mainline
             trajectories.append(branch_traj)
     
     return trajectories
@@ -218,7 +221,7 @@ def main():
     parser.add_argument("--llm_model", type=str, default="",
                        help="OpenAI model name (e.g., gpt-4o-mini). If empty, uses dummy output.")
     parser.add_argument("--mainline_action", choices=["LOW", "MID", "HIGH"], default=None,
-                       help="Action to use for mainline trajectory. If not provided, auto-selects based on persona (patience/clarity/time_pressure).")
+                       help="Action to use for mainline trajectory. If not provided, auto-selects based on persona (patience) and state (time_pressure).")
     args = parser.parse_args()
 
     out_dir = Path(__file__).resolve().parent.parent / "data"
