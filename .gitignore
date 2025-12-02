@@ -41,3 +41,5 @@ Thumbs.db
 # .cache/
 # models/
 data/external/ConvCodeWorld/*
+scripts/run_experiment.sh
+scripts/activate_env.sh
