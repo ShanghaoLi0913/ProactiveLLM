@@ -40,3 +40,4 @@ Thumbs.db
 # Model cache (optional, uncomment if needed)
 # .cache/
 # models/
+data/external/ConvCodeWorld/*
