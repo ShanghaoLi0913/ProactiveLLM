@@ -259,12 +259,16 @@ def evaluate_model(
     task_success_count = 0
     total_samples = 0
     
-    # Check if OpenAI API is available for code generation
+    # Code generation strategy:
+    # 1. If OpenAI API is available, use it (higher quality)
+    # 2. Otherwise, use base Llama model (no API needed)
     use_openai = os.environ.get("OPENAI_API_KEY") is not None
     if use_openai:
         print("✅ 使用OpenAI API进行代码生成")
+        code_model_name = None
     else:
-        print("⚠️  OpenAI API不可用，使用template-based生成（代码质量可能较低）")
+        print("✅ 使用Base Llama模型进行代码生成（不需要API）")
+        code_model_name = base_model  # Use base Llama model for code generation
     
     for i, pref in enumerate(prefs):
         state = pref["state"]
@@ -282,7 +286,7 @@ def evaluate_model(
             predicted_action,
             task_prompt,
             domain,
-            code_model_name=None,  # Can specify a code model here
+            code_model_name=code_model_name,  # Use base Llama model if no API
             use_openai=use_openai
         )
         
@@ -292,9 +296,20 @@ def evaluate_model(
             code = extract_code_from_text(response)
             # 调试信息：记录代码提取情况
             if not code and (i < 3 or (i + 1) % 20 == 0):
-                print(f"\n⚠️  样本 {i+1}: 代码提取失败")
-                print(f"   响应长度: {len(response)}")
-                print(f"   响应预览: {response[:500]}...")
+                # 根据predicted_action判断：HIGH action是问问题，这是正常的
+                if predicted_action == "HIGH":
+                    print(f"\n📋 样本 {i+1}: 预测HIGH action（问问题）")
+                    print(f"   响应类型: 澄清问题（正常行为）")
+                    print(f"   响应预览: {response[:300]}...")
+                elif predicted_action == "MID":
+                    print(f"\n📋 样本 {i+1}: 预测MID action（问一个问题）")
+                    print(f"   响应类型: 澄清问题（正常行为）")
+                    print(f"   响应预览: {response[:300]}...")
+                else:
+                    # LOW action应该生成代码，如果没有代码才是问题
+                    print(f"\n⚠️  样本 {i+1}: LOW action但未提取到代码")
+                    print(f"   响应长度: {len(response)}")
+                    print(f"   响应预览: {response[:500]}...")
             elif code and i < 3:
                 # 对前3个样本，显示完整响应以便调试
                 print(f"\n📝 样本 {i+1} 完整响应:")
@@ -326,9 +341,16 @@ def evaluate_model(
         elif state["domain"] == "coding" and not code:
             # 记录没有提取到代码的情况
             if i < 3 or (i + 1) % 20 == 0:
-                print(f"\n⚠️  样本 {i+1}: 没有提取到代码")
-                print(f"   响应长度: {len(response)}")
-                print(f"   响应预览: {response[:300]}...")
+                # 根据predicted_action判断：HIGH/MID action是问问题，这是正常的
+                if predicted_action in ["HIGH", "MID"]:
+                    print(f"\n📋 样本 {i+1}: 预测{predicted_action} action（问问题）")
+                    print(f"   响应类型: 澄清问题（正常行为，task_score=0）")
+                    print(f"   响应预览: {response[:300]}...")
+                else:
+                    # LOW action应该生成代码
+                    print(f"\n⚠️  样本 {i+1}: LOW action但未提取到代码")
+                    print(f"   响应长度: {len(response)}")
+                    print(f"   响应预览: {response[:300]}...")
         
         # 计算interrupt cost（简化版）
         n_questions = response.count("?")

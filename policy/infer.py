@@ -67,26 +67,40 @@ def select_action(state_text: str, policy_model_dir: str, base_model: Optional[s
     
     model.eval()
     
-    # Generate action token
+    # Tokenize state text
     inputs = tokenizer(state_text, return_tensors="pt")
     inputs = {k: v.to(model.device) for k, v in inputs.items()}
     
+    # Use logits directly to select action token (instead of generating text)
     with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=3,
-            do_sample=False,  # Deterministic for action prediction
-            pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
-        )
-    
-    text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-    
-    # Extract action token
-    for token in ["LOW", "MID", "HIGH"]:
-        if token in text:
-            return token
-    
-    return "MID"  # Default fallback
+        logits = model(**inputs).logits
+        # Get logits for the last token position
+        next_token_logits = logits[0, -1, :]
+        
+        # Get token IDs for action tokens
+        action_tokens = ["LOW", "MID", "HIGH"]
+        action_token_ids = [tokenizer.convert_tokens_to_ids(token) for token in action_tokens]
+        
+        # Filter out None values (in case token not found)
+        valid_actions = []
+        valid_ids = []
+        for token, token_id in zip(action_tokens, action_token_ids):
+            if token_id is not None:
+                valid_actions.append(token)
+                valid_ids.append(token_id)
+        
+        if not valid_ids:
+            # Fallback if no action tokens found in vocabulary
+            return "MID"
+        
+        # Get logits for action tokens only
+        action_logits = next_token_logits[valid_ids]
+        
+        # Select action with highest logit
+        best_action_idx = torch.argmax(action_logits).item()
+        best_action = valid_actions[best_action_idx]
+        
+        return best_action
 
 
 def get_template(action: str, domain: str) -> str:
@@ -122,7 +136,7 @@ def generate_code(
     Args:
         task_prompt: The task description
         template: The action template (from get_template)
-        code_model_name: Name of code generation model (if None, uses template only)
+        code_model_name: Name of code generation model (e.g., "meta-llama/Llama-3.1-8B-Instruct")
         use_openai: Whether to use OpenAI API for code generation
         openai_model: OpenAI model name if use_openai=True
     
@@ -136,10 +150,50 @@ def generate_code(
         user = f"[Task]\n{task_prompt}"
         return chat_complete(system, user, model=openai_model, max_tokens=400)
     elif code_model_name:
-        # Use a separate code model (e.g., CodeLlama)
-        # TODO: Implement code model loading and generation
-        # For now, return template + task
-        return f"{template}\n\n[Task]\n{task_prompt}"
+        # Use a local model (e.g., Llama) for code generation
+        # Load model and tokenizer
+        tokenizer = AutoTokenizer.from_pretrained(code_model_name)
+        model = AutoModelForCausalLM.from_pretrained(
+            code_model_name,
+            torch_dtype=torch.float16,
+            device_map="auto",
+        )
+        
+        # Format prompt using chat template
+        messages = [
+            {"role": "system", "content": template},
+            {"role": "user", "content": f"[Task]\n{task_prompt}"}
+        ]
+        
+        # Apply chat template
+        if hasattr(tokenizer, "apply_chat_template") and tokenizer.chat_template:
+            prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        else:
+            # Fallback: simple formatting
+            prompt = f"{template}\n\n[Task]\n{task_prompt}\n\nAssistant:"
+        
+        # Tokenize and generate
+        inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
+        inputs = {k: v.to(model.device) for k, v in inputs.items()}
+        
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=400,
+                do_sample=True,
+                temperature=0.7,
+                top_p=0.9,
+                pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
+            )
+        
+        # Decode response
+        generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        
+        # Extract only the generated part (remove prompt)
+        if "Assistant:" in generated_text:
+            generated_text = generated_text.split("Assistant:")[-1].strip()
+        
+        return generated_text
     else:
         # Fallback: just return template + task
         # In production, you should use a proper code generation model

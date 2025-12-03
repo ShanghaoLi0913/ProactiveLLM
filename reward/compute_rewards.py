@@ -59,7 +59,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from reward.compute import compute_task_score, compute_interrupt_cost, total_reward
+from reward.compute import compute_task_score, compute_interrupt_cost, compute_interrupt_cost_v2, total_reward
 
 
 @dataclass
@@ -121,16 +121,15 @@ def compute_rewards_for_group(
         # Task score (0/1 for coding with tests)
         task_score = compute_task_score(state, domain, assistant_output=assistant_msg)
 
-        # Interrupt cost
+        # Interrupt cost (Reward_version2: 只对无效澄清扣分)
         meta = (t.get("user_reaction") or {}).get("meta", {})
         n_questions = assistant_msg.count("?")
-        length_tokens = len(assistant_msg.split())
-        off_topic = int(meta.get("off_topic_flag", 0))
-        interrupt_cost = compute_interrupt_cost(
+        
+        # 使用新版本的interrupt cost计算（只对无效澄清扣分）
+        interrupt_cost = compute_interrupt_cost_v2(
             meta,
             n_questions=n_questions,
-            length_tokens=length_tokens,
-            off_topic=off_topic,
+            assistant_msg=assistant_msg,
         )
 
         # Aggregate reward with configurable weights

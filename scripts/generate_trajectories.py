@@ -135,8 +135,13 @@ def generate_branch_at_state(state: Dict, action: str, action_prompt: str, domai
     persona = PERSONAS[persona_idx % len(PERSONAS)]
     reaction = react(state["query"], assistant_msg, persona)
     
+    # Note: State should NOT contain persona information directly
+    # Persona is used for trajectory generation and action selection,
+    # but the model should learn user preference from dialogue history (prev_reject, dialogue_turn)
+    # This makes the project meaningful: model needs to infer user preference from signals
+    
     return {
-        "state": state,
+        "state": state,  # State only contains task-related info
         "action": action,
         "action_prompt": action_prompt,
         "assistant_msg": assistant_msg,
