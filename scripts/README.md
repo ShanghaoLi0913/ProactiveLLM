@@ -15,7 +15,10 @@ Scripts for data generation and dataset conversion.
 
 Generates trajectories using **mainline+branches strategy** (cost-efficient):
 - For each state: 1 mainline trajectory + 2 branches = 3 trajectories total
-- Mainline serves as reference; branches provide contrastive actions for DPO learning
+- Branch 1: The other action (Clarify if mainline is Execute, or vice versa)
+- Branch 2: Mainline action variant (regenerate with same action but different output)
+- Sequential Decision Process: actions are **Clarify** (ask questions) or **Execute** (provide solution)
+- Mainline serves as reference; branches provide contrastive actions/variants for DPO learning
 
 ### Process Flow
 
@@ -23,17 +26,21 @@ Generates trajectories using **mainline+branches strategy** (cost-efficient):
 Input: States (from synthetic or dataset)
   ↓
 For each state:
-  ├─ Phase 1: Generate mainline (auto-selected from persona, or manual)
+  ├─ Phase 1: Generate mainline (auto-selected from persona and state, or manual)
   │   ├─ Determine mainline action:
-  │   │   - If --mainline_action provided: use it
-  │   │   - Otherwise: auto-select based on persona
-  │   │     * Low patience + high time_pressure → LOW
-  │   │     * High patience + low clarity → HIGH
-  │   │     * Otherwise → MID
+  │   │   - If --mainline_action provided: use it (Clarify or Execute)
+  │   │   - Otherwise: auto-select based on persona and state
+  │   │     * Low patience → Execute
+  │   │     * High patience + low task_uncertainty → Clarify
+  │   │     * Previous reject → Execute
+  │   │     * Otherwise → Execute (default)
   │   └─ Load prompt template → Call LLM → Get simulator reaction
   │
-  └─ Phase 2: Generate 2 branches (other actions, e.g., LOW/HIGH)
-      └─ For each branch: Load prompt → Call LLM → Get simulator reaction
+  └─ Phase 2: Generate 2 branches
+      ├─ Branch 1: The other action (Clarify if mainline is Execute, or vice versa)
+      │   └─ Load prompt → Call LLM → Get simulator reaction
+      └─ Branch 2: Mainline action variant (regenerate with same action)
+          └─ Load prompt → Call LLM → Get simulator reaction (different output)
   ↓
 Output: Trajectories JSONL (data/logs/*.jsonl)
 ```
@@ -47,12 +54,13 @@ Output: Trajectories JSONL (data/logs/*.jsonl)
 2. **For Each State:**
    - **Phase 1 - Mainline**:
      - **Determine mainline action**:
-       - If `--mainline_action` provided: use it
-       - Otherwise: auto-select from persona using `select_mainline_action_from_persona()`
-         - Low patience (<0.4) + high time_pressure → LOW
-         - High patience (>0.7) + low clarity (<0.5) → HIGH
-         - Otherwise → MID
-     - Load behavior template: `prompts/{domain}_{mainline_action}.txt`
+       - If `--mainline_action` provided: use it (Clarify or Execute)
+       - Otherwise: auto-select from persona and state using `select_mainline_action_from_persona()`
+         - Low patience ("low") → Execute
+         - High patience ("high") + low task_uncertainty (<0.5) → Clarify
+         - Previous reject → Execute
+         - Otherwise → Execute (default)
+     - Load behavior template: `prompts/{domain}_{mainline_action}.txt` (clarify or execute)
      - Generate `assistant_msg`:
        - With `--llm_model`: Call OpenAI API (`llm/provider.py`)
        - Without: Use `dummy_llm_output()` (placeholder)
@@ -60,9 +68,12 @@ Output: Trajectories JSONL (data/logs/*.jsonl)
      - Mark: `is_mainline=True, decision_point=0, mainline_action_selected_by="persona"|"manual"`
    
    - **Phase 2 - Branches**:
-     - For each remaining action (e.g., LOW/HIGH if mainline is MID):
+     - **Branch 1**: The other action (Clarify if mainline is Execute, or vice versa)
        - Same process as mainline
-       - Mark: `is_mainline=False, decision_point=0, mainline_action="MID"`
+       - Mark: `is_mainline=False, decision_point=0, mainline_action="Execute"` (or "Clarify")
+     - **Branch 2**: Mainline action variant (regenerate with same action)
+       - Same process as mainline but generates different output
+       - Mark: `is_mainline=False, decision_point=0, mainline_action="Execute"` (or "Clarify"), `is_variant=True`
 
 3. **Output**: Write trajectories to `data/logs/*.jsonl`
 
@@ -83,7 +94,9 @@ python scripts/generate_trajectories.py --mode dataset --domain coding \
 python scripts/generate_trajectories.py --mode dataset ...
 
 # Manual override mainline action
-python scripts/generate_trajectories.py --mainline_action LOW ...
+python scripts/generate_trajectories.py --mainline_action Clarify ...
+# or
+python scripts/generate_trajectories.py --mainline_action Execute ...
 ```
 
 ### Arguments
@@ -94,7 +107,7 @@ python scripts/generate_trajectories.py --mainline_action LOW ...
 - `--dataset_path`: Path to states JSONL (required for dataset mode)
 - `--out`: Output path relative to `data/` (default: `logs/trajectories.jsonl`)
 - `--llm_model`: OpenAI model name (e.g., `gpt-4o-mini`). If empty, uses dummy output.
-- `--mainline_action`: `LOW`, `MID`, or `HIGH` (optional). If not provided, auto-selects based on persona characteristics
+- `--mainline_action`: `Clarify` or `Execute` (optional). If not provided, auto-selects based on persona and state (task_uncertainty, dialogue_turn, prev_reject)
 
 ### Output Format
 
@@ -105,18 +118,16 @@ Each trajectory (one per line in JSONL):
     "id": "mbpp-0",
     "domain": "coding",
     "query": "Write a Python function...",
-    "dialogue_turn": 1,
-    "query_clarity": 0.6,
-    "task_complexity": 0.6,
+    "dialogue_turn": 0,
     "prev_reject": 0,
-    "mbpp_tests": "..."
+    "task_uncertainty": 0.5
   },
-  "action": "MID",
+  "action": "Clarify",
   "action_prompt": "You are an assistant...",
   "assistant_msg": "请问需要处理空字符串吗？然后我会给出代码。",
   "persona": {
     "name": "Impatient-Novice",
-    "patience": 0.25,
+    "patience": "low",
     ...
   },
   "user_reaction": {
@@ -131,80 +142,54 @@ Each trajectory (one per line in JSONL):
   },
   "is_mainline": true,  // or false for branches
   "decision_point": 0,
-  "mainline_action": "MID"  // only for branches
+  "mainline_action": "Execute"  // only for branches
 }
 ```
 
 ### Example: 1 State → 3 Trajectories
 
-**State**: `{id: "mbpp-0", query: "Write a function to reverse a string"}`
+**State**: `{id: "mbpp-0", query: "Write a function to reverse a string", dialogue_turn: 0, prev_reject: 0, task_uncertainty: 0.4}`
 
 **Generated**:
-1. Mainline (MID): `{action: "MID", is_mainline: true, assistant_msg: "请问需要处理空字符串吗？..."}`
-2. Branch 1 (LOW): `{action: "LOW", is_mainline: false, mainline_action: "MID", assistant_msg: "这是一个最小可运行的示例代码..."}`
-3. Branch 2 (HIGH): `{action: "HIGH", is_mainline: false, mainline_action: "MID", assistant_msg: "请问目标网站与输出格式？..."}`
+1. Mainline (Clarify): `{action: "Clarify", is_mainline: true, assistant_msg: "请问需要处理空字符串吗？..."}`
+2. Branch 1 (Execute): `{action: "Execute", is_mainline: false, mainline_action: "Clarify", assistant_msg: "def reverse_string(s): return s[::-1]..."}`
+3. Branch 2 (Clarify variant): `{action: "Clarify", is_mainline: false, mainline_action: "Clarify", is_variant: true, assistant_msg: "需要处理特殊字符吗？..."}`
 
 ### Files Used
 
-- `prompts/coding_*.txt`, `prompts/planning_*.txt`: Behavior templates
+- `prompts/coding_{clarify,execute}.txt`, `prompts/planning_{clarify,execute}.txt`: Behavior templates
 - `llm/provider.py`: OpenAI API calls (if `--llm_model` provided)
 - `simulator/simulate.py`: User reaction simulation
+- `policy/render_state.py`: State rendering for consistency
 
 ---
 
 ## Dataset Conversion Scripts
 
-### MBPP Conversion (`convert_mbpp_to_states.py`)
+### State Format
 
-Convert raw MBPP dataset to our state format.
+All datasets should be converted to the following state format for sequential decision process:
 
-**Usage**:
-```bash
-python scripts/convert_mbpp_to_states.py
-# Output: data/seeds/mbpp_states.jsonl
-```
-
-**Process**: Loads from Hugging Face → extracts `{text, test_list, test_imports}` → converts to state format
-
----
-
-### ConvCodeWorld Conversion (`convert_convcodeworld_to_states.py`)
-
-Convert ConvCodeWorld/convcodebench dataset to our state format.
-
-**Dataset**: https://huggingface.co/datasets/ConvCodeWorld/convcodebench
-
-**Usage**:
-```bash
-# First time: inspect dataset structure
-python scripts/convert_convcodeworld_to_states.py --inspect
-
-# Convert dataset
-python scripts/convert_convcodeworld_to_states.py \
-  --source hf:ConvCodeWorld/convcodebench --split train \
-  --limit 200 --out data/seeds/convcodeworld_states.jsonl
-```
-
-**Process**:
-1. Load from Hugging Face (nested structure with multiple configs: CF_EF_UNIT_SNF, CF_EF_FULL_SNF, etc.)
-2. Extract tasks from nested structure (`{"ITER=1": {"task_id": [...], ...}}`)
-3. Convert to state format (adjust field mappings based on actual structure)
-4. Write to `data/seeds/convcodeworld_states.jsonl`
-
-**Note**: Run with `--inspect` first to see actual data structure, then adjust `to_state()` function if needed.
-
-**Output Format**:
 ```json
 {
-  "id": "convcodeworld-0",
+  "id": "task-0",
   "domain": "coding",
-  "query": "...",
-  "dialogue_turn": 1,
-  "query_clarity": 0.6,
-  "task_complexity": 0.6,
+  "query": "User's task description",
+  "dialogue_turn": 0,
   "prev_reject": 0,
-  "convcodeworld_tests": "...",
-  "convcodeworld_task_id": "BigCodeBench/0"
+  "task_uncertainty": 0.5
 }
 ```
+
+**Required fields**:
+- `domain`: "coding" or "planning"
+- `query`: User's task description
+- `dialogue_turn`: Current dialogue turn (0 for initial state)
+- `prev_reject`: Whether previous turn was rejected (0 or 1)
+
+**Optional fields**:
+- `id`: Unique identifier for the task
+- `task_uncertainty`: Computed automatically if not provided (0.0-1.0, lower = more unclear)
+
+**Note**: The state format supports sequential decision making where each turn updates `dialogue_turn` and `prev_reject` based on user reactions.
 

@@ -14,8 +14,11 @@ def compute_task_uncertainty(query: str) -> float:
     """
     基于query文本的启发式规则评估任务不确定性/清晰度。
     
+    注意：这是single-step RL (contextual bandit)问题，task_uncertainty在决策时固定。
+    如果query包含对话历史，应该只使用原始部分（由render_state处理）。
+    
     Args:
-        query: 用户的任务描述
+        query: 用户的任务描述（应该只包含初始query，不包含对话历史）
         
     Returns:
         task_uncertainty: 0.0-1.0，值越小表示越不清晰（不确定性越高）

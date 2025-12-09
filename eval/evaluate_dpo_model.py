@@ -20,7 +20,7 @@ from peft import PeftModel
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from reward.compute import compute_task_score, compute_interrupt_cost, total_reward
+from reward.compute import compute_task_score, compute_interrupt_cost, compute_interrupt_cost_v2, compute_clarification_bonus, total_reward
 
 
 def load_jsonl(path: Path) -> List[Dict]:
@@ -48,9 +48,23 @@ def extract_code_from_text(text: str) -> Optional[str]:
             # 跳过测试代码（包含 unittest 或 test_）
             if any(keyword in code for keyword in ["unittest", "test_", "TestCases", "class Test", "def test_"]):
                 continue
+            # 如果代码中包含测试用例标记，只保留标记之前的内容
+            test_markers = ["# Compilation feedback", "# Execution feedback", "Compilation feedback:", "Execution feedback:", "No syntax errors", "TEST_", "Passed all test"]
+            for marker in test_markers:
+                if marker in code:
+                    # 找到标记位置，只保留之前的内容
+                    marker_pos = code.find(marker)
+                    code = code[:marker_pos].strip()
+                    break
+            
             # 确保代码包含函数定义
             if "def " not in code:
                 continue
+            
+            # 确保代码不为空
+            if not code.strip():
+                continue
+                
             valid_blocks.append(code)
         
         if valid_blocks:
@@ -76,7 +90,16 @@ def extract_code_from_text(text: str) -> Optional[str]:
                     best_code = code
             
             if best_code:
-                return best_code
+                # best_code已经在上面清理过了，但需要再次确保移除测试标记
+                # 如果代码中包含测试标记，只保留标记之前的内容
+                test_markers = ["# Compilation feedback", "# Execution feedback", "Compilation feedback:", "Execution feedback:", "No syntax errors", "TEST_", "Passed all test"]
+                cleaned_code = best_code
+                for marker in test_markers:
+                    if marker in cleaned_code:
+                        marker_pos = cleaned_code.find(marker)
+                        cleaned_code = cleaned_code[:marker_pos].strip()
+                        break
+                return cleaned_code.strip()
             # 如果没有找到最好的，返回最长的
             return max(valid_blocks, key=len)
     
@@ -119,11 +142,62 @@ def extract_code_from_text(text: str) -> Optional[str]:
 
 
 def score_code_passfail(code: str, tests: str, timeout: int = 30, debug: bool = False) -> float:
-    """执行代码和测试，返回pass/fail分数"""
+    """执行代码和测试，返回pass/fail分数
+    
+    支持两种测试用例格式：
+    1. 可执行的Python代码（正常执行）
+    2. ConvCodeWorld反馈信息格式（解析反馈信息判断成功/失败）
+    """
     if not code or not tests:
         return 0.0
     
-    # 清理代码：移除可能包含的错误信息
+    # 检查是否是ConvCodeWorld反馈信息格式
+    # 格式: "# Compilation feedback: ..." + "# Execution feedback: ..."
+    is_feedback_format = (
+        "# Compilation feedback" in tests or 
+        "# Execution feedback" in tests or
+        "Compilation feedback:" in tests or
+        "Execution feedback:" in tests
+    )
+    
+    if is_feedback_format:
+        # 处理反馈信息格式：不执行代码，直接解析反馈信息
+        # 如果反馈信息显示"Passed all test runs"，任务成功
+        if "Passed all test runs" in tests:
+            if debug:
+                print(f"   ✅ 反馈信息显示: Passed all test runs")
+            return 1.0
+        
+        # 如果反馈信息显示"No syntax errors"且没有错误信息，可能是成功的
+        # 但需要进一步检查
+        if "No syntax errors" in tests:
+            # 检查是否有错误信息
+            has_errors = any(keyword in tests for keyword in [
+                "Traceback", "Error:", "ZeroDivisionError", "ValueError", 
+                "TypeError", "KeyError", "AttributeError", "IndexError"
+            ])
+            if not has_errors and "Passed" in tests:
+                if debug:
+                    print(f"   ✅ 反馈信息显示: No syntax errors and Passed")
+                return 1.0
+        
+        # 如果有明确的错误信息，任务失败
+        if any(keyword in tests for keyword in [
+            "Traceback", "Error:", "ZeroDivisionError", "ValueError",
+            "TypeError", "KeyError", "AttributeError", "IndexError",
+            "AssertionError", "NameError", "ImportError"
+        ]):
+            if debug:
+                print(f"   ⚠️  反馈信息显示: 有错误信息")
+            return 0.0
+        
+        # 无法确定（可能是反馈信息不完整）
+        if debug:
+            print(f"   ⚠️  反馈信息格式，但无法确定成功/失败")
+        return 0.0
+    
+    # 以下是处理可执行的Python测试代码（正常情况）
+    # 清理代码：移除可能包含的错误信息和测试用例内容
     # 如果代码中包含 Traceback，只保留 Traceback 之前的部分
     if "Traceback" in code:
         code = code.split("Traceback")[0].strip()
@@ -134,10 +208,55 @@ def score_code_passfail(code: str, tests: str, timeout: int = 30, debug: bool = 
         if def_pos >= 0:
             code = code[:def_pos] + code[def_pos:].split("Error:")[0].strip()
     
+    # 移除测试用例标记（如果代码提取时包含了）
+    # 使用更全面的标记列表
+    test_markers = [
+        "# Compilation feedback", "# Execution feedback", 
+        "Compilation feedback:", "Execution feedback:",
+        "No syntax errors", "TEST_", "Passed all test",
+        "Traceback", "Error:", "ZeroDivisionError"
+    ]
+    
+    # 首先，如果代码中包含测试标记，只保留标记之前的内容
+    for marker in test_markers:
+        if marker in code:
+            marker_pos = code.find(marker)
+            code = code[:marker_pos].strip()
+            break
+    
+    # 确保代码以函数定义开始，移除前面的注释或说明
+    lines = code.split('\n')
+    cleaned_lines = []
+    found_def = False
+    for line in lines:
+        stripped = line.strip()
+        # 跳过空行和纯注释（在找到def之前）
+        if not found_def:
+            if stripped.startswith('def '):
+                found_def = True
+                cleaned_lines.append(line)
+            elif stripped.startswith('#') or stripped == '':
+                continue
+            elif stripped.startswith('import ') or stripped.startswith('from '):
+                cleaned_lines.append(line)
+            # 如果遇到非代码内容（如 "No syntax errors"），停止
+            elif any(marker in stripped for marker in test_markers):
+                break
+        else:
+            # 找到def之后，保留所有内容直到遇到测试用例标记
+            if any(marker in stripped for marker in test_markers):
+                break
+            cleaned_lines.append(line)
+    
+    code = '\n'.join(cleaned_lines).strip()
+    
     # 创建临时文件
     with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
         # 合并代码和测试
         full_code = code + "\n\n" + tests
+        # 如果是unittest格式，需要添加main来运行测试
+        if "unittest" in tests.lower() and "if __name__" not in tests:
+            full_code += "\n\nif __name__ == '__main__':\n    unittest.main()"
         f.write(full_code)
         temp_path = f.name
     
@@ -210,25 +329,23 @@ def generate_response(model, tokenizer, prompt: str, max_length: int = 2048) -> 
 
 
 def extract_action_from_response(response: str, state: Dict) -> str:
-    """从响应中提取action (LOW/MID/HIGH)"""
+    """从响应中提取action (Clarify/Execute)"""
     response_lower = response.lower()
     
     # 检查是否包含明确的action标记
     if "action:" in response_lower or "proactivity:" in response_lower:
-        for action in ["LOW", "MID", "HIGH"]:
-            if action in response.upper():
+        for action in ["Clarify", "Execute"]:
+            if action in response:
                 return action
     
     # 基于内容推断
     question_count = response.count("?")
-    if question_count >= 2:
-        return "HIGH"
-    elif question_count == 1:
-        return "MID"
+    if question_count >= 1:
+        return "Clarify"
     elif "code" in response_lower or "solution" in response_lower or "```" in response:
-        return "LOW"
+        return "Execute"
     else:
-        return "MID"  # 默认
+        return "Execute"  # 默认执行
 
 
 def evaluate_model(
@@ -245,7 +362,7 @@ def evaluate_model(
     # Scheme A: Separated Architecture
     # Policy model only predicts action, code generation is separate
     print("📋 使用分离架构 (Scheme A)")
-    print("   - Policy模型: 预测action (LOW/MID/HIGH)")
+    print("   - Policy模型: 预测action (Clarify/Execute)")
     print("   - Code生成: 使用独立模型（不受DPO影响）")
     
     # 加载测试数据
@@ -296,18 +413,14 @@ def evaluate_model(
             code = extract_code_from_text(response)
             # 调试信息：记录代码提取情况
             if not code and (i < 3 or (i + 1) % 20 == 0):
-                # 根据predicted_action判断：HIGH action是问问题，这是正常的
-                if predicted_action == "HIGH":
-                    print(f"\n📋 样本 {i+1}: 预测HIGH action（问问题）")
-                    print(f"   响应类型: 澄清问题（正常行为）")
-                    print(f"   响应预览: {response[:300]}...")
-                elif predicted_action == "MID":
-                    print(f"\n📋 样本 {i+1}: 预测MID action（问一个问题）")
+                # 根据predicted_action判断：Clarify action是问问题，这是正常的
+                if predicted_action == "Clarify":
+                    print(f"\n📋 样本 {i+1}: 预测Clarify action（问问题）")
                     print(f"   响应类型: 澄清问题（正常行为）")
                     print(f"   响应预览: {response[:300]}...")
                 else:
-                    # LOW action应该生成代码，如果没有代码才是问题
-                    print(f"\n⚠️  样本 {i+1}: LOW action但未提取到代码")
+                    # Execute action应该生成代码，如果没有代码才是问题
+                    print(f"\n⚠️  样本 {i+1}: Execute action但未提取到代码")
                     print(f"   响应长度: {len(response)}")
                     print(f"   响应预览: {response[:500]}...")
             elif code and i < 3:
@@ -316,9 +429,20 @@ def evaluate_model(
                 print("="*80)
                 print(response)
                 print("="*80)
-                print(f"\n📦 提取的代码:")
+                print(f"\n📦 提取的代码（清理后）:")
                 print("="*80)
                 print(code)
+                print("="*80)
+                # 检查代码中是否还有测试标记
+                test_markers = ["No syntax errors", "Compilation feedback", "Execution feedback"]
+                has_markers = any(marker in code for marker in test_markers)
+                if has_markers:
+                    print(f"⚠️  警告：提取的代码中仍然包含测试标记！")
+                    for marker in test_markers:
+                        if marker in code:
+                            print(f"   包含标记: {marker}")
+                else:
+                    print(f"✅ 代码已成功清理，不包含测试标记")
                 print("="*80)
         
         # 计算task score
@@ -341,30 +465,31 @@ def evaluate_model(
         elif state["domain"] == "coding" and not code:
             # 记录没有提取到代码的情况
             if i < 3 or (i + 1) % 20 == 0:
-                # 根据predicted_action判断：HIGH/MID action是问问题，这是正常的
-                if predicted_action in ["HIGH", "MID"]:
-                    print(f"\n📋 样本 {i+1}: 预测{predicted_action} action（问问题）")
+                # 根据predicted_action判断：Clarify action是问问题，这是正常的
+                if predicted_action == "Clarify":
+                    print(f"\n📋 样本 {i+1}: 预测Clarify action（问问题）")
                     print(f"   响应类型: 澄清问题（正常行为，task_score=0）")
                     print(f"   响应预览: {response[:300]}...")
                 else:
-                    # LOW action应该生成代码
-                    print(f"\n⚠️  样本 {i+1}: LOW action但未提取到代码")
+                    # Execute action应该生成代码
+                    print(f"\n⚠️  样本 {i+1}: Execute action但未提取到代码")
                     print(f"   响应长度: {len(response)}")
                     print(f"   响应预览: {response[:300]}...")
         
-        # 计算interrupt cost（简化版）
+        # 计算interrupt cost（使用新公式）
+        # C_Interrupt = Σ_{t=1}^{T} (δb_t r_t + λb_t - γb_t a_t)
         n_questions = response.count("?")
-        length_tokens = len(response.split())
-        meta = {"reject_signal": 0, "off_topic": 0}
-        interrupt_cost = compute_interrupt_cost(meta, n_questions, length_tokens, 0)
+        # 评估时没有user_reaction，假设既没有answered也没有rejected
+        meta = {"reject_signal": 0, "answered_clarification": 0}
+        interrupt_cost = compute_interrupt_cost_v2(meta, n_questions, response)
         
-        # 总reward
+        # 总reward（新公式：R = R_task - C_interrupt）
         total_r = total_reward(task_score, interrupt_cost)
         
         results.append({
             "state_id": state.get("id", f"sample_{i}"),
             "predicted_action": predicted_action,
-            "chosen_action": pref.get("chosen_action", "MID"),
+            "chosen_action": pref.get("chosen_action", "Execute"),
             "task_score": task_score,
             "interrupt_cost": interrupt_cost,
             "total_reward": total_r,

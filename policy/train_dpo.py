@@ -46,14 +46,14 @@ from policy.render_state import render_state
 def to_dpo_format(records):
     """Convert preference JSONL to TRL DPO format.
     
-    Scheme A: Separated Architecture
-    - Policy model only learns to predict action tokens (LOW/MID/HIGH)
+    Sequential Decision Process:
+    - Policy model learns to predict action tokens (Clarify/Execute) at each turn
     - Code generation is handled separately (not affected by DPO)
     - This prevents DPO from polluting code generation capabilities
     
     IMPORTANT: Uses render_state() which contains ONLY pure state information,
     NO action_prompts or templates. This allows the model to freely decide
-    which action to take based on state.
+    which action to take based on state (task_uncertainty, dialogue_turn, prev_reject).
     """
 
     dataset = {
@@ -64,7 +64,7 @@ def to_dpo_format(records):
     for ex in records:
         dataset["prompt"].append(render_state(ex["state"]))
         # Use action tokens, not full messages
-        dataset["chosen"].append(ex["chosen_action"])  # action token: LOW/MID/HIGH
+        dataset["chosen"].append(ex["chosen_action"])  # action token: Clarify/Execute
         dataset["rejected"].append(ex["rejected_action"])  # action token
     return dataset
 
@@ -84,7 +84,7 @@ def train(
     records = load_prefs(Path(data_path))
     print(f"📊 Loaded {len(records)} preference pairs")
     dpo_data = to_dpo_format(records)
-    print(f"📊 Using {len(dpo_data['prompt'])} examples for training (action token format - Scheme A)")
+    print(f"📊 Using {len(dpo_data['prompt'])} examples for training (sequential decision: Clarify/Execute)")
 
     print(f"🔡 Loading tokenizer: {model_name}")
     hf_token = os.environ.get("HF_TOKEN")
@@ -109,10 +109,10 @@ def train(
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # Add action tokens as special tokens (Scheme A: action prediction only)
-    special_tokens = {"additional_special_tokens": ["LOW", "MID", "HIGH"]}
+    # Add action tokens as special tokens (Sequential Decision: Clarify/Execute)
+    special_tokens = {"additional_special_tokens": ["Clarify", "Execute"]}
     tokenizer.add_special_tokens(special_tokens)
-    print("✅ Added special tokens: LOW, MID, HIGH")
+    print("✅ Added special tokens: Clarify, Execute")
 
     # Model loading with optional 4-bit quantization (QLoRA)
     use_qlora = False

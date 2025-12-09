@@ -76,11 +76,18 @@ def compute_interrupt_cost_v2(meta: Dict, n_questions: int, assistant_msg: str =
     """
     Reward_version2: 计算C_interrupt（总成本）。
     
-    规则：
-    - 如果澄清有效（answered）→ 不扣分
-    - 如果澄清无效（rejected）→ 扣分
+    新公式: C_Interrupt = Σ_{t=1}^{T} (δb_t r_t + λb_t - γb_t a_t)
     
-    C_interrupt是整个对话中所有无效澄清问题的累积成本。
+    其中：
+    - b_t ∈ {0,1}: 是否提出澄清问题
+    - a_t ∈ {0,1}: 如果提出澄清，用户是否认真回答
+    - r_t ∈ {0,1}: 如果提出澄清，用户是否明确拒绝
+    - δ > 0: 每一次被拒绝的澄清所带来的成本
+    - λ ≥ 0: 提出澄清的基本开销，用于抑制过度提问
+    - γ > 0: 成功澄清所带来的成本抵消，相当于奖励有效澄清
+    
+    对于单轮对话:
+    C_Interrupt = δ * b * r + λ * b - γ * b * a
     
     Args:
         meta: 包含answered_clarification, reject_signal等字段
@@ -88,42 +95,97 @@ def compute_interrupt_cost_v2(meta: Dict, n_questions: int, assistant_msg: str =
         assistant_msg: assistant的消息（用于检查是否包含问题）
         
     Returns:
-        C_interrupt: 累积的无效澄清成本
+        C_interrupt: 累积的中断成本
     """
-    # 检查澄清是否有效
-    answered = meta.get("answered_clarification", 0)  # 1 if answered, 0 if not
-    rejected = meta.get("reject_signal", 0)  # 1 if rejected, 0 if not
+    # 参数设置（激进设置，最大化奖励差异，解决MID塌陷问题）
+    # 高γ：有效澄清带来显著奖励
+    # 高δ：无效澄清带来显著惩罚
+    # λ设为0：不惩罚提问本身，只惩罚无效提问
+    gamma = 0.3   # γ: 有效澄清的成本抵消（奖励）- 提高以激励有效澄清
+    delta = 0.7   # δ: 无效澄清的惩罚 - 提高以惩罚无效澄清
+    lambda_param = 0.0  # λ: 提出澄清的基本开销（设为0，不惩罚提问本身）
     
-    # 如果澄清被拒绝（rejected），则扣分
-    if rejected:
-        # 被拒绝的澄清问题，每个扣分
-        cost = n_questions * 0.5  # 每个无效澄清问题扣0.5分
-    elif answered:
-        # 澄清有效（answered），不扣分
-        cost = 0.0
+    # b_t: 是否提出澄清问题
+    b = 1 if n_questions > 0 else 0
+    
+    if b == 0:
+        # 没有提出澄清，成本为0
+        return 0.0
+    
+    # a_t: 用户是否认真回答
+    a = meta.get("answered_clarification", 0)  # 1 if answered, 0 if not
+    # r_t: 用户是否明确拒绝
+    r = meta.get("reject_signal", 0)  # 1 if rejected, 0 if not
+    
+    # 对于多个问题，需要对每个问题分别计算
+    # 简化处理：如果所有问题状态相同，可以统一计算
+    # 否则需要对每个问题分别判断
+    
+    # 简化版本：假设所有问题的状态相同
+    # 如果answered，所有问题都有效
+    # 如果rejected，所有问题都无效
+    # 否则，所有问题都未回答
+    
+    if a > 0:
+        # 所有问题都有效澄清
+        # C_Interrupt = n_questions * (δ*0 + λ*1 - γ*1) = n_questions * (λ - γ)
+        cost = n_questions * (lambda_param - gamma)
+    elif r > 0:
+        # 所有问题都无效澄清（被拒绝）
+        # C_Interrupt = n_questions * (δ*1 + λ*1 - γ*0) = n_questions * (δ + λ)
+        cost = n_questions * (delta + lambda_param)
     else:
-        # 既没有answered也没有rejected，可能是第一次提问
-        # 这种情况下，如果问了问题但还没有得到回答，暂时不扣分
-        # 但如果有多个问题，可能表示过度提问
-        if n_questions > 1:
-            cost = (n_questions - 1) * 0.2  # 超过1个问题，每个额外问题扣0.2分
-        else:
-            cost = 0.0
+        # 所有问题都未回答
+        # C_Interrupt = n_questions * (δ*0 + λ*1 - γ*0) = n_questions * λ
+        cost = n_questions * lambda_param
     
     return float(cost)
 
 
-def total_reward(task_score: float, interrupt_cost: float) -> float:
+def compute_clarification_bonus(meta: Dict, n_questions: int) -> float:
+    """
+    计算有效澄清的奖励（bonus）。
+    
+    注意：这个函数在新公式中不再需要，因为有效澄清的奖励已经包含在
+    C_Interrupt的计算中（通过γ参数）。保留此函数是为了向后兼容。
+    
+    新公式中，有效澄清通过减少C_Interrupt来实现奖励：
+    C_Interrupt = δb_t r_t + λb_t - γb_t a_t
+    当a_t=1时，-γb_t a_t项会减少成本，相当于奖励。
+    
+    Args:
+        meta: 包含answered_clarification, reject_signal等字段
+        n_questions: 澄清问题的数量
+        
+    Returns:
+        B_clarify: 有效澄清的奖励分数（在新公式中应该返回0，因为奖励已包含在C_Interrupt中）
+    """
+    # 在新公式中，有效澄清的奖励已经通过C_Interrupt中的-γb_t a_t项实现
+    # 所以这里返回0，避免重复计算
+    return 0.0
+
+
+def total_reward(task_score: float, interrupt_cost: float, clarification_bonus: float = 0.0) -> float:
     """
     Reward_version2: R = R_task - C_interrupt
     
+    新公式：总奖励 = 任务成功奖励 - 中断成本
+    
+    其中C_Interrupt = Σ_{t=1}^{T} (δb_t r_t + λb_t - γb_t a_t)
+    - 有效澄清（a_t=1）会减少成本（通过-γb_t a_t项）
+    - 无效澄清（r_t=1）会增加成本（通过+δb_t r_t项）
+    - 每次提问都有基本开销（通过+λb_t项）
+    
     Args:
         task_score: R_task（任务成功奖励，sparse final reward）
-        interrupt_cost: C_interrupt（总成本，无效澄清问题的累积成本）
+        interrupt_cost: C_interrupt（中断成本）
+        clarification_bonus: B_clarify（已废弃，在新公式中不再需要）
         
     Returns:
         Total reward
     """
+    # 新公式：R = R_task - C_interrupt
+    # clarification_bonus参数保留是为了向后兼容，但不再使用
     return float(task_score - interrupt_cost)
 
 

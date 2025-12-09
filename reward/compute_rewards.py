@@ -59,17 +59,23 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from reward.compute import compute_task_score, compute_interrupt_cost, compute_interrupt_cost_v2, total_reward
+from reward.compute import compute_task_score, compute_interrupt_cost, compute_interrupt_cost_v2, compute_clarification_bonus, total_reward
 
 
 @dataclass
 class RewardConfig:
-    """Weights for reward aggregation."""
+    """Weights for reward aggregation.
+    
+    优化：使用激进设置以最大化奖励差异，解决MID塌陷问题。
+    - w_task: 任务成功权重（保持高优先级）
+    - w_interrupt: 中断成本权重（提高以放大有效/无效澄清的差异）
+    """
 
     # Strongly prioritize task success (pass tests)
     w_task: float = 1.0
-    # Smaller penalty on interrupt / annoyance
-    w_interrupt: float = 0.1
+    # 提高w_interrupt以放大有效澄清（奖励）和无效澄清（惩罚）的差异
+    # 这有助于解决MID塌陷问题：让有效澄清的MID/HIGH获得更高reward
+    w_interrupt: float = 0.15  # 从0.1提高到0.15，放大interrupt_cost的影响
 
 
 def load_trajectories(path: Path) -> List[Dict]:
@@ -111,28 +117,77 @@ def compute_rewards_for_group(
 ) -> List[Dict]:
     """
     Compute task_score / interrupt_cost / total_reward for each trajectory in a group.
+    
+    Supports both single-interaction and multi-interaction trajectories:
+    - Single-interaction: uses assistant_msg and user_reaction directly
+    - Multi-interaction: accumulates interrupt_cost across all interactions,
+      and computes task_score based on the final interaction with code.
     """
     scored: List[Dict] = []
     for t in trajs:
         state = t["state"]
         domain = state.get("domain", "coding")
-        assistant_msg = t.get("assistant_msg", "")
-
-        # Task score (0/1 for coding with tests)
-        task_score = compute_task_score(state, domain, assistant_output=assistant_msg)
-
-        # Interrupt cost (Reward_version2: 只对无效澄清扣分)
-        meta = (t.get("user_reaction") or {}).get("meta", {})
-        n_questions = assistant_msg.count("?")
         
-        # 使用新版本的interrupt cost计算（只对无效澄清扣分）
-        interrupt_cost = compute_interrupt_cost_v2(
-            meta,
-            n_questions=n_questions,
-            assistant_msg=assistant_msg,
-        )
-
-        # Aggregate reward with configurable weights
+        # Check if this is a multi-interaction trajectory
+        if "interactions" in t and len(t["interactions"]) > 0:
+            # Multi-interaction mode: accumulate costs across all interactions
+            total_interrupt_cost = 0.0
+            final_assistant_msg = ""
+            
+            # Accumulate interrupt_cost from all interactions
+            for interaction in t["interactions"]:
+                assistant_msg = interaction.get("assistant_msg", "")
+                user_reaction = interaction.get("user_reaction", {})
+                meta = user_reaction.get("meta", {})
+                n_questions = assistant_msg.count("?")
+                
+                # Compute interrupt_cost for this interaction
+                interaction_cost = compute_interrupt_cost_v2(
+                    meta,
+                    n_questions=n_questions,
+                    assistant_msg=assistant_msg,
+                )
+                total_interrupt_cost += interaction_cost
+                
+                # Track the last interaction that contains code
+                has_code = (
+                    "```" in assistant_msg or
+                    "def " in assistant_msg or
+                    "class " in assistant_msg
+                )
+                if has_code:
+                    final_assistant_msg = assistant_msg
+            
+            # If no code found, use the last interaction's message
+            if not final_assistant_msg and t["interactions"]:
+                final_assistant_msg = t["interactions"][-1].get("assistant_msg", "")
+            
+            # Compute task_score based on final code (if any)
+            task_score = compute_task_score(state, domain, assistant_output=final_assistant_msg)
+            interrupt_cost = total_interrupt_cost
+            
+        else:
+            # Single-interaction mode (backward compatibility)
+            assistant_msg = t.get("assistant_msg", "")
+            
+            # Task score (0/1 for coding with tests)
+            task_score = compute_task_score(state, domain, assistant_output=assistant_msg)
+            
+            # Interrupt cost (Reward_version2: 新公式)
+            # C_Interrupt = Σ_{t=1}^{T} (δb_t r_t + λb_t - γb_t a_t)
+            meta = (t.get("user_reaction") or {}).get("meta", {})
+            n_questions = assistant_msg.count("?")
+            
+            # 使用新版本的interrupt cost计算
+            interrupt_cost = compute_interrupt_cost_v2(
+                meta,
+                n_questions=n_questions,
+                assistant_msg=assistant_msg,
+            )
+        
+        # 新公式: R = R_task - C_interrupt
+        # 注意：在新公式中，有效澄清的奖励已经包含在C_Interrupt的计算中
+        # （通过-γb_t a_t项减少成本，相当于奖励）
         r = cfg.w_task * task_score - cfg.w_interrupt * interrupt_cost
         total_r = float(r)
 

@@ -13,11 +13,11 @@ Setup
 
 Structure
 
-- prompts/: behavior templates for coding and planning (low/mid/high)
+- prompts/: behavior templates for coding and planning (clarify/execute)
 - llm/: OpenAI API provider and API key setup (see llm/SETUP_API_KEY.md)
 - simulator/: user personas and reaction rules
 - reward/: task success scoring and interrupt cost
-- policy/: DPO training and action selection
+- policy/: DPO training and action selection (sequential decision: Clarify/Execute)
 - scripts/: data generation utilities
 - eval/: evaluation and plots
 - data/: datasets (input JSONL/CSV) and generated trajectories/preferences
@@ -32,6 +32,8 @@ Quickstart (Two-Step Pipeline)
 The data generation is split into two steps for flexibility: generate trajectories first, then compute rewards separately.
 
 Step 1: Generate Trajectories
+
+**Single-turn mode (default, for DPO training)**:
 - Synthetic mode (quick test, no API calls):
   ```bash
   python scripts/generate_trajectories.py --mode synthetic --domain coding --n_states 50 --out logs/traj_synth_coding.jsonl
@@ -40,17 +42,36 @@ Step 1: Generate Trajectories
   ```bash
   export OPENAI_API_KEY=sk-...
   python scripts/generate_trajectories.py --mode dataset --domain coding \
-    --dataset_path data/seeds/mbpp_states.jsonl --n_states 100 \
+--dataset_path data/seeds/mbpp_states.jsonl --n_states 100 \
     --out logs/traj_mbpp.jsonl --llm_model gpt-4o-mini
   ```
 
-**Strategy**: Mainline+Branches (default, cost-efficient)
-- Generates 1 mainline trajectory + 2 branches (other actions) per state
-- Mainline action is **auto-selected from persona** (patience/clarity/time_pressure):
-  - Low patience + high time_pressure → LOW
-  - High patience + low clarity → HIGH
-  - Otherwise → MID
-- Manual override: `--mainline_action LOW|MID|HIGH` (optional)
+**Multi-turn mode (full conversations until task completion)**:
+- Generate complete conversations with sequential decisions:
+  ```bash
+  python scripts/generate_trajectories.py --mode dataset --domain coding \
+    --dataset_path data/seeds/your_dataset.jsonl --n_states 10 \
+    --out logs/traj_multiturn.jsonl --llm_model gpt-4o-mini \
+    --multi_turn --max_turns 5
+  ```
+- This mode generates full conversations where:
+  - At each turn, model decides: **Clarify** (ask questions) or **Execute** (provide solution)
+  - State updates after each turn: `dialogue_turn++`, `prev_reject` (if user rejected)
+  - Task completion is detected (code passes tests or planning is complete)
+  - Each turn is saved as a separate trajectory entry with its own state and action
+
+**Strategy**: Mainline+Branches (single-turn mode, cost-efficient)
+- Generates 1 mainline trajectory + 2 branches per state = 3 trajectories total
+- Branch 1: The other action (Clarify if mainline is Execute, or vice versa)
+- Branch 2: Mainline action variant (regenerate with same action but different output)
+- Sequential Decision Process: actions are **Clarify** (ask questions) or **Execute** (provide solution)
+- Mainline action is **auto-selected from persona and state**:
+  - Low patience ("low") → Execute
+  - High patience ("high") + low task_uncertainty → Clarify
+  - Previous reject → Execute (don't ask more)
+  - High dialogue_turn → Execute (already asked many questions)
+  - Otherwise → Execute (default)
+- Manual override: `--mainline_action Clarify|Execute` (optional)
 
 Step 2: Compute Rewards
 - Compute rewards and generate preference pairs:
@@ -61,13 +82,27 @@ Step 2: Compute Rewards
 - **Benefit**: You can recompute rewards multiple times with different weights without regenerating trajectories!
 
 Then:
-- Train policy: `python policy/train_dpo.py`
-- Evaluate: `python eval/evaluate.py`
-- Plot: `python eval/plot_pareto.py`
+- Train policy: 
+  ```bash
+  python policy/train_dpo.py \
+    --data data/dpo/prefs_synth_coding.jsonl \
+    --model meta-llama/Llama-3.1-8B-Instruct \
+    --output outputs/policy_model \
+    --epochs 3 --lr 5e-5 --beta 0.1
+  ```
+- Evaluate: 
+  ```bash
+  python eval/evaluate_dpo_model.py \
+    --model_dir outputs/policy_model \
+    --base_model meta-llama/Llama-3.1-8B-Instruct \
+    --prefs_path data/dpo/prefs_synth_coding.jsonl \
+    --output outputs/eval_results.json
+  ```
+- Plot: `python eval/plot_pareto.py` (if available)
 
 Dataset Quickstart
 
-**MBPP**:
+**MBPP** (if conversion script available):
 1. Convert MBPP → states JSONL:
    ```bash
    python scripts/convert_mbpp_to_states.py  # writes data/seeds/mbpp_states.jsonl
@@ -83,33 +118,33 @@ Dataset Quickstart
 
 3. Compute rewards:
    ```bash
-   python reward/compute_rewards.py --trajectories logs/traj_mbpp.jsonl --out dpo/prefs_mbpp_phase1.jsonl
+   python reward/compute_rewards.py --trajectories logs/traj_mbpp.jsonl --out dpo/prefs_mbpp.jsonl
    ```
 
-**ConvCodeWorld** (https://huggingface.co/datasets/ConvCodeWorld/convcodebench):
-1. Inspect dataset structure (first time):
-   ```bash
-   python scripts/convert_convcodeworld_to_states.py --inspect
+**Custom Dataset**:
+1. Prepare your dataset in JSONL format with required fields:
+   ```json
+   {
+     "id": "task-0",
+     "domain": "coding",
+     "query": "User's task description",
+     "dialogue_turn": 0,
+     "prev_reject": 0,
+     "task_uncertainty": 0.5
+   }
    ```
 
-2. Convert ConvCodeWorld → states JSONL:
-   ```bash
-   python scripts/convert_convcodeworld_to_states.py \
-     --source hf:ConvCodeWorld/convcodebench --split train \
-     --limit 200 --out data/seeds/convcodeworld_states.jsonl
-   ```
-
-3. Generate trajectories:
+2. Generate trajectories:
    ```bash
    export OPENAI_API_KEY=sk-...
    python scripts/generate_trajectories.py --mode dataset --domain coding \
-     --dataset_path data/seeds/convcodeworld_states.jsonl --n_states 100 \
-     --out logs/traj_convcodeworld.jsonl --llm_model gpt-4o-mini
+     --dataset_path data/seeds/your_dataset.jsonl --n_states 100 \
+     --out logs/traj_your_dataset.jsonl --llm_model gpt-4o-mini
    ```
 
-4. Compute rewards:
+3. Compute rewards:
    ```bash
-   python reward/compute_rewards.py --trajectories logs/traj_convcodeworld.jsonl --out dpo/prefs_convcodeworld_phase1.jsonl
+   python reward/compute_rewards.py --trajectories logs/traj_your_dataset.jsonl --out dpo/prefs_your_dataset.jsonl
    ```
 
 Data Generation Pipeline (Two-Step)
@@ -127,17 +162,20 @@ Key Principle
 **Input**:
 - **Synthetic mode**: No input file needed (generates states internally)
 - **Dataset mode**: States JSONL from `data/seeds/` (e.g., `mbpp_states.jsonl`)
-  - Required fields: `{query, dialogue_turn, query_clarity, task_complexity, prev_reject, mbpp_tests?}`
+  - Required fields: `{query, dialogue_turn, prev_reject, task_uncertainty?}`
+  - Optional fields: `{domain, id, ...}`
 
 **Process** (Mainline+Branches strategy):
 - **Phase 1**: Generate 1 mainline trajectory
-  - If `--mainline_action` provided: use it
-  - Otherwise: **auto-select from persona** (patience/clarity/time_pressure)
-    - Low patience + high time_pressure → LOW (direct, no questions)
-    - High patience + low clarity → HIGH (can ask more)
-    - Otherwise → MID (balanced)
-- **Phase 2**: At each decision point, generate 2 branches (the other 2 actions)
-- **Benefit**: Mainline matches persona preferences; branches provide contrastive actions for learning
+  - If `--mainline_action` provided: use it (Clarify or Execute)
+  - Otherwise: **auto-select from persona and state**
+    - Low patience → Execute (direct, no questions)
+    - High patience + low task_uncertainty → Clarify (can ask questions)
+    - Previous reject → Execute (don't ask more)
+    - High dialogue_turn → Execute (already asked many questions)
+    - Otherwise → Execute (default)
+- **Phase 2**: Generate 1 branch (the other action: Clarify if mainline is Execute, or vice versa)
+- **Benefit**: Mainline matches persona preferences; branch provides contrastive action for learning
 
 **Steps**:
 1. **Load states**:
@@ -145,10 +183,13 @@ Key Principle
    - Dataset: `load_states_from_dataset()` reads from JSONL
 
 2. **Generate assistant outputs**:
-   - Load templates: `prompts/coding_{low,mid,high}.txt` or `planning_{...}.txt`
+   - Load templates: `prompts/coding_{clarify,execute}.txt` or `planning_{clarify,execute}.txt`
    - Generate `assistant_msg`:
      - Without `--llm_model`: `dummy_llm_output()` (placeholder for testing)
      - With `--llm_model`: `llm_output()` → `llm/provider.py` → OpenAI API
+   - **Sequential Decision**: Each action (Clarify/Execute) generates appropriate response
+     - Clarify: Ask 1-2 clarifying questions
+     - Execute: Provide code/solution directly
 
 3. **Get simulator reaction**:
    - `simulator/simulate.py` → `react(user_msg, assistant_msg, persona)`
@@ -158,13 +199,16 @@ Key Principle
 **Output**: `data/logs/*.jsonl`
 - Each line: `{state, action, action_prompt, assistant_msg, persona, user_reaction, is_mainline?, decision_point?, mainline_action?}`
 - Format: One trajectory per line (JSONL)
+- **State format**: `{domain, query, dialogue_turn, prev_reject, task_uncertainty}`
+- **Action**: `"Clarify"` or `"Execute"`
 - For mainline+branches strategy: trajectories include `is_mainline` flag and `decision_point` index
 
 **Files Used**:
 - `scripts/generate_trajectories.py` (main script)
-- `prompts/coding_*.txt`, `prompts/planning_*.txt` (behavior templates)
+- `prompts/coding_{clarify,execute}.txt`, `prompts/planning_{clarify,execute}.txt` (behavior templates)
 - `llm/provider.py` (OpenAI API calls, if `--llm_model` provided)
 - `simulator/simulate.py` (user reaction simulation)
+- `policy/render_state.py` (state rendering for consistency)
 
 ---
 
@@ -191,8 +235,8 @@ Key Principle
    - Total reward: `R = R_task − C_interrupt`
 
 3. **Build preference pairs**:
-   - Group trajectories by `state_id`
-   - Rank 3 actions (LOW/MID/HIGH) by reward
+   - Group trajectories by `state_id` (and `decision_point` if multi-turn)
+   - Rank 2 actions (Clarify/Execute) by reward
    - Pick highest as `chosen_action`, lowest as `rejected_action`
 
 **Output**: `data/dpo/*.jsonl`

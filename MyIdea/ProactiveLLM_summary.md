@@ -36,6 +36,28 @@
 
 但现有模型做不到这种"见机行事"。
 
+我们要让模型在多轮澄清交互中，学会根据用户偏好和任务清晰度，动态调整主动性：在需要时问问题，不需要时果断执行，从而实现高任务成功率和良好用户体验。
+
+核心思想是“将主动参与形式化为一个动态的、高层次的 ‘Clarify-or-Execute’ 决策，发生在每一对话回合 (in each dialogue turn)
+
+
+
+#### 问题形式化：多轮序列决策
+
+我们将模型在对话中的主动性决策建模为一个**序列决策过程 (Sequential Decision Process)**，目标是学习一个能够平衡任务成功和用户体验的**主动交互策略** $\pi$。
+
+**核心决策点**
+
+在对话的第 $t$ 回合，模型观察到上下文状态 $S_t$，然后根据策略 $\pi$ 采取行动 $A_t$：
+
+$$\pi: S_t \to A_t$$
+
+核心决策点
+
+模型在每个回合 $t$ 必须做出的**高层次决策**（行动 $A_t$）是：
+
+$$\mathbf{A}_t \in \{ \text{Clarify (提出澄清问题), Execute (执行任务)} \}$$
+
 
 
 ## **🔬 你的创新点**
@@ -61,7 +83,9 @@
 让主动性成为一个"动态控制变量"，而非静态特质。
 ```
 
-2. 设计基于历史的状态表征
+
+
+### State_version1
 
 ```python
 state = {
@@ -85,8 +109,30 @@ state = {
 
 
 
-3. 设计显式平衡任务成功与干扰成本的 Reward
+### State_version2
 
+$$S = \{ \text{task\_uncertainty}, \text{dialogue\_turn}, \text{prev\_reject} \}$$
+
+```python
+state = {
+    # 任务层面
+    'task_uncertainty': 根据输入进行打分 # 当前请求清晰度
+    
+    # 对话层面
+    'dialogue_turn': 0/1/2,        # 第几轮
+    
+    # 历史互动
+    'prev_reject': 0/1,       # 上一轮是否被拒绝
+}
+```
+
+
+
+
+
+### Reward_version1
+
+设计显式平衡任务成功与干扰成本的 Reward
 $$
 R = R_{\text{task}} - \alpha \cdot C_{\text{interrupt}}
 $$
@@ -106,6 +152,102 @@ $$
 - 显式惩罚"过度主动"（多问、被拒、啰嗦、跑题）
 - 与 CollabLLM 的"鼓励互动性"形成对比
 - 权重可调，实现个性化（如对不耐烦用户加重 $w_2$）
+
+潜在问题： reward 里最主要、最稳定、最强的负反馈项是：问问题越多，惩罚越大，导致模型倾向于选择low。
+
+
+
+### Reward_version2
+
+$$R = R_{\text{task}} - C_{\text{interrupt}}$$
+
+- **$R_{\text{task}}$ (任务成功奖励):** 采用稀疏的、最终的奖励。这对于 DPO/RL 训练是合理的，能驱动模型最终解决任务。
+- **$C_{\text{interrupt}}$ (总成本):** 是整个对话中所有无效澄清成本的累加。(如果澄清有效（被回答）→ 不扣分; 如果澄清无效（被拒绝） → 扣分)
+
+
+
+### **Reward_version3**
+
+**1. 变量定义**
+
+对一段对话有 $T$ 个回合，在第 $t$ 回合：
+
+- $b_t \in \{0,1\}$：这一回合模型是否提出澄清问题
+- $a_t \in \{0,1\}$：如果提出澄清，用户是否认真回答
+- $r_t \in \{0,1\}$：如果提出澄清，用户是否明确拒绝
+
+一般有：若 $b_t = 0$，则 $a_t = r_t = 0$；若 $b_t = 1$，则 $a_t + r_t \le 1$。
+
+整段对话结束后得到一个任务成功得分：
+
+- $R_{\text{task}} \in \mathbb{R}$：任务成功奖励（代码通过率、LLM judge 等）
+
+**2. 澄清相关奖励**
+
+为了刻画模型主动行为对用户体验的影响，我们将澄清相关行为统一建模为中断成本：
+$$
+C_{\text{Interrupt}}
+=
+\sum_{t=1}^{T}
+\left(
+\delta b_t r_t
++
+\lambda b_t
+-
+\gamma b_t a_t
+\right).
+$$
+其中：
+
+- $\delta > 0$：每一次被拒绝的澄清所带来的成本；
+- $\lambda \ge 0$：提出澄清的基本开销，用于抑制过度提问；
+- $\gamma > 0$：成功澄清所带来的成本抵消，相当于奖励有效澄清。
+
+直观来说：
+
+- 有效澄清 → 中断成本减少 $\gamma$
+- 无效澄清（被拒绝）→ 成本增加 $\delta$
+- 每次澄清都增加小额开销 $\lambda$
+- 未提出澄清 → 成本为 0
+
+**3. 总奖励公式**
+
+整段对话的总奖励定义为：
+$$
+R
+=
+R_{\text{task}}
+-
+C_{\text{Interrupt}},
+$$
+即：
+$$
+R
+=
+R_{\text{task}}
+-
+\sum_{t=1}^{T}
+\left(
+\delta b_t r_t
++
+\lambda b_t
+-
+\gamma b_t a_t
+\right).
+$$
+这一结构使模型在优化过程中同时追求：
+
+1. 最大化任务完成度（依据数据集标准评测指标）
+2. 最小化对用户的打扰（降低中断成本）
+
+从而学得一种 上下文感知的主动性策略（在需要澄清时提出问题，在可能引发拒绝时主动收敛）。
+
+
+
+通过这种设计，模型在**每一步**做出 $A_t$ 决策时，就必须预测这个行动：
+
+1. **短期内**会不会被用户拒绝（带来 $\delta$ 惩罚）？
+2. **长期内**是否能提高任务成功率（提升 $R_{\text{task}}$）？
 
 
 
@@ -243,4 +385,14 @@ $$
 | **变体**             | 3               | (1) SFT baseline (2) Rule-based (3) Offline DPO (Ours) | 展示算法带来的显著提升            |
 | **可选附加**         | +1              | PPO (小规模)                                           | 验证方法一致性                    |
 | **评估指标（暂定）** | 5               | Task Success, Interaction Cost, PSA, QE, RTA           | 成功率 + 分寸感双目标评估         |
+
+
+
+| 类别                           | 数量             | 内容                                                         | 目的                                                         |
+| ------------------------------ | ---------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| 任务（Tasks）                  | 2                | 1. Code Generation / Debugging（客观任务） <br />2. Task Planning / To-Do Assistant（主观任务） | 体现主动性对不同 context types（技术性 vs 认知性） 的适应能力 |
+| Base 模型（Base LLMs）         | 1 (+ 1 optional) | Llama-3.1-8B-Instruct（主模型）<br />Mistral-7B-Instruct（optional） | 保持与 CollabLLM 一致便于对比，同时验证方法的外推性          |
+| 训练变体（Training Variants）  | 3                | (1) **SFT baseline** – 纯监督模型，无主动控制 <br />(2) **Offline DPO (Ours)** – 基于上下文的主动性自校准策略 <br />(3) **PPO (small-scale) ** (贵 困难 暂定） | 展示从无主动性 → 启发式 → 学习型 的性能提升梯度              |
+| 评估指标（Metrics, tentative） | 5                | Task Success Rate（代码正确率 / 任务完成度） Interaction Cost (IC) – 打扰成本 Proactivity Sensitivity Analysis (PSA) – 模型对情境敏感度 Query Efficiency (QE) – 平均完成回合数 Response Tone Alignment (RTA) – 语气与用户偏好匹配度 | 同时衡量模型的 完成能力与分寸感（appropriateness of proactivity） |
+| Baseline                       | 2                | (1) Pre-trained Llama-3.1-8B-Instruct (Base)(2) Base model with proactive prompt engineering (Proactive Base) | 与现有被动模型和固定主动性策略进行对比，验证自适应策略的优越性。 |
 

@@ -1,8 +1,8 @@
 """
-Scheme A: Separated Architecture Inference
+Sequential Decision Process Inference
 
-This module implements the separated architecture where:
-1. Policy model predicts action (LOW/MID/HIGH) only
+This module implements the sequential decision process where:
+1. Policy model predicts action (Clarify/Execute) at each dialogue turn
 2. Code generation is handled by a separate model (not affected by DPO)
 """
 from pathlib import Path
@@ -20,15 +20,15 @@ if str(PROJECT_ROOT) not in sys.path:
 
 def select_action(state_text: str, policy_model_dir: str, base_model: Optional[str] = None) -> str:
     """
-    Use policy model to predict action (LOW/MID/HIGH) based on state.
+    Use policy model to predict action (Clarify/Execute) based on state.
     
     Args:
-        state_text: Rendered state text
+        state_text: Rendered state text (contains task_uncertainty, dialogue_turn, prev_reject)
         policy_model_dir: Directory containing trained policy model (LoRA adapter)
         base_model: Base model name (if None, will try to load from policy_model_dir)
     
     Returns:
-        Action token: "LOW", "MID", or "HIGH"
+        Action token: "Clarify" or "Execute"
     """
     # Load tokenizer
     try:
@@ -37,7 +37,7 @@ def select_action(state_text: str, policy_model_dir: str, base_model: Optional[s
         if base_model:
             tokenizer = AutoTokenizer.from_pretrained(base_model, use_fast=True)
             # Add special tokens
-            special_tokens = {"additional_special_tokens": ["LOW", "MID", "HIGH"]}
+            special_tokens = {"additional_special_tokens": ["Clarify", "Execute"]}
             tokenizer.add_special_tokens(special_tokens)
         else:
             raise ValueError("Cannot load tokenizer")
@@ -78,7 +78,7 @@ def select_action(state_text: str, policy_model_dir: str, base_model: Optional[s
         next_token_logits = logits[0, -1, :]
         
         # Get token IDs for action tokens
-        action_tokens = ["LOW", "MID", "HIGH"]
+        action_tokens = ["Clarify", "Execute"]
         action_token_ids = [tokenizer.convert_tokens_to_ids(token) for token in action_tokens]
         
         # Filter out None values (in case token not found)
@@ -91,7 +91,7 @@ def select_action(state_text: str, policy_model_dir: str, base_model: Optional[s
         
         if not valid_ids:
             # Fallback if no action tokens found in vocabulary
-            return "MID"
+            return "Execute"
         
         # Get logits for action tokens only
         action_logits = next_token_logits[valid_ids]
@@ -108,15 +108,13 @@ def get_template(action: str, domain: str) -> str:
     base = Path(__file__).resolve().parent.parent / "prompts"
     if domain == "coding":
         fname = {
-            "LOW": "coding_low.txt",
-            "MID": "coding_mid.txt",
-            "HIGH": "coding_high.txt",
+            "Clarify": "coding_clarify.txt",
+            "Execute": "coding_execute.txt",
         }[action]
     else:
         fname = {
-            "LOW": "planning_low.txt",
-            "MID": "planning_mid.txt",
-            "HIGH": "planning_high.txt",
+            "Clarify": "planning_clarify.txt",
+            "Execute": "planning_execute.txt",
         }[action]
     return (base / fname).read_text(encoding="utf-8").strip()
 
@@ -216,7 +214,7 @@ def execute_action(
     3. Returns clean code (not affected by DPO training)
     
     Args:
-        action: Action token (LOW/MID/HIGH)
+        action: Action token (Clarify/Execute)
         task_prompt: The task description
         domain: Domain ("coding" or "planning")
         code_model_name: Code generation model name
