@@ -13,12 +13,11 @@ Scripts for data generation and dataset conversion.
 
 ### Overview
 
-Generates trajectories using **mainline+branches strategy** (cost-efficient):
-- For each state: 1 mainline trajectory + 2 branches = 3 trajectories total
-- Branch 1: The other action (Clarify if mainline is Execute, or vice versa)
-- Branch 2: Mainline action variant (regenerate with same action but different output)
+Generates multi-turn conversation trajectories:
+- For each state: Generate a full conversation until task completion or max_turns
+- Each turn is a separate trajectory entry with its own state and action
 - Sequential Decision Process: actions are **Clarify** (ask questions) or **Execute** (provide solution)
-- Mainline serves as reference; branches provide contrastive actions/variants for DPO learning
+- Action selection is auto-selected from persona and state
 
 ### Process Flow
 
@@ -26,21 +25,11 @@ Generates trajectories using **mainline+branches strategy** (cost-efficient):
 Input: States (from synthetic or dataset)
   ↓
 For each state:
-  ├─ Phase 1: Generate mainline (auto-selected from persona and state, or manual)
-  │   ├─ Determine mainline action:
-  │   │   - If --mainline_action provided: use it (Clarify or Execute)
-  │   │   - Otherwise: auto-select based on persona and state
-  │   │     * Low patience → Execute
-  │   │     * High patience + low task_uncertainty → Clarify
-  │   │     * Previous reject → Execute
-  │   │     * Otherwise → Execute (default)
-  │   └─ Load prompt template → Call LLM → Get simulator reaction
-  │
-  └─ Phase 2: Generate 2 branches
-      ├─ Branch 1: The other action (Clarify if mainline is Execute, or vice versa)
-      │   └─ Load prompt → Call LLM → Get simulator reaction
-      └─ Branch 2: Mainline action variant (regenerate with same action)
-          └─ Load prompt → Call LLM → Get simulator reaction (different output)
+  Generate multi-turn conversation:
+    Turn 1: Select action (auto from persona + state) → Generate → Simulator reaction → Update state
+    Turn 2: Select action (auto from persona + state) → Generate → Simulator reaction → Update state
+    ...
+    Until: Task completed OR max_turns reached OR user rejects
   ↓
 Output: Trajectories JSONL (data/logs/*.jsonl)
 ```
@@ -146,14 +135,15 @@ Each trajectory (one per line in JSONL):
 }
 ```
 
-### Example: 1 State → 3 Trajectories
+### Example: Multi-Turn Conversation
 
-**State**: `{id: "mbpp-0", query: "Write a function to reverse a string", dialogue_turn: 0, prev_reject: 0, task_uncertainty: 0.4}`
+**Initial State**: `{id: "mbpp-0", query: "Write a function to reverse a string", dialogue_turn: 0, prev_reject: 0, task_uncertainty: 0.4}`
 
-**Generated**:
-1. Mainline (Clarify): `{action: "Clarify", is_mainline: true, assistant_msg: "请问需要处理空字符串吗？..."}`
-2. Branch 1 (Execute): `{action: "Execute", is_mainline: false, mainline_action: "Clarify", assistant_msg: "def reverse_string(s): return s[::-1]..."}`
-3. Branch 2 (Clarify variant): `{action: "Clarify", is_mainline: false, mainline_action: "Clarify", is_variant: true, assistant_msg: "需要处理特殊字符吗？..."}`
+**Generated Conversation** (example):
+1. Turn 1: `{action: "Clarify", turn: 1, assistant_msg: "请问需要处理空字符串吗？", state: {...dialogue_turn: 0...}}`
+2. Turn 2: `{action: "Execute", turn: 2, assistant_msg: "def reverse_string(s): return s[::-1]", state: {...dialogue_turn: 1...}, task_completed: true}`
+
+Each turn is a separate trajectory entry with updated state.
 
 ### Files Used
 

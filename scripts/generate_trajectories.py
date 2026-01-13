@@ -1,11 +1,12 @@
 """
 Step 1: Generate trajectories (state + action + assistant output + simulator reaction)
 
-Uses mainline+branches strategy: 1 mainline trajectory + 2 branches per state = 3 trajectories total (cost-efficient).
+Multi-turn conversation mode: Generates full conversations until task completion.
+Each turn is a separate trajectory entry with its own state and action.
 
 Input: States (from synthetic or dataset)
 Output: Trajectories JSONL to data/logs/
-Each trajectory contains: {state, action, action_prompt, assistant_msg, persona, user_reaction, is_mainline, decision_point}
+Each trajectory contains: {state, action, action_prompt, assistant_msg, persona, user_reaction, turn}
 """
 import argparse
 import json
@@ -423,290 +424,41 @@ def generate_multi_turn_conversation(initial_state: Dict, domain: str,
     return trajectories
 
 
-def generate_branch_at_state(state: Dict, action: str, action_prompt: str, domain: str, 
-                             llm_model: Optional[str] = None, persona_idx: int = 0,
-                             use_interactions: bool = True, max_interactions: int = 5) -> Dict:
-    """Generate a single branch (trajectory) at a given state with specified action.
-    
-    Sequential Decision Process: action is either Clarify or Execute.
-    
-    - Clarify: Ask 1-2 clarifying questions
-    - Execute: Provide code/solution directly
-    
-    If use_interactions=True, supports multi-interaction turns within the same action.
-    """
-    persona = PERSONAS[persona_idx % len(PERSONAS)]
-    
-    if not use_interactions:
-        # Original single-interaction mode (backward compatibility)
-        assistant_msg = llm_output(state, action_prompt, model=llm_model) if llm_model else dummy_llm_output(state, action_prompt)
-        # For synthetic mode (llm_model=None), use dummy user reactions
-        reaction = react(state["query"], assistant_msg, persona, llm_model=llm_model)
-        return {
-            "state": state,
-            "action": action,
-            "action_prompt": action_prompt,
-            "assistant_msg": assistant_msg,
-            "persona": {
-                "name": persona.name,
-                "domain": persona.domain,
-                "expertise": persona.expertise,
-                "patience": persona.patience,
-            },
-            "user_reaction": reaction,
-        }
-    
-    # Sequential decision mode: Clarify or Execute
-    interaction_prompts = build_interaction_prompts(domain)
-    current_state = state.copy()
-    interactions = []
-    all_assistant_msgs = []
-    
-    # Execute interactions based on action
-    interaction_idx = 0
-    questions_asked = 0
-    
-    if action == "Clarify":
-        # Clarify: Ask 1-2 questions, then provide code
-        max_questions = 2
-    else:  # Execute
-        # Execute: Provide code directly
-        max_questions = 0
-    
-    while interaction_idx < max_interactions:
-        interaction_idx += 1
-        
-        # Determine interaction type based on action
-        if action == "Clarify":
-            if questions_asked < max_questions:
-                # Ask a clarifying question
-                interaction_type = "clarify"
-                prompt = interaction_prompts["Clarify"]["clarify"]
-            else:
-                # After asking questions, provide code
-                interaction_type = "execute"
-                prompt = interaction_prompts["Execute"]["execute"]
-        else:  # Execute
-            # Execute: Provide code directly
-            interaction_type = "execute"
-            prompt = interaction_prompts["Execute"]["execute"]
-        
-        # Generate assistant message
-        assistant_msg = llm_output(current_state, prompt, model=llm_model) if llm_model else dummy_llm_output(current_state, prompt)
-        all_assistant_msgs.append(assistant_msg)
-        
-        # Get user reaction
-        # For synthetic mode (llm_model=None), use dummy user reactions
-        # For dataset mode (llm_model provided), use LLM-generated reactions
-        # Calculate total_questions_asked: if current interaction is a question, include it in the count
-        total_questions_for_react = questions_asked + (1 if interaction_type == "clarify" else 0)
-        user_reaction = react(current_state["query"], assistant_msg, persona, llm_model=llm_model, total_questions_asked=total_questions_for_react)
-        interactions.append({
-            "interaction_num": interaction_idx,
-            "type": interaction_type,
-            "assistant_msg": assistant_msg,
-            "user_reaction": user_reaction,
-            "state_at_this_point": current_state.copy(),
-        })
-        
-        # Check if task is completed (if code is provided and passes tests)
-        if check_task_completion(current_state, assistant_msg, domain):
-            if interaction_type == "clarify":
-                questions_asked += 1
-            break
-        
-        # Check if user wants to stop (reject signal)
-        if user_reaction.get("meta", {}).get("reject_signal", 0) > 0:
-            # User rejected, provide code in next interaction (if not already providing code)
-            if interaction_type == "clarify":
-                # Skip remaining questions, go to execute
-                interaction_idx += 1
-                execute_prompt = interaction_prompts["Execute"]["execute"]
-                execute_assistant_msg = llm_output(current_state, execute_prompt, model=llm_model) if llm_model else dummy_llm_output(current_state, execute_prompt)
-                all_assistant_msgs.append(execute_assistant_msg)
-                if llm_model is None:
-                    raise ValueError("llm_model is required for user response generation. Please provide --llm_model argument.")
-                execute_user_reaction = react(current_state["query"], execute_assistant_msg, persona, llm_model=llm_model, total_questions_asked=questions_asked)
-                interactions.append({
-                    "interaction_num": interaction_idx,
-                    "type": "execute",
-                    "assistant_msg": execute_assistant_msg,
-                    "user_reaction": execute_user_reaction,
-                    "state_at_this_point": current_state.copy(),
-                })
-                if check_task_completion(current_state, execute_assistant_msg, domain):
-                    break
-            if interaction_type == "clarify":
-                questions_asked += 1
-            break
-        
-        # Count questions asked
-        if interaction_type == "clarify":
-            questions_asked += 1
-        
-        # Update state for next interaction
-        # is_same_turn=True because we're still in the same turn (multi-interaction)
-        current_state = update_state_for_next_turn(current_state, user_reaction, assistant_msg, is_same_turn=True)
-        
-        # If we just provided code, we're done
-        if interaction_type == "execute":
-            break
-    
-    # Combine all assistant messages for final assistant_msg field (for backward compatibility)
-    final_assistant_msg = "\n\n".join(all_assistant_msgs)
-    
-    # Get final user reaction (last one)
-    final_user_reaction = interactions[-1]["user_reaction"] if interactions else {}
-    
-    return {
-        "state": state,  # Original state (for grouping)
-        "action": action,
-        "action_prompt": action_prompt,  # Keep for backward compatibility
-        "assistant_msg": final_assistant_msg,  # Combined message
-        "interactions": interactions,  # Detailed interaction history
-        "total_interactions": len(interactions),
-        "task_completed": check_task_completion(current_state, final_assistant_msg, domain),
-        "persona": {
-            "name": persona.name,
-            "domain": persona.domain,
-            "expertise": persona.expertise,
-            "patience": persona.patience,
-        },
-        "user_reaction": final_user_reaction,  # Final reaction (for backward compatibility)
-    }
-
-
 def generate_trajectories(states: List[Dict], domain: str, 
                          llm_model: Optional[str] = None,
-                         mainline_action: Optional[str] = None,
                          persona_idx: int = 0,
-                         multi_turn: bool = False,
                          max_turns: int = 5,
-                         use_interactions: bool = True,
-                         max_interactions: int = 5,
                          out_file=None) -> List[Dict]:  # Optional file object for streaming write
     """
-    Generate trajectories using mainline+branches strategy (cost-efficient).
+    Generate multi-turn conversation trajectories.
     
-    If multi_turn=True: Generate full multi-turn conversations until task completion.
-    If multi_turn=False: Generate single-turn trajectories (original behavior).
+    For each state, generates a full conversation until task completion or max_turns.
+    Each turn is a separate trajectory entry with its own state and action.
     
-    Single-turn mode:
-    Phase 1: Generate 1 mainline trajectory
-      - If mainline_action provided: use it
-      - Otherwise: auto-select based on persona (patience) and state (task_uncertainty, dialogue_turn, prev_reject)
-    Phase 2: At each decision point, generate 2 branches:
-      - Branch 1: The other action (Clarify if mainline is Execute, or vice versa)
-      - Branch 2: Mainline action variant (regenerate with same action but different output)
-    
-    For each state: 1 mainline + 2 branches = 3 trajectories total.
-    Mainline serves as reference; branches provide contrastive actions/variants for DPO learning.
-    
-    Multi-turn mode:
-    - Generate full conversation for each state until task completion or max_turns
-    - Only generates mainline trajectory (no branches to reduce cost)
-    - Each turn is a separate trajectory entry
+    Args:
+        states: List of initial states
+        domain: "coding" or "planning"
+        llm_model: LLM model name (None for dummy)
+        persona_idx: Index of persona to use
+        max_turns: Maximum number of dialogue turns per conversation
+        out_file: Optional file object for streaming write
+        
+    Returns:
+        List of trajectory dicts, one per turn
     """
-    if multi_turn:
-        # Multi-turn mode: generate full conversations
-        trajectories = []
-        for st in states:
-            multi_turn_trajs = generate_multi_turn_conversation(
-                st, domain, llm_model, persona_idx, max_turns
-            )
-            trajectories.extend(multi_turn_trajs)
-            
-            # Stream write if out_file is provided
-            if out_file is not None:
-                for traj in multi_turn_trajs:
-                    out_file.write(json.dumps(traj, ensure_ascii=False) + "\n")
-                out_file.flush()
-                print(f"  ✓ Generated {len(multi_turn_trajs)} turn trajectories for state {st.get('id', 'unknown')}", flush=True)
-        return trajectories
-    
-    # Original single-turn mode
-    prompts = build_action_prompts(domain)
     trajectories = []
-    persona = PERSONAS[persona_idx % len(PERSONAS)]
-    
-    # Determine mainline action (can vary per state based on persona and state)
-    mainline_selected_by = "manual" if mainline_action else None
-    
     for st in states:
-        # Determine mainline action for this state if not manually specified
-        if mainline_action is None:
-            mainline_action = select_mainline_action_from_persona(persona, st)
-            if mainline_selected_by is None:
-                mainline_selected_by = "persona+state"
-        # Phase 1: Generate mainline trajectory
-        mainline_prompt = prompts[mainline_action]
-        mainline_traj = generate_branch_at_state(
-            st, mainline_action, mainline_prompt, domain, llm_model, persona_idx,
-            use_interactions=use_interactions, max_interactions=max_interactions
+        multi_turn_trajs = generate_multi_turn_conversation(
+            st, domain, llm_model, persona_idx, max_turns
         )
-        
-        # Mark as mainline
-        mainline_traj["is_mainline"] = True
-        mainline_traj["decision_point"] = 0  # initial decision point
-        mainline_traj["mainline_action_selected_by"] = mainline_selected_by
-        trajectories.append(mainline_traj)
+        trajectories.extend(multi_turn_trajs)
         
         # Stream write if out_file is provided
         if out_file is not None:
-            out_file.write(json.dumps(mainline_traj, ensure_ascii=False) + "\n")
-            out_file.flush()  # Ensure immediate write
-            print(f"  ✓ Generated mainline trajectory for state {st.get('id', 'unknown')} (action: {mainline_action})", flush=True)
-        
-        # Phase 2: Generate branches at this decision point
-        # Generate 2 branches: 1) the other action, 2) mainline action variant (regenerate)
-        # Store the mainline action for this state (may vary per state)
-        state_mainline_action = mainline_action
-        
-        # Branch 1: Generate the other action (Clarify if mainline is Execute, or vice versa)
-        for action, tpl in prompts.items():
-            # Skip mainline action (will generate as variant in Branch 2)
-            if action == state_mainline_action:
-                continue
-            
-            branch_traj = generate_branch_at_state(
-                st, action, tpl, domain, llm_model, persona_idx,
-                use_interactions=use_interactions, max_interactions=max_interactions
-            )
-            branch_traj["is_mainline"] = False
-            branch_traj["decision_point"] = 0  # same decision point as mainline
-            branch_traj["mainline_action"] = state_mainline_action  # reference to mainline
-            trajectories.append(branch_traj)
-            
-            # Stream write if out_file is provided
-            if out_file is not None:
-                out_file.write(json.dumps(branch_traj, ensure_ascii=False) + "\n")
-                out_file.flush()  # Ensure immediate write
-                print(f"  ✓ Generated branch 1 trajectory for state {st.get('id', 'unknown')} (action: {action})", flush=True)
-            break  # Only generate one other action
-        
-        # Branch 2: Generate mainline action variant (regenerate with same action but different output)
-        mainline_tpl = prompts[state_mainline_action]
-        branch_variant_traj = generate_branch_at_state(
-            st, state_mainline_action, mainline_tpl, domain, llm_model, persona_idx,
-            use_interactions=use_interactions, max_interactions=max_interactions
-        )
-        branch_variant_traj["is_mainline"] = False
-        branch_variant_traj["decision_point"] = 0  # same decision point as mainline
-        branch_variant_traj["mainline_action"] = state_mainline_action  # reference to mainline
-        branch_variant_traj["is_variant"] = True  # Mark as variant of mainline
-        trajectories.append(branch_variant_traj)
-        
-        # Stream write if out_file is provided
-        if out_file is not None:
-            out_file.write(json.dumps(branch_variant_traj, ensure_ascii=False) + "\n")
-            out_file.flush()  # Ensure immediate write
-            print(f"  ✓ Generated branch 2 trajectory for state {st.get('id', 'unknown')} (action: {state_mainline_action}, variant)", flush=True)
-        
-        # Reset mainline_action for next state if it was auto-selected
-        # (so each state can have different mainline action based on persona and state)
-        if mainline_selected_by != "manual":
-            mainline_action = None
-    
+            for traj in multi_turn_trajs:
+                out_file.write(json.dumps(traj, ensure_ascii=False) + "\n")
+            out_file.flush()
+            print(f"  ✓ Generated {len(multi_turn_trajs)} turn trajectories for state {st.get('id', 'unknown')}", flush=True)
     return trajectories
 
 
@@ -725,19 +477,8 @@ def main():
                        help="Output path relative to data/ directory")
     parser.add_argument("--llm_model", type=str, default="",
                        help="OpenAI model name (e.g., gpt-4o-mini). If empty, uses dummy output.")
-    parser.add_argument("--mainline_action", choices=["Clarify", "Execute"], default=None,
-                       help="Action to use for mainline trajectory. If not provided, auto-selects based on persona (patience) and state (task_uncertainty, dialogue_turn, prev_reject).")
-    parser.add_argument("--multi_turn", action="store_true",
-                        help="Enable multi-turn conversation mode. Generates full conversations until task completion.")
     parser.add_argument("--max_turns", type=int, default=5,
-                        help="Maximum number of dialogue turns in multi-turn mode (default: 5)")
-    parser.add_argument("--use_interactions", action="store_true", default=True,
-                        help="Enable multi-interaction turns within a single turn (default: True). "
-                             "LOW: 1 interaction, MID: 2 interactions, HIGH: multiple interactions.")
-    parser.add_argument("--no_interactions", action="store_true",
-                        help="Disable multi-interaction turns (use single-interaction mode for backward compatibility).")
-    parser.add_argument("--max_interactions", type=int, default=5,
-                       help="Maximum number of interactions within a single turn (default: 5)")
+                        help="Maximum number of dialogue turns per conversation (default: 5)")
     parser.add_argument("--persona_idx", type=int, default=0,
                        help="Index of persona to use (0=Impatient-Novice, 1=Neutral-Intermediate, 2=Busy-Manager, default: 0)")
     args = parser.parse_args()

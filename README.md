@@ -33,45 +33,30 @@ The data generation is split into two steps for flexibility: generate trajectori
 
 Step 1: Generate Trajectories
 
-**Single-turn mode (default, for DPO training)**:
-- Synthetic mode (quick test, no API calls):
-  ```bash
-  python scripts/generate_trajectories.py --mode synthetic --domain coding --n_states 50 --out logs/traj_synth_coding.jsonl
-  ```
-- Dataset mode (with OpenAI):
+**Multi-turn conversation mode**:
+- Generate complete conversations with sequential decisions until task completion:
   ```bash
   export OPENAI_API_KEY=sk-...
   python scripts/generate_trajectories.py --mode dataset --domain coding \
---dataset_path data/seeds/mbpp_states.jsonl --n_states 100 \
-    --out logs/traj_mbpp.jsonl --llm_model gpt-4o-mini
-  ```
-
-**Multi-turn mode (full conversations until task completion)**:
-- Generate complete conversations with sequential decisions:
-  ```bash
-  python scripts/generate_trajectories.py --mode dataset --domain coding \
     --dataset_path data/seeds/your_dataset.jsonl --n_states 10 \
     --out logs/traj_multiturn.jsonl --llm_model gpt-4o-mini \
-    --multi_turn --max_turns 5
+    --max_turns 5
+  ```
+- Synthetic mode (quick test, no API calls):
+  ```bash
+  python scripts/generate_trajectories.py --mode synthetic --domain coding --n_states 50 --out logs/traj_synth_coding.jsonl
   ```
 - This mode generates full conversations where:
   - At each turn, model decides: **Clarify** (ask questions) or **Execute** (provide solution)
   - State updates after each turn: `dialogue_turn++`, `prev_reject` (if user rejected)
   - Task completion is detected (code passes tests or planning is complete)
   - Each turn is saved as a separate trajectory entry with its own state and action
-
-**Strategy**: Mainline+Branches (single-turn mode, cost-efficient)
-- Generates 1 mainline trajectory + 2 branches per state = 3 trajectories total
-- Branch 1: The other action (Clarify if mainline is Execute, or vice versa)
-- Branch 2: Mainline action variant (regenerate with same action but different output)
-- Sequential Decision Process: actions are **Clarify** (ask questions) or **Execute** (provide solution)
-- Mainline action is **auto-selected from persona and state**:
+- Action selection is **auto-selected from persona and state**:
   - Low patience ("low") → Execute
   - High patience ("high") + low task_uncertainty → Clarify
   - Previous reject → Execute (don't ask more)
   - High dialogue_turn → Execute (already asked many questions)
   - Otherwise → Execute (default)
-- Manual override: `--mainline_action Clarify|Execute` (optional)
 
 Step 2: Compute Rewards
 - Compute rewards and generate preference pairs:

@@ -130,7 +130,8 @@ Provide a brief, specific answer to the assistant's question:"""
 
 
 def react(user_msg: str, assistant_msg: str, persona: Persona, 
-          llm_model: Optional[str] = None, total_questions_asked: int = 0) -> Dict[str, Any]:
+          llm_model: Optional[str] = None, total_questions_asked: int = 0,
+          disclosure_rule: Optional[Dict] = None) -> Dict[str, Any]:
     """Generate user reaction based on assistant message and persona.
     
     Implements Persona → Behavior Mapping:
@@ -140,13 +141,14 @@ def react(user_msg: str, assistant_msg: str, persona: Persona,
       * answer_clarity = EXPERTISE_MAP[expertise] (Equation 8)
     - If Assistant Executes:
       * No immediate user reaction (until final code checking)
-    
+
     Args:
         user_msg: The original user query/task
         assistant_msg: The assistant's message (may contain a question or code)
         persona: User persona (expertise affects answer clarity, patience affects reject probability)
         llm_model: LLM model name (e.g., "gpt-4o-mini"). Required.
         total_questions_asked: Total number of questions asked so far (for context)
+        disclosure_rule: Optional disclosure rule dict (for masked tasks, Step 3)
 
     Returns a dict with keys: user_reply, meta
     meta contains: answered_clarification, reject_signal, answer_clarity, silence, off_topic_flag, satisfaction
@@ -154,7 +156,7 @@ def react(user_msg: str, assistant_msg: str, persona: Persona,
     # Check if assistant is asking a question in this message
     asked_count_this_msg = assistant_msg.lower().count("?")
     length_tokens = max(1, len(assistant_msg.split()))
-    
+
     # Check if assistant is providing code (Execute action)
     has_code = (
         "```" in assistant_msg or
@@ -196,15 +198,23 @@ def react(user_msg: str, assistant_msg: str, persona: Persona,
             # Generate answer with clarity based on expertise
             if llm_model:
                 # Use LLM to generate realistic answer
-                specific_answer = generate_specific_answer_llm(
+                base_answer = generate_specific_answer_llm(
                     assistant_msg, user_msg, persona.domain, llm_model=llm_model, expertise=persona.expertise
                 )
             else:
                 # Use dummy answer for synthetic mode (testing)
-                specific_answer = generate_specific_answer_dummy(
+                base_answer = generate_specific_answer_dummy(
                     assistant_msg, user_msg, persona.domain, expertise=persona.expertise
                 )
-            user_reply = specific_answer
+            
+            # Apply disclosure rule if available (Step 3: disclosure rule)
+            if disclosure_rule:
+                from simulator.disclosure import generate_answer_with_disclosure
+                user_reply = generate_answer_with_disclosure(
+                    assistant_msg, user_msg, disclosure_rule, persona.expertise, base_answer
+                )
+            else:
+                user_reply = base_answer
             answered = 1
             reject_signal = 0
             answer_clarity = expertise_value  # answer_clarity = f(expertise)

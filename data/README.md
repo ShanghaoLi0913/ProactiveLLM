@@ -40,7 +40,7 @@ Data files organized by pipeline stage.
   - Generates assistant output (via `llm/provider.py` if `--llm_model` provided, else dummy)
   - Gets user reaction via `simulator/simulate.py`
 - **Output**: `logs/traj_*.jsonl` (trajectories: state + action + assistant_msg + persona + user_reaction)
-- **Process**: For each state, generates 3 trajectories (LOW/MID/HIGH actions)
+- **Process**: For each state, generates a multi-turn conversation (multiple trajectories, one per turn)
 
 ### Step 2: Compute Rewards
 - **Input**: `logs/traj_*.jsonl` (trajectories from Step 1)
