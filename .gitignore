@@ -1,3 +1,14 @@
+# Model outputs / artifacts
+outputs/
+data/models/
+*.tar
+
+# Scratch / temporary data files that shouldn't be versioned
+empty.csv
+empty.json
+headers_only.csv
+headers_only.json
+
 # data and outputs
 data/logs/**
 data/dpo/**
