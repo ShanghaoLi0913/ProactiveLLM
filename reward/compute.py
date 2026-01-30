@@ -20,86 +20,61 @@ def compute_task_score(sample: Dict, domain: str, assistant_output: Optional[str
     if not assistant_output:
         return 0.0
     
-    # Check if assistant output contains code (for coding tasks)
+    # Coding domain: only "Execute" is allowed to complete the task here.
+    # (Clarify is rewarded elsewhere via interrupt_cost / clarification logic.)
     if domain == "coding":
-        # Simple heuristic: check if output contains code blocks or function definitions
+        action = sample.get("action", "")
+        if action != "Execute":
+            return 0.0
+
+        # Simple heuristic: check if output contains code-like content
         has_code = (
-            "```" in assistant_output or
-            "def " in assistant_output or
-            "class " in assistant_output or
-            "import " in assistant_output
+            "```" in assistant_output
+            or "def " in assistant_output
+            or "class " in assistant_output
+            or "import " in assistant_output
         )
-        
-        # If no code, task is not completed (e.g., just asking questions)
         if not has_code:
             return 0.0
-        
-    # 状况一：建立"信息获取"与"代码成功"的因果，但与不确定性联动
-    # 高不确定性时才严格惩罚“未澄清就执行”
-    has_edge_cases_info = sample.get("has_edge_cases_info", False)
-    action = sample.get("action", "")
-    task_uncertainty = float(sample.get("task_uncertainty", 0.0))
-    
-    # 如果是Execute动作且没有edge_cases_info，根据不确定性设置上限
-    # 高不确定性：强惩罚；中等不确定性：中惩罚；低不确定性：允许执行
-    if action == "Execute" and not has_edge_cases_info:
+
+        has_edge_cases_info = bool(sample.get("has_edge_cases_info", False))
+        task_uncertainty = float(sample.get("task_uncertainty", 0.0))
         tests = sample.get("convcodeworld_tests")
+
+        # If tests are available, always score by running them
         if tests:
             try:
                 from eval.evaluate_dpo_model import extract_code_from_text, score_code_passfail
+
                 code = extract_code_from_text(assistant_output)
-                if code:
-                    actual_score = score_code_passfail(code, tests, timeout=30)
-                    if actual_score > 0.5:
-                        if task_uncertainty >= 0.7:
-                            return 0.1
-                        elif task_uncertainty >= 0.4:
-                            return 0.4
-                        else:
-                            return 0.7
-                    else:
-                        return 0.0
+                if not code:
+                    return 0.0
+
+                pass_rate = float(score_code_passfail(code, tests, timeout=30))
+                if pass_rate <= 0.5:
+                    return 0.0
+
+                # Full credit only if user-provided edge-case info was acquired
+                if has_edge_cases_info:
+                    return 1.0
+
+                # Otherwise cap reward based on task uncertainty (high uncertainty → stronger penalty)
+                if task_uncertainty >= 0.7:
+                    return 0.1
+                if task_uncertainty >= 0.4:
+                    return 0.4
+                return 0.7
             except Exception:
                 return 0.0
-        # 无测试时的启发式打分
+
+        # No tests available: use heuristic scoring
+        if has_edge_cases_info:
+            return 0.9
         if task_uncertainty >= 0.7:
             return 0.1
-        elif task_uncertainty >= 0.4:
+        if task_uncertainty >= 0.4:
             return 0.3
-        else:
-            return 0.6
-        
-        # 如果has_edge_cases_info=True，正常执行测试
-        tests = sample.get("convcodeworld_tests")
-        if tests:
-            # Import here to avoid circular dependency
-            try:
-                from eval.evaluate_dpo_model import extract_code_from_text, score_code_passfail
-                code = extract_code_from_text(assistant_output)
-                if code:
-                    # Execute tests and return pass/fail score
-                    score = score_code_passfail(code, tests, timeout=30)
-                    # 状况四：只有task_completed且has_edge_cases_info为True才给满分
-                    if score > 0.5 and has_edge_cases_info:
-                        return 1.0
-                    elif score > 0.5:
-                        # 测试通过但缺少edge_cases_info，保持较低分
-                        return 0.2
-                    else:
-                        # 测试未通过，返回0
-                        return 0.0
-                else:
-                    # Code extraction failed, assume task not completed
-                    return 0.0
-            except Exception:
-                # If test execution fails, return 0.0 (task not completed)
-                return 0.0
-        else:
-            # No tests available, use heuristic
-            if has_edge_cases_info:
-                return 0.9  # 有信息，假设较好
-            else:
-                return 0.2  # 没有信息，假设较差
+        return 0.6
     
     # For planning domain, use placeholder
     # TODO: Implement planning task score calculation
