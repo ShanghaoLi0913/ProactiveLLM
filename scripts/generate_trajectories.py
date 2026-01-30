@@ -11,6 +11,7 @@ Each trajectory contains: {state, action, action_prompt, assistant_msg, persona,
 import argparse
 import json
 import sys
+import re
 from pathlib import Path
 from typing import List, Dict, Optional
 
@@ -159,6 +160,9 @@ def load_states_from_dataset(dataset_path: Path, domain: str, limit: Optional[in
             temp_state = {"query": query}
             task_uncertainty = compute_task_uncertainty_from_state(temp_state)
         
+        # Support both "test" (BigCodeBench) and "convcodeworld_tests" field names
+        tests = row.get("convcodeworld_tests") or row.get("test")
+        
         result.append(
             {
                 "id": state_id,
@@ -167,7 +171,7 @@ def load_states_from_dataset(dataset_path: Path, domain: str, limit: Optional[in
                 "dialogue_turn": int(row.get("dialogue_turn", 0)),  # Start from 0
                 "prev_reject": int(row.get("prev_reject", 0)),
                 "task_uncertainty": task_uncertainty,
-                "convcodeworld_tests": row.get("convcodeworld_tests"),  # preserve if present
+                "convcodeworld_tests": tests,  # Support both "test" and "convcodeworld_tests"
             }
         )
     return result
@@ -216,40 +220,50 @@ def llm_output(state: Dict, action_prompt: str, model: str, conversation_history
     return chat_complete(system, user, model=model, max_tokens=400)
 
 
+def sanitize_clarify_message(assistant_msg: str) -> str:
+    """Ensure Clarify action does not include code output."""
+    # Remove fenced code blocks
+    sanitized = re.sub(r"```.*?```", "", assistant_msg, flags=re.DOTALL)
+    # If an opening fence exists without a closing fence, drop everything after it
+    if "```" in sanitized:
+        sanitized = sanitized.split("```", 1)[0]
+    # Remove inline code-ish lines
+    sanitized_lines = []
+    for line in sanitized.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("def ") or stripped.startswith("class ") or stripped.startswith("import "):
+            continue
+        sanitized_lines.append(line)
+    sanitized = "\n".join(sanitized_lines).strip()
+    if "?" not in sanitized:
+        sanitized = (sanitized + "\n" if sanitized else "")
+        sanitized += "Could you clarify any edge cases or constraints I should handle?"
+    return sanitized
+
+
 def select_mainline_action_from_persona(persona, state: Optional[Dict] = None) -> str:
     """
     Select mainline action based on persona characteristics and state.
     
     Sequential Decision Process: actions are Clarify or Execute.
     
-    Logic:
-    - Low patience → Execute (direct, no questions)
-    - High patience + low task_uncertainty → Clarify (can ask questions)
-    - Previous reject → Execute (don't ask more questions)
-    - High dialogue_turn → Execute (already asked many questions)
-    - Otherwise → Execute (default to execution)
+    Simplified logic:
+    - If user rejected in previous turn → Execute (don't ask more questions)
+    - If patience is low → Execute (low patience users prefer direct execution)
+    - Otherwise → Clarify (allow asking questions)
     """
-    task_uncertainty = state.get("task_uncertainty", 0.5) if state else 0.5
-    dialogue_turn = state.get("dialogue_turn", 0) if state else 0
     prev_reject = state.get("prev_reject", 0) if state else 0
     
-    # If user rejected in previous turn, execute (don't ask more questions)
+    # Condition 1: If user rejected in previous turn, execute (don't ask more questions)
     if prev_reject > 0:
         return "Execute"
     
-    # If already asked many questions (high dialogue_turn), execute
-    if dialogue_turn >= 2:
-        return "Execute"
-    
-    # Low patience → Execute (direct, no questions)
+    # Condition 2: If patience is low, execute (low patience users prefer direct execution)
     if persona.patience == "low":
         return "Execute"
-    # High patience + low task_uncertainty → Clarify (can ask questions)
-    elif persona.patience == "high" and task_uncertainty < 0.5:
+    
+    # Otherwise: Clarify (allow asking questions)
         return "Clarify"
-    # Otherwise → Execute (default to execution)
-    else:
-        return "Execute"
 
 
 def check_task_completion(state: Dict, assistant_msg: str, domain: str) -> bool:
@@ -349,7 +363,8 @@ def generate_multi_turn_conversation(initial_state: Dict, domain: str,
                                      llm_model: Optional[str] = None,
                                      persona_idx: int = 0,
                                      max_turns: int = 5,
-                                     action_selection_fn=None) -> List[Dict]:
+                                     action_selection_fn=None,
+                                     force_first_action: Optional[str] = None) -> List[Dict]:
     """
     Generate a multi-turn conversation until task completion or max turns.
     
@@ -360,6 +375,7 @@ def generate_multi_turn_conversation(initial_state: Dict, domain: str,
         persona_idx: Index of persona to use
         max_turns: Maximum number of dialogue turns
         action_selection_fn: Function(state) -> action (LOW/MID/HIGH). If None, uses persona-based selection.
+        force_first_action: If provided ("Execute" or "Clarify"), force the first action instead of auto-selecting.
     
     Returns:
         List of trajectory dicts, one per turn
@@ -368,10 +384,14 @@ def generate_multi_turn_conversation(initial_state: Dict, domain: str,
     persona = PERSONAS[persona_idx % len(PERSONAS)]
     trajectories = []
     current_state = initial_state.copy()
+    total_questions_asked = 0
     
     for turn in range(max_turns):
         # Select action for this turn
-        if action_selection_fn:
+        if turn == 0 and force_first_action:
+            # Force first action if specified (for sampling strategy)
+            action = force_first_action
+        elif action_selection_fn:
             action = action_selection_fn(current_state)
         else:
             action = select_mainline_action_from_persona(persona, current_state)
@@ -384,10 +404,42 @@ def generate_multi_turn_conversation(initial_state: Dict, domain: str,
         else:
             assistant_msg = dummy_llm_output(current_state, action_prompt)
         
+        # Enforce action/message consistency: Clarify should not include code
+        if action == "Clarify":
+            assistant_msg = sanitize_clarify_message(assistant_msg)
+        
+        # Track total questions asked to influence user patience over multiple clarifications
+        total_questions_asked += assistant_msg.count("?")
+        
         # Get simulator reaction
-        if llm_model is None:
-            raise ValueError("llm_model is required for user response generation. Please provide --llm_model argument.")
-        reaction = react(current_state["query"], assistant_msg, persona, llm_model=llm_model)
+        # Note: react() supports llm_model=None (dummy mode), but for realistic testing, llm_model is recommended
+        # Pass dialogue_turn to enable patience decay
+        reaction = react(
+            current_state["query"],
+            assistant_msg,
+            persona,
+            llm_model=llm_model,
+            total_questions_asked=total_questions_asked,
+            disclosure_rule=current_state.get("disclosure_rule"),
+            dialogue_turn=current_state.get("dialogue_turn", 0),
+        )
+        
+        # Track if edge_cases info was obtained through Clarify (for "contrastive conflicts")
+        has_edge_cases_info = current_state.get("has_edge_cases_info", False)
+        if action == "Clarify" and reaction.get("meta", {}).get("answered_clarification", 0) > 0:
+            # Check if the answer contains edge_cases information
+            user_reply = reaction.get("user_reply", "")
+            edge_case_keywords = ["edge case", "empty", "negative", "zero", "null", "none", "constraint", "special", "exception", "invalid", "error", "boundary", "extreme"]
+            if any(keyword.lower() in user_reply.lower() for keyword in edge_case_keywords):
+                has_edge_cases_info = True
+            
+            # If disclosure_rule has edge_cases, assume edge_cases info was obtained
+            disclosure_rule = current_state.get("disclosure_rule")
+            if disclosure_rule:
+                disclosure_info = disclosure_rule.get("disclosure_info", {})
+                input_constraints = disclosure_info.get("input_constraints", {})
+                if input_constraints.get("edge_cases"):
+                    has_edge_cases_info = True
         
         # Create trajectory for this turn
         traj = {
@@ -404,22 +456,40 @@ def generate_multi_turn_conversation(initial_state: Dict, domain: str,
             "user_reaction": reaction,
             "turn": turn + 1,
             "is_mainline": True,  # All turns in multi-turn are mainline
+            "is_terminal": False,  # Will be set to True if task completed or user stopped
+            "has_edge_cases_info": has_edge_cases_info,  # Track if edge_cases info was obtained
         }
         trajectories.append(traj)
         
-        # Check if task is completed
-        if check_task_completion(current_state, assistant_msg, domain):
+        # Check if task is completed (only for Execute action)
+        # Use enhanced task completion check that considers persona and edge_cases info
+        if action == "Execute":
+            task_completed = check_task_completion(current_state, assistant_msg, domain)
+            if task_completed:
             traj["task_completed"] = True
+                traj["is_terminal"] = True  # Mark as terminal state
             break
         
         # Check if user wants to stop (reject signal)
         if reaction.get("meta", {}).get("reject_signal", 0) > 0:
             traj["user_stopped"] = True
+            traj["task_completed"] = False  # Explicitly mark as not completed
+            traj["is_terminal"] = True  # Mark as terminal state
             break
         
         # Update state for next turn
         # is_same_turn=False because this is moving to the next dialogue turn (not within same turn)
         current_state = update_state_for_next_turn(current_state, reaction, assistant_msg, is_same_turn=False)
+        
+        # Update has_edge_cases_info in state for next turn
+        current_state["has_edge_cases_info"] = has_edge_cases_info
+    
+    # If loop ended without break (reached max_turns), mark last trajectory as terminal
+    if trajectories and not trajectories[-1].get("is_terminal", False):
+        trajectories[-1]["is_terminal"] = True
+        # If task wasn't completed and user didn't stop, this is a timeout scenario
+        if not trajectories[-1].get("task_completed", False) and not trajectories[-1].get("user_stopped", False):
+            trajectories[-1]["task_completed"] = False  # Explicitly mark as not completed
     
     return trajectories
 
@@ -428,7 +498,11 @@ def generate_trajectories(states: List[Dict], domain: str,
                          llm_model: Optional[str] = None,
                          persona_idx: int = 0,
                          max_turns: int = 5,
-                         out_file=None) -> List[Dict]:  # Optional file object for streaming write
+                         out_file=None,
+                         all_personas: bool = False,
+                         force_first_action: Optional[str] = None,
+                         sampling_strategy: str = "heuristic",
+                         n_samples_per_state_persona: int = 1) -> List[Dict]:
     """
     Generate multi-turn conversation trajectories.
     
@@ -439,26 +513,69 @@ def generate_trajectories(states: List[Dict], domain: str,
         states: List of initial states
         domain: "coding" or "planning"
         llm_model: LLM model name (None for dummy)
-        persona_idx: Index of persona to use
+        persona_idx: Index of persona to use (ignored if all_personas=True)
         max_turns: Maximum number of dialogue turns per conversation
         out_file: Optional file object for streaming write
+        all_personas: If True, generate trajectories for all personas for each state
+        force_first_action: Force first action ("Execute"/"Clarify"/None). Used for sampling strategy.
+        sampling_strategy: "heuristic" (deterministic) or "free" (random with temperature)
+        n_samples_per_state_persona: Number of samples to generate per (state, persona) combination
         
     Returns:
         List of trajectory dicts, one per turn
     """
-    trajectories = []
-    for st in states:
-        multi_turn_trajs = generate_multi_turn_conversation(
-            st, domain, llm_model, persona_idx, max_turns
-        )
-        trajectories.extend(multi_turn_trajs)
-        
-        # Stream write if out_file is provided
-        if out_file is not None:
-            for traj in multi_turn_trajs:
-                out_file.write(json.dumps(traj, ensure_ascii=False) + "\n")
-            out_file.flush()
-            print(f"  ✓ Generated {len(multi_turn_trajs)} turn trajectories for state {st.get('id', 'unknown')}", flush=True)
+    import random
+        trajectories = []
+    persona_indices = range(len(PERSONAS)) if all_personas else [persona_idx]
+    
+        for st in states:
+        for pid in persona_indices:
+            # Determine first action based on sampling strategy
+            first_actions = []
+            
+            if force_first_action:
+                # Explicitly specified action
+                first_actions = [force_first_action]
+            elif sampling_strategy == "heuristic":
+                # Heuristic strategy: generate samples with different forced actions
+                # Sample 1: Force Execute (blind guess)
+                # Sample 2: Force Clarify (ask questions)
+                # Sample 3 & 4: Free (auto-select from persona)
+                if n_samples_per_state_persona >= 1:
+                    first_actions.append("Execute")  # Sample 1: Force Execute
+                if n_samples_per_state_persona >= 2:
+                    first_actions.append("Clarify")  # Sample 2: Force Clarify
+                # Sample 3+ : Free (None = auto-select)
+                for _ in range(max(0, n_samples_per_state_persona - 2)):
+                    first_actions.append(None)
+            elif sampling_strategy == "free":
+                # Free strategy: random first action or auto-select
+                for _ in range(n_samples_per_state_persona):
+                    if random.random() < 0.5:
+                        first_actions.append(random.choice(["Execute", "Clarify"]))
+                    else:
+                        first_actions.append(None)  # Auto-select
+            else:
+                # Default: auto-select (None)
+                first_actions = [None] * n_samples_per_state_persona
+            
+            # Generate trajectories for each first action
+            for first_action in first_actions[:n_samples_per_state_persona]:
+            multi_turn_trajs = generate_multi_turn_conversation(
+                    st, domain, llm_model, pid, max_turns,
+                    force_first_action=first_action
+            )
+            trajectories.extend(multi_turn_trajs)
+            
+            # Stream write if out_file is provided
+            if out_file is not None:
+                for traj in multi_turn_trajs:
+                    out_file.write(json.dumps(traj, ensure_ascii=False) + "\n")
+                out_file.flush()
+                    persona_name = PERSONAS[pid].name
+                    action_str = f" (first_action={first_action})" if first_action else " (auto)"
+                    print(f"  ✓ Generated {len(multi_turn_trajs)} turn trajectories for state {st.get('id', 'unknown')} with {persona_name}{action_str}", flush=True)
+    
     return trajectories
 
 
@@ -480,7 +597,15 @@ def main():
     parser.add_argument("--max_turns", type=int, default=5,
                         help="Maximum number of dialogue turns per conversation (default: 5)")
     parser.add_argument("--persona_idx", type=int, default=0,
-                       help="Index of persona to use (0=Impatient-Novice, 1=Neutral-Intermediate, 2=Busy-Manager, default: 0)")
+                       help="Index of persona to use (0=Novice-Learner, 1=Busy-Developer, 2=Experienced-Engineer, default: 0). Ignored if --all_personas is set.")
+    parser.add_argument("--all_personas", action="store_true",
+                       help="Generate trajectories for all personas for each state (default: False)")
+    parser.add_argument("--force_first_action", type=str, choices=["Execute", "Clarify"], default=None,
+                       help="Force the first action (Execute/Clarify) instead of auto-selecting. If not specified, auto-selects based on persona and state (default)")
+    parser.add_argument("--sampling_strategy", type=str, choices=["heuristic", "free"], default="heuristic",
+                       help="Sampling strategy: 'heuristic' (deterministic with forced actions) or 'free' (random with temperature, default: heuristic)")
+    parser.add_argument("--n_samples", type=int, default=1,
+                       help="Number of samples to generate per (state, persona) combination (default: 1). For heuristic strategy, generates: 1=Execute, 2=Execute+Clarify, 3+=Execute+Clarify+Free...")
     args = parser.parse_args()
 
     out_dir = Path(__file__).resolve().parent.parent / "data"
@@ -493,18 +618,34 @@ def main():
         states = load_states_from_dataset(Path(args.dataset_path), domain=args.domain, limit=args.n_states)
     else:
         states = synth_states(args.domain, args.n_states)
-
-    # Generate trajectories (mainline+branches strategy to reduce LLM calls)
-    # Determine use_interactions flag
-    use_interactions = args.use_interactions and not args.no_interactions
     
     # Open output file for streaming write
-    out_path = out_dir / args.out
+    # Add timestamp to filename if not already present
+    from datetime import datetime
+    out_basename = args.out
+    if not any(token in out_basename for token in ["%Y", "%m", "%d", "%H", "%M", "%S", "timestamp"]):
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        if "." in out_basename:
+            name, ext = out_basename.rsplit(".", 1)
+            out_basename = f"{name}_{timestamp}.{ext}"
+        else:
+            out_basename = f"{out_basename}_{timestamp}"
+    out_path = out_dir / out_basename
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Determine persona count
+    n_personas = len(PERSONAS) if args.all_personas else 1
+    total_combinations = len(states) * n_personas * args.n_samples
     
     print(f"📝 Starting trajectory generation (streaming to {out_path})...")
     print(f"   - States: {len(states)}")
-    print(f"   - Expected trajectories: {len(states) * 3 if not args.multi_turn else 'variable'}")
+    print(f"   - Personas: {'All (' + str(len(PERSONAS)) + ')' if args.all_personas else f'Index {args.persona_idx} ({PERSONAS[args.persona_idx].name})'}")
+    print(f"   - Samples per (state, persona): {args.n_samples}")
+    print(f"   - Sampling strategy: {args.sampling_strategy}")
+    if args.force_first_action:
+        print(f"   - Force first action: {args.force_first_action}")
+    print(f"   - Total combinations: {total_combinations} (states × personas × samples)")
+    print(f"   - Expected trajectories: variable (depends on conversation length)")
     print()
     
     # Open file for streaming write
@@ -513,36 +654,45 @@ def main():
             states, 
             args.domain, 
             args.llm_model if args.llm_model else None,
-            mainline_action=args.mainline_action if args.mainline_action else None,
             persona_idx=args.persona_idx,
-            multi_turn=args.multi_turn,
             max_turns=args.max_turns,
-            use_interactions=use_interactions,
-            max_interactions=args.max_interactions,
-            out_file=f  # Pass file object for streaming write
+            out_file=f,  # Pass file object for streaming write
+            all_personas=args.all_personas,
+            force_first_action=args.force_first_action,
+            sampling_strategy=args.sampling_strategy,
+            n_samples_per_state_persona=args.n_samples
         )
 
     # Print summary
-    if args.multi_turn:
         n_completed = sum(1 for t in trajectories if t.get("task_completed", False))
         avg_turns = sum(t.get("turn", 1) for t in trajectories) / len(trajectories) if trajectories else 0
+    
+    # Count unique conversations (by state_id + persona)
+    from collections import defaultdict
+    conversations = defaultdict(set)
+    for traj in trajectories:
+        state_id = traj.get("state", {}).get("id", "unknown")
+        persona_name = traj.get("persona", {}).get("name", "unknown")
+        conversations[(state_id, persona_name)].add(traj.get("turn", 1))
+    n_conversations = len(conversations)
+    
+    # Count actions in first turn
+    first_actions = defaultdict(int)
+    for traj in trajectories:
+        if traj.get("turn", 0) == 1:
+            first_actions[traj.get("action", "unknown")] += 1
+    
+    print(f"\n{'='*60}")
+    print(f"Generation Summary")
+    print(f"{'='*60}")
         print(f"Wrote {len(trajectories)} trajectory turns to {out_path}")
-        print(f"  - Mode: Multi-turn conversation")
-        print(f"  - {len(states)} initial states")
+    print(f"  - Total conversations: {n_conversations}")
         print(f"  - Average turns per conversation: {avg_turns:.2f}")
-        print(f"  - Completed conversations: {n_completed}/{len(states)}")
-    else:
-        n_mainline = sum(1 for t in trajectories if t.get("is_mainline", False))
-        n_branches = len(trajectories) - n_mainline
-        mainline_actions_used = set(t.get("action") for t in trajectories if t.get("is_mainline", False))
-        print(f"Wrote {len(trajectories)} trajectories to {out_path}")
-        if args.mainline_action:
-            print(f"  - Strategy: mainline+branches (manual: {args.mainline_action} as mainline)")
-        else:
-            print(f"  - Strategy: mainline+branches (auto-selected from persona: {mainline_actions_used})")
-        print(f"  - {len(states)} states × (1 mainline + 2 branches) = {len(trajectories)} trajectories")
-        print(f"  - Expected: {len(states)} × 3 = {len(states) * 3} trajectories")
-        print(f"  - Mainline: {n_mainline}, Branches: {n_branches}")
+    print(f"  - Completed conversations: {n_completed}/{n_conversations}")
+    print(f"  - First action distribution:")
+    for action, count in first_actions.items():
+        print(f"      {action}: {count}")
+    print(f"{'='*60}")
 
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@ S_t = {task_uncertainty, dialogue_turn, prev_reject}
 关键原则：
 1. 只包含纯state信息，不包含任何action_prompt或模板内容
 2. 让模型自由判断：当前轮次应该澄清还是执行
-3. State只包含任务相关信息，不包含persona信息（patience等）
+3. 可选包含persona信息（如name），用于区分不同用户风格
 4. 训练和评估必须使用完全相同的render_state函数
 
 设计理念：
@@ -57,7 +57,7 @@ def render_state(state: Dict) -> str:
     write a python script that scrapes data...
     
     注意：
-    - State不包含persona信息（patience等）
+    - State可包含persona信息（如name），帮助模型区分用户风格
     - 这是序列决策问题，需要dialogue_turn（当前是第几轮对话）
     - 需要prev_reject（上一轮是否被用户拒绝，0或1）
     - task_uncertainty基于初始query计算，帮助模型判断是否需要澄清
@@ -77,6 +77,13 @@ def render_state(state: Dict) -> str:
     query = state.get("query", "")
     dialogue_turn = state.get("dialogue_turn", 0)
     prev_reject = state.get("prev_reject", 0)
+    persona = state.get("persona", {})
+    if isinstance(persona, dict):
+        persona_name = persona.get("name", "") or "Unknown"
+    elif isinstance(persona, str):
+        persona_name = persona or "Unknown"
+    else:
+        persona_name = "Unknown"
     
     # 提取初始query（如果query包含对话历史，只使用原始部分）
     # task_uncertainty应该基于初始query计算，不会动态更新
@@ -106,6 +113,7 @@ def render_state(state: Dict) -> str:
     # - query: 用户的请求（可能包含对话历史）
     lines = [
         f"[Domain] {domain}",
+        f"[Persona] {persona_name}",
         f"[Task Uncertainty] {task_uncertainty:.2f}",  # 明确显示不确定性（0.0=非常不清晰，1.0=非常清晰）
         f"[Dialogue Turn] {dialogue_turn}",  # 当前对话轮次
         f"[Previous Reject] {prev_reject}",  # 上一轮是否被拒绝（0=否，1=是）

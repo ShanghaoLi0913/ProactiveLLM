@@ -3,9 +3,13 @@ from typing import Dict, Optional
 
 def compute_task_score(sample: Dict, domain: str, assistant_output: Optional[str] = None) -> float:
     """Compute task success score.
+    
+    Enhanced to enforce "information acquisition" → "code success" causality:
+    - If Execute action and has_edge_cases_info=False, force low reward (0.1)
+    - This creates hard causal relationship for DPO training
 
     Args:
-        sample: State dict (may contain convcodeworld_tests for coding tasks)
+        sample: State dict (may contain convcodeworld_tests, has_edge_cases_info, etc.)
         domain: "coding" or "planning"
         assistant_output: Generated assistant message (optional, for test execution)
 
@@ -30,7 +34,42 @@ def compute_task_score(sample: Dict, domain: str, assistant_output: Optional[str
         if not has_code:
             return 0.0
         
-        # If has code, try to execute tests if available
+    # 状况一：建立"信息获取"与"代码成功"的因果，但与不确定性联动
+    # 高不确定性时才严格惩罚“未澄清就执行”
+    has_edge_cases_info = sample.get("has_edge_cases_info", False)
+    action = sample.get("action", "")
+    task_uncertainty = float(sample.get("task_uncertainty", 0.0))
+    
+    # 如果是Execute动作且没有edge_cases_info，根据不确定性设置上限
+    # 高不确定性：强惩罚；中等不确定性：中惩罚；低不确定性：允许执行
+    if action == "Execute" and not has_edge_cases_info:
+        tests = sample.get("convcodeworld_tests")
+        if tests:
+            try:
+                from eval.evaluate_dpo_model import extract_code_from_text, score_code_passfail
+                code = extract_code_from_text(assistant_output)
+                if code:
+                    actual_score = score_code_passfail(code, tests, timeout=30)
+                    if actual_score > 0.5:
+                        if task_uncertainty >= 0.7:
+                            return 0.1
+                        elif task_uncertainty >= 0.4:
+                            return 0.4
+                        else:
+                            return 0.7
+                    else:
+                        return 0.0
+            except Exception:
+                return 0.0
+        # 无测试时的启发式打分
+        if task_uncertainty >= 0.7:
+            return 0.1
+        elif task_uncertainty >= 0.4:
+            return 0.3
+        else:
+            return 0.6
+        
+        # 如果has_edge_cases_info=True，正常执行测试
         tests = sample.get("convcodeworld_tests")
         if tests:
             # Import here to avoid circular dependency
@@ -39,7 +78,16 @@ def compute_task_score(sample: Dict, domain: str, assistant_output: Optional[str
                 code = extract_code_from_text(assistant_output)
                 if code:
                     # Execute tests and return pass/fail score
-                    return score_code_passfail(code, tests, timeout=30)
+                    score = score_code_passfail(code, tests, timeout=30)
+                    # 状况四：只有task_completed且has_edge_cases_info为True才给满分
+                    if score > 0.5 and has_edge_cases_info:
+                        return 1.0
+                    elif score > 0.5:
+                        # 测试通过但缺少edge_cases_info，保持较低分
+                        return 0.2
+                    else:
+                        # 测试未通过，返回0
+                        return 0.0
                 else:
                     # Code extraction failed, assume task not completed
                     return 0.0
@@ -47,9 +95,11 @@ def compute_task_score(sample: Dict, domain: str, assistant_output: Optional[str
                 # If test execution fails, return 0.0 (task not completed)
                 return 0.0
         else:
-            # No tests available, use heuristic: if has code, assume 0.5 (uncertain)
-            # This is a fallback for cases without tests
-            return 0.5
+            # No tests available, use heuristic
+            if has_edge_cases_info:
+                return 0.9  # 有信息，假设较好
+            else:
+                return 0.2  # 没有信息，假设较差
     
     # For planning domain, use placeholder
     # TODO: Implement planning task score calculation
@@ -97,13 +147,13 @@ def compute_interrupt_cost_v2(meta: Dict, n_questions: int, assistant_msg: str =
     Returns:
         C_interrupt: 累积的中断成本
     """
-    # 参数设置（激进设置，最大化奖励差异，解决MID塌陷问题）
-    # 高γ：有效澄清带来显著奖励
-    # 高δ：无效澄清带来显著惩罚
-    # λ设为0：不惩罚提问本身，只惩罚无效提问
-    gamma = 0.3   # γ: 有效澄清的成本抵消（奖励）- 提高以激励有效澄清
-    delta = 0.7   # δ: 无效澄清的惩罚 - 提高以惩罚无效澄清
-    lambda_param = 0.0  # λ: 提出澄清的基本开销（设为0，不惩罚提问本身）
+    # 参数设置（更平衡：避免强烈偏向Clarify）
+    # γ：有效澄清的成本抵消（奖励）
+    # δ：无效澄清的惩罚
+    # λ：提问的基础成本，避免“无脑提问”
+    gamma = 0.2
+    delta = 0.8
+    lambda_param = 0.1
     
     # b_t: 是否提出澄清问题
     b = 1 if n_questions > 0 else 0

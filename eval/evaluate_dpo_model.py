@@ -38,7 +38,7 @@ def extract_code_from_text(text: str) -> Optional[str]:
     matches = re.findall(code_block_pattern, text, re.DOTALL)
     
     if matches:
-        # 过滤掉错误信息和测试代码
+        # 过滤掉错误信息和测试代码（更宽松：允许无def但包含imports/类）
         valid_blocks = []
         for code in matches:
             code = code.strip()
@@ -52,47 +52,27 @@ def extract_code_from_text(text: str) -> Optional[str]:
             test_markers = ["# Compilation feedback", "# Execution feedback", "Compilation feedback:", "Execution feedback:", "No syntax errors", "TEST_", "Passed all test"]
             for marker in test_markers:
                 if marker in code:
-                    # 找到标记位置，只保留之前的内容
                     marker_pos = code.find(marker)
                     code = code[:marker_pos].strip()
                     break
-            
-            # 确保代码包含函数定义
-            if "def " not in code:
-                continue
-            
-            # 确保代码不为空
             if not code.strip():
                 continue
-                
             valid_blocks.append(code)
         
         if valid_blocks:
-            # 如果有多个代码块，选择最长的（通常是最完整的）
-            # 或者选择包含函数体的那个
+            # 如果有多个代码块，选择最像“完整解法”的一个
             best_code = None
             best_score = 0
-            
             for code in valid_blocks:
-                # 计算分数：函数体行数
                 lines = code.split('\n')
-                # 检查是否有函数定义
                 has_def = any('def ' in line for line in lines)
-                if not has_def:
-                    continue
-                
-                # 计算函数体行数（缩进的行）
+                has_import = any(line.strip().startswith(("import ", "from ")) for line in lines)
                 body_lines = sum(1 for line in lines if line.strip() and line[0] in ' \t')
-                score = len(code) + body_lines * 10  # 长度 + 函数体行数权重
-                
+                score = len(code) + body_lines * 10 + (50 if has_def else 0) + (10 if has_import else 0)
                 if score > best_score:
                     best_score = score
                     best_code = code
-            
             if best_code:
-                # best_code已经在上面清理过了，但需要再次确保移除测试标记
-                # 如果代码中包含测试标记，只保留标记之前的内容
-                test_markers = ["# Compilation feedback", "# Execution feedback", "Compilation feedback:", "Execution feedback:", "No syntax errors", "TEST_", "Passed all test"]
                 cleaned_code = best_code
                 for marker in test_markers:
                     if marker in cleaned_code:
@@ -100,7 +80,6 @@ def extract_code_from_text(text: str) -> Optional[str]:
                         cleaned_code = cleaned_code[:marker_pos].strip()
                         break
                 return cleaned_code.strip()
-            # 如果没有找到最好的，返回最长的
             return max(valid_blocks, key=len)
     
     # 如果没有代码块，尝试提取函数定义（包括完整函数体）
@@ -142,7 +121,7 @@ def extract_code_from_text(text: str) -> Optional[str]:
 
 
 def score_code_passfail(code: str, tests: str, timeout: int = 30, debug: bool = False) -> float:
-    """执行代码和测试，返回pass/fail分数
+    """执行代码和测试，返回pass/fail分数或部分通过率
     
     支持两种测试用例格式：
     1. 可执行的Python代码（正常执行）
@@ -267,17 +246,33 @@ def score_code_passfail(code: str, tests: str, timeout: int = 30, debug: bool = 
             text=True,
             timeout=timeout
         )
+        output = (result.stdout or "") + "\n" + (result.stderr or "")
+        # 解析unittest输出，计算部分通过率
+        total = None
+        m_total = re.search(r"Ran\s+(\d+)\s+tests?", output)
+        if m_total:
+            total = int(m_total.group(1))
+        failures = 0
+        errors = 0
+        m_fail = re.search(r"failures=(\d+)", output)
+        m_err = re.search(r"errors=(\d+)", output)
+        if m_fail:
+            failures = int(m_fail.group(1))
+        if m_err:
+            errors = int(m_err.group(1))
         if result.returncode == 0:
             return 1.0
-        else:
-            # 执行失败，记录错误信息（仅在debug模式下）
-            if debug:
-                print(f"   执行错误 (returncode={result.returncode}):")
-                if result.stderr:
-                    print(f"   stderr: {result.stderr[:500]}")
-                if result.stdout:
-                    print(f"   stdout: {result.stdout[:500]}")
-            return 0.0
+        if total:
+            passed = max(0, total - failures - errors)
+            return passed / total
+        # 执行失败且无法解析，记录错误信息（仅在debug模式下）
+        if debug:
+            print(f"   执行错误 (returncode={result.returncode}):")
+            if result.stderr:
+                print(f"   stderr: {result.stderr[:500]}")
+            if result.stdout:
+                print(f"   stdout: {result.stdout[:500]}")
+        return 0.0
     except subprocess.TimeoutExpired:
         if debug:
             print(f"   执行超时 (>{timeout}s)")
@@ -374,7 +369,11 @@ def evaluate_model(
     
     results = []
     task_success_count = 0
+    soft_success_count = 0
+    test_pass_rates: List[float] = []
     total_samples = 0
+    execute_count = 0
+    execute_success_count = 0
     
     # Code generation strategy:
     # 1. If OpenAI API is available, use it (higher quality)
@@ -447,12 +446,19 @@ def evaluate_model(
         
         # 计算task score
         task_score = 0.0
+        if predicted_action == "Execute":
+            execute_count += 1
         if state["domain"] == "coding" and code:
             tests = state.get("convcodeworld_tests")
             if tests:
                 task_score = score_code_passfail(code, tests, debug=(i < 3))
+                test_pass_rates.append(task_score)
                 if task_score > 0:
                     task_success_count += 1
+                    if predicted_action == "Execute":
+                        execute_success_count += 1
+                if task_score >= 0.5:
+                    soft_success_count += 1
                 elif i < 3 or (i + 1) % 20 == 0:
                     print(f"\n⚠️  样本 {i+1}: 代码执行失败 (score=0)")
                     print(f"   提取的代码长度: {len(code)}")
@@ -502,8 +508,11 @@ def evaluate_model(
     
     # 计算统计信息
     task_success_rate = (task_success_count / total_samples * 100) if total_samples > 0 else 0.0
+    execute_success_rate = (execute_success_count / execute_count * 100) if execute_count > 0 else 0.0
     avg_reward = sum(r["total_reward"] for r in results) / len(results) if results else 0.0
     avg_task_score = sum(r["task_score"] for r in results) / len(results) if results else 0.0
+    avg_test_pass_rate = sum(test_pass_rates) / len(test_pass_rates) if test_pass_rates else 0.0
+    soft_task_success_rate = (soft_success_count / total_samples * 100) if total_samples > 0 else 0.0
     
     # Action准确率
     action_matches = sum(1 for r in results if r["predicted_action"] == r["chosen_action"])
@@ -511,19 +520,29 @@ def evaluate_model(
     
     summary = {
         "task_success_rate": task_success_rate,
+        "task_success_rate_execute_only": execute_success_rate,
+        "predicted_execute_rate": (execute_count / len(results) * 100) if results else 0.0,
         "avg_reward": avg_reward,
         "avg_task_score": avg_task_score,
+        "avg_test_pass_rate": avg_test_pass_rate,
+        "soft_task_success_rate": soft_task_success_rate,
         "action_accuracy": action_accuracy,
         "total_samples": len(results),
         "task_evaluated_samples": total_samples,
         "task_success_count": task_success_count,
+        "execute_count": execute_count,
+        "execute_success_count": execute_success_count,
     }
     
     print("\n" + "="*50)
     print("📊 评估结果:")
     print(f"  Task Success Rate: {task_success_rate:.2f}%")
+    print(f"  Task Success (Execute Only): {execute_success_rate:.2f}%")
+    print(f"  Soft Task Success (>=50% tests): {soft_task_success_rate:.2f}%")
+    print(f"  Predicted Execute Rate: {summary['predicted_execute_rate']:.2f}%")
     print(f"  Average Reward: {avg_reward:.4f}")
     print(f"  Average Task Score: {avg_task_score:.4f}")
+    print(f"  Avg Test Pass Rate: {avg_test_pass_rate:.4f}")
     print(f"  Action Accuracy: {action_accuracy:.2f}%")
     print("="*50)
     

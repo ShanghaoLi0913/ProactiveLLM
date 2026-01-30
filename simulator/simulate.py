@@ -13,9 +13,14 @@ class Persona:
 
 
 # Mapping from patience level to numeric value (for calculations)
+# Updated values to increase differentiation between Busy-Developer and Experienced-Engineer:
+# - low: 0.4 (was 0.5) - Busy-Developer now has 60% reject probability at Turn 0 (more impatient)
+# - mid: 0.75 (was 0.7) - Experienced-Engineer now has 25% reject probability at Turn 0 (more patient)
+# - high: 0.9 (unchanged) - Novice-Learner maintains 90% answer probability at Turn 0
+# This creates a clearer distinction: Busy (60% reject) vs Experienced (25% reject) = 35% difference
 PATIENCE_MAP = {
-    "low": 0.3,
-    "mid": 0.6,
+    "low": 0.4,
+    "mid": 0.75,
     "high": 0.9,
 }
 
@@ -131,13 +136,13 @@ Provide a brief, specific answer to the assistant's question:"""
 
 def react(user_msg: str, assistant_msg: str, persona: Persona, 
           llm_model: Optional[str] = None, total_questions_asked: int = 0,
-          disclosure_rule: Optional[Dict] = None) -> Dict[str, Any]:
+          disclosure_rule: Optional[Dict] = None, dialogue_turn: int = 0) -> Dict[str, Any]:
     """Generate user reaction based on assistant message and persona.
     
     Implements Persona → Behavior Mapping:
     - If Assistant Clarifies:
-      * P(answer) = patience (Equation 6)
-      * P(reject) = 1 - patience (Equation 7)
+      * P(answer) = patience × (0.85)^{Turn} (Patience decays with turn, slower decay)
+      * P(reject) = 1 - P(answer)
       * answer_clarity = EXPERTISE_MAP[expertise] (Equation 8)
     - If Assistant Executes:
       * No immediate user reaction (until final code checking)
@@ -149,6 +154,7 @@ def react(user_msg: str, assistant_msg: str, persona: Persona,
         llm_model: LLM model name (e.g., "gpt-4o-mini"). Required.
         total_questions_asked: Total number of questions asked so far (for context)
         disclosure_rule: Optional disclosure rule dict (for masked tasks, Step 3)
+        dialogue_turn: Current dialogue turn number (0-indexed). Used for patience decay.
 
     Returns a dict with keys: user_reply, meta
     meta contains: answered_clarification, reject_signal, answer_clarity, silence, off_topic_flag, satisfaction
@@ -166,8 +172,19 @@ def react(user_msg: str, assistant_msg: str, persona: Persona,
     )
     
     # Convert persona attributes to numeric values
-    patience_value = PATIENCE_MAP[persona.patience]
+    base_patience = PATIENCE_MAP[persona.patience]
     expertise_value = EXPERTISE_MAP[persona.expertise]
+    
+    # Apply patience decay based on dialogue turn
+    # Formula: P_survive = Patience × (0.85)^{Turn}
+    # Changed from 0.7 to 0.85 to slow down decay and allow longer conversations
+    # This means:
+    # - Turn 0 (first turn): P_survive = Patience × 1.0 = Patience (full patience)
+    # - Turn 1 (second turn): P_survive = Patience × 0.85 (15% decay)
+    # - Turn 2 (third turn): P_survive = Patience × 0.72 (28% total decay)
+    # - Turn 3 (fourth turn): P_survive = Patience × 0.61 (39% total decay)
+    # This creates differentiation: low patience users reject faster, but conversations last longer
+    patience_value = base_patience * (0.85 ** dialogue_turn)
     
     # If Assistant Executes (provides code):
     # - No immediate user reaction (until final code checking)
@@ -191,37 +208,106 @@ def react(user_msg: str, assistant_msg: str, persona: Persona,
     # - answer_clarity = EXPERTISE_MAP[expertise] (Equation 8)
     
     if asked_count_this_msg > 0:
+        # Enhanced reject logic for "contrastive conflicts":
+        # - Experienced-Engineer: Reject if question is too obvious or redundant
+        # - Busy-Developer: Already has low patience, will reject frequently
+        # - Novice-Learner: High patience, rarely rejects
+        
+        # Check if question is "obvious" or "redundant" (for Experienced-Engineer)
+        is_obvious_question = False
+        if persona.expertise == "high" and persona.patience == "mid":  # Experienced-Engineer
+            # Check if question asks about information already in original prompt
+            question_lower = assistant_msg.lower()
+            user_query_lower = user_msg.lower()
+            
+            # Simple heuristic: if question keywords appear in original prompt, it's obvious
+            obvious_keywords = ["what", "how", "which", "when", "where", "why"]
+            question_words = [w for w in question_lower.split() if w in obvious_keywords]
+            
+            # If question is very short or asks about something already mentioned, it's obvious
+            if len(assistant_msg.split()) < 10:  # Very short question
+                is_obvious_question = True
+            elif any(word in user_query_lower for word in question_words):
+                # Question asks about something already in prompt
+                is_obvious_question = True
+        
         # Determine if user answers or rejects based on patience
-        # P(answer) = patience, P(reject) = 1 - patience
-        if random.random() < patience_value:
+        # For Experienced-Engineer with obvious questions, increase reject probability
+        effective_patience = patience_value
+        if is_obvious_question and persona.expertise == "high":
+            # Experienced-Engineer rejects obvious questions more often
+            effective_patience = patience_value * 0.5  # Reduce patience by 50% for obvious questions
+        
+        # Busy-Developer: make rejection much more likely for clarify (target >80% reject rate)
+        if persona.patience == "low":
+            effective_patience = min(effective_patience, 0.1)
+        
+        # After multiple questions, mildly reduce patience for non-busy users (keep Turn 3+ alive)
+        if total_questions_asked >= 2 and persona.patience != "low":
+            effective_patience = effective_patience * 0.85
+        
+        if random.random() < effective_patience:
             # User answers (with probability = patience)
+            # 状况三：强制追问采样 - 用户第一次回复模糊，迫使再次Clarify
+            # 策略：Turn 0 的第一次 Clarify，对复杂任务有更高概率给模糊回复
+            is_first_clarify = dialogue_turn == 0
+            should_give_vague_answer = False
+            if is_first_clarify and disclosure_rule and random.random() < 0.65:
+                disclosure_info = disclosure_rule.get("disclosure_info", {})
+                input_constraints = disclosure_info.get("input_constraints", {})
+                edge_cases = input_constraints.get("edge_cases", [])
+                # 如果有多个edge_cases（信息需要分步披露），第一次可以给模糊回复
+                if len(edge_cases) > 1:
+                    should_give_vague_answer = True
+            
+            if should_give_vague_answer:
+                # 给模糊回复，迫使Assistant再次Clarify
+                if persona.domain == "coding":
+                    user_reply = "I want a general solution that works. Just do it the standard way."
+                else:
+                    user_reply = "Just a general plan is fine. You decide."
+                # 标记为回答了，但清晰度很低
+                answered = 1
+                reject_signal = 0
+                answer_clarity = 0.2  # 低清晰度，表示回答模糊
+            else:
+                # 正常生成答案
             # Generate answer with clarity based on expertise
             if llm_model:
                 # Use LLM to generate realistic answer
-                base_answer = generate_specific_answer_llm(
+                    base_answer = generate_specific_answer_llm(
                     assistant_msg, user_msg, persona.domain, llm_model=llm_model, expertise=persona.expertise
                 )
             else:
                 # Use dummy answer for synthetic mode (testing)
-                base_answer = generate_specific_answer_dummy(
+                    base_answer = generate_specific_answer_dummy(
                     assistant_msg, user_msg, persona.domain, expertise=persona.expertise
                 )
-            
-            # Apply disclosure rule if available (Step 3: disclosure rule)
-            if disclosure_rule:
-                from simulator.disclosure import generate_answer_with_disclosure
-                user_reply = generate_answer_with_disclosure(
-                    assistant_msg, user_msg, disclosure_rule, persona.expertise, base_answer
-                )
-            else:
-                user_reply = base_answer
+                
+                # Apply disclosure rule if available (Step 3: disclosure rule)
+                # 状况三：分级Disclosure - 将隐藏信息拆分为2部分
+                # Pass dialogue_turn to enable step-wise disclosure based on K = ⌈Expertise × 3⌉
+                if disclosure_rule:
+                    from simulator.disclosure import generate_answer_with_disclosure
+                    user_reply = generate_answer_with_disclosure(
+                        assistant_msg, user_msg, disclosure_rule, persona.expertise, base_answer,
+                        dialogue_turn=dialogue_turn
+                    )
+                else:
+                    user_reply = base_answer
             answered = 1
             reject_signal = 0
             answer_clarity = expertise_value  # answer_clarity = f(expertise)
         else:
-            # User rejects (with probability = 1 - patience)
+            # User rejects (with probability = 1 - effective_patience)
+            # Enhanced reject messages for different personas
+            if persona.expertise == "high" and is_obvious_question:
+                # Experienced-Engineer: More specific reject message for obvious questions
+                user_reply = "This information is already in the prompt. Please proceed with the implementation."
+            else:
+                # Default reject message
             user_reply = "Stop asking, just give me the plan." if persona.domain == "planning" else "Stop asking, just give me the code."
-            answered = 0
+        answered = 0
             reject_signal = 1
             answer_clarity = 0.0  # No answer when rejected
     else:

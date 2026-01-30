@@ -75,7 +75,7 @@ class RewardConfig:
     w_task: float = 1.0
     # 提高w_interrupt以放大有效澄清（奖励）和无效澄清（惩罚）的差异
     # 这有助于解决MID塌陷问题：让有效澄清的MID/HIGH获得更高reward
-    w_interrupt: float = 0.15  # 从0.1提高到0.15，放大interrupt_cost的影响
+    w_interrupt: float = 0.3  # 提高到0.3，放大interrupt_cost的影响以拉开分差
 
 
 def load_trajectories(path: Path) -> List[Dict]:
@@ -92,11 +92,15 @@ def load_trajectories(path: Path) -> List[Dict]:
 
 def group_by_state(trajs: List[Dict]) -> Dict[Tuple[str, int], List[Dict]]:
     """
-    Group trajectories by (state_id, decision_point).
+    Group trajectories by (state_id, dialogue_turn).
+    
+    This ensures that preference pairs are generated within the same dialogue turn,
+    preventing the model from learning feature drift (e.g., longer query = higher reward)
+    that would occur when comparing trajectories across different dialogue turns.
 
     Assumes each trajectory has:
       - traj["state"]["id"]
-      - traj.get("decision_point", 0)
+      - traj["state"]["dialogue_turn"]
     """
     groups: Dict[Tuple[str, int], List[Dict]] = {}
     for t in trajs:
@@ -105,8 +109,9 @@ def group_by_state(trajs: List[Dict]) -> Dict[Tuple[str, int], List[Dict]]:
         if sid is None:
             # Fallback: hashable repr
             sid = json.dumps(st, sort_keys=True)
-        dp = int(t.get("decision_point", 0))
-        key = (sid, dp)
+        # Use dialogue_turn instead of decision_point for multi-turn mode
+        dialogue_turn = int(st.get("dialogue_turn", 0))
+        key = (sid, dialogue_turn)
         groups.setdefault(key, []).append(t)
     return groups
 
@@ -163,20 +168,43 @@ def compute_rewards_for_group(
                 final_assistant_msg = t["interactions"][-1].get("assistant_msg", "")
             
             # Compute task_score based on final code (if any)
-            task_score = compute_task_score(state, domain, assistant_output=final_assistant_msg)
+            # 需要传递完整的trajectory信息（包括action和has_edge_cases_info）给compute_task_score
+            state_with_traj_info = state.copy()
+            state_with_traj_info["action"] = t.get("action", "")
+            state_with_traj_info["has_edge_cases_info"] = t.get("has_edge_cases_info", False)
+            task_score = compute_task_score(state_with_traj_info, domain, assistant_output=final_assistant_msg)
             interrupt_cost = total_interrupt_cost
+            assistant_msg_for_pref = final_assistant_msg
             
         else:
             # Single-interaction mode (backward compatibility)
             assistant_msg = t.get("assistant_msg", "")
+            assistant_msg_for_pref = assistant_msg
             
             # Task score (0/1 for coding with tests)
-            task_score = compute_task_score(state, domain, assistant_output=assistant_msg)
+            # 需要传递完整的trajectory信息（包括action和has_edge_cases_info）给compute_task_score
+            state_with_traj_info = state.copy()
+            state_with_traj_info["action"] = t.get("action", "")
+            state_with_traj_info["has_edge_cases_info"] = t.get("has_edge_cases_info", False)
+            task_score = compute_task_score(state_with_traj_info, domain, assistant_output=assistant_msg)
             
             # Interrupt cost (Reward_version2: 新公式)
             # C_Interrupt = Σ_{t=1}^{T} (δb_t r_t + λb_t - γb_t a_t)
             meta = (t.get("user_reaction") or {}).get("meta", {})
             n_questions = assistant_msg.count("?")
+            
+            # 状况一/二：为Clarify提供可学习的正向回报（代理成功信号）
+            # 如果Clarify获得有效信息（answered_clarification + has_edge_cases_info），
+            # 将task_score提升到高分，强化“问对问题”的回报。
+            action = t.get("action", "")
+            has_edge_cases_info = t.get("has_edge_cases_info", False)
+            if action == "Clarify":
+                if meta.get("answered_clarification", 0) > 0 and has_edge_cases_info:
+                    task_score = max(task_score, 1.0)
+                elif meta.get("answered_clarification", 0) > 0:
+                    task_score = max(task_score, 0.5)
+                elif meta.get("reject_signal", 0) > 0:
+                    task_score = 0.0
             
             # 使用新版本的interrupt cost计算
             interrupt_cost = compute_interrupt_cost_v2(
@@ -185,11 +213,31 @@ def compute_rewards_for_group(
                 assistant_msg=assistant_msg,
             )
         
-        # 新公式: R = R_task - C_interrupt
+        # 状况四：确保Reward有显著分差
+        
+        # 1. 失败项判定更狠：user_stopped时Reward一律0
+        user_stopped = t.get("user_stopped", False)
+        if user_stopped:
+            total_r = 0.0  # 用户气跑了，无论代码多好，Reward一律0
+        else:
+            # 2. 对Busy角色，每多一轮对话，加大扣分（从0.1到0.4）
+            persona_name = (t.get("persona", {}) or {}).get("name", "")
+            dialogue_turn = state.get("dialogue_turn", 0)
+            
+            # 额外的对话轮次惩罚（仅对Busy-Developer）
+            additional_penalty = 0.0
+            if persona_name == "Busy-Developer" and dialogue_turn > 0:
+                # 每多一轮，扣0.4分（从0.1提高到0.4）
+                additional_penalty = 0.4 * dialogue_turn
+            
+            # 新公式: R = R_task - C_interrupt - additional_penalty
         # 注意：在新公式中，有效澄清的奖励已经包含在C_Interrupt的计算中
         # （通过-γb_t a_t项减少成本，相当于奖励）
-        r = cfg.w_task * task_score - cfg.w_interrupt * interrupt_cost
-        total_r = float(r)
+            r = cfg.w_task * task_score - cfg.w_interrupt * interrupt_cost - additional_penalty
+            total_r = float(max(0.0, r))  # 确保reward不为负
+        
+        # 3. 成功项奖励明确：只有task_completed且has_edge_cases_info为True才给满分
+        # 这个逻辑已经在compute_task_score中实现了
 
         scored.append(
             {
@@ -197,6 +245,8 @@ def compute_rewards_for_group(
                 "task_score": float(task_score),
                 "interrupt_cost": float(interrupt_cost),
                 "total_reward": total_r,
+                # Ensure preference text is available for multi-turn traces
+                "assistant_msg": assistant_msg_for_pref,
             }
         )
     return scored
@@ -204,7 +254,7 @@ def compute_rewards_for_group(
 
 def build_prefs_from_group(scored_trajs: List[Dict]) -> List[Dict]:
     """
-    Given scored trajectories for a single (state, decision_point),
+    Given scored trajectories for a single (state_id, dialogue_turn),
     generate preference pairs (chosen, rejected) based on total_reward.
 
     Strategy:
@@ -219,10 +269,22 @@ def build_prefs_from_group(scored_trajs: List[Dict]) -> List[Dict]:
 
     scored_sorted = sorted(scored_trajs, key=lambda t: t["total_reward"], reverse=True)
     best = scored_sorted[0]
-    worst = scored_sorted[-1]
+
+    # Prefer cross-action contrast to strengthen preference signal
+    worst = None
+    for candidate in reversed(scored_sorted):
+        if candidate.get("action") != best.get("action"):
+            worst = candidate
+            break
+    if worst is None:
+        return []
 
     # If equal reward, skip to avoid noisy / conflicting pairs
     if best["total_reward"] <= worst["total_reward"]:
+        return []
+
+    # If text is identical, skip to avoid ambiguous supervision
+    if (best.get("assistant_msg", "").strip() == worst.get("assistant_msg", "").strip()):
         return []
 
     state = best["state"]
@@ -253,10 +315,10 @@ def compute_preferences(
     print(f"📊 Loaded {len(trajs)} trajectories")
 
     groups = group_by_state(trajs)
-    print(f"📊 Grouped into {len(groups)} (state, decision_point) groups")
+    print(f"📊 Grouped into {len(groups)} (state_id, dialogue_turn) groups")
 
     prefs: List[Dict] = []
-    for (sid, dp), g in groups.items():
+    for (sid, dialogue_turn), g in groups.items():
         scored = compute_rewards_for_group(g, cfg)
         group_prefs = build_prefs_from_group(scored)
         prefs.extend(group_prefs)

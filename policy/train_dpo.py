@@ -116,8 +116,12 @@ def train(
 
     # Model loading with optional 4-bit quantization (QLoRA)
     use_qlora = False
-    print("🔄 Loading model...")
-    if _HAS_BNB:
+    has_cuda = torch.cuda.is_available()
+    use_bf16 = has_cuda and torch.cuda.is_bf16_supported()
+    use_fp16 = has_cuda and not use_bf16
+    device_map = "auto" if has_cuda else "cpu"
+    print(f"🔄 Loading model... (cuda={has_cuda}, bf16={use_bf16}, fp16={use_fp16})")
+    if _HAS_BNB and has_cuda:
         try:
             quantization_config = BitsAndBytesConfig(
                 load_in_4bit=True,
@@ -129,8 +133,8 @@ def train(
             model = AutoModelForCausalLM.from_pretrained(
                 snapshot_dir if snapshot_dir else model_name,
                 quantization_config=quantization_config,
-                device_map="auto",
-                torch_dtype=torch.bfloat16,
+                device_map=device_map,
+                torch_dtype=torch.bfloat16 if use_bf16 else torch.float16,
                 low_cpu_mem_usage=True,
                 token=hf_token if not snapshot_dir else None,
                 cache_dir=cache_dir if not snapshot_dir else None,
@@ -141,19 +145,19 @@ def train(
             print(f"⚠️  QLoRA load failed ({e}), falling back to FP16")
             model = AutoModelForCausalLM.from_pretrained(
                 snapshot_dir if snapshot_dir else model_name,
-                torch_dtype=torch.float16,
-                device_map="auto",
+                torch_dtype=torch.float16 if use_fp16 else torch.float32,
+                device_map=device_map,
                 low_cpu_mem_usage=True,
                 token=hf_token if not snapshot_dir else None,
                 cache_dir=cache_dir if not snapshot_dir else None,
                 local_files_only=snapshot_dir is not None,
             )
     else:
-        print("⚠️  bitsandbytes not available, using FP16")
+        print("⚠️  bitsandbytes not available, using FP16/FP32")
         model = AutoModelForCausalLM.from_pretrained(
             snapshot_dir if snapshot_dir else model_name,
-            torch_dtype=torch.float16,
-            device_map="auto",
+            torch_dtype=torch.float16 if use_fp16 else torch.float32,
+            device_map=device_map,
             low_cpu_mem_usage=True,
             token=hf_token if not snapshot_dir else None,
             cache_dir=cache_dir if not snapshot_dir else None,
@@ -213,7 +217,7 @@ def train(
         beta=beta,
         max_length=2048,
         gradient_checkpointing=True,
-        bf16=True,
+        bf16=use_bf16,
         dataloader_pin_memory=False,
         dataloader_num_workers=0,
         reference_free=True,

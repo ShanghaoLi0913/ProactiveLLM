@@ -115,7 +115,8 @@ Each trajectory (one per line in JSONL):
   "action_prompt": "You are an assistant...",
   "assistant_msg": "请问需要处理空字符串吗？然后我会给出代码。",
   "persona": {
-    "name": "Impatient-Novice",
+    "name": "Busy-Developer",
+    "expertise": "mid",
     "patience": "low",
     ...
   },
