@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 from typing import Dict, List, Optional
 import argparse
+from contextlib import nullcontext
 
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -292,7 +293,104 @@ def score_code_passfail(code: str, tests: str, timeout: int = 30, debug: bool = 
 # Import unified render_state function - MUST be identical to training
 # (Already has PROJECT_ROOT in sys.path from earlier)
 from policy.render_state import render_state
-from policy.infer import select_action, execute_action
+from policy.infer import get_template
+
+
+def set_global_seed(seed: int) -> None:
+    """Best-effort seeding for reproducible evaluation runs."""
+    import random
+    try:
+        import numpy as np  # type: ignore
+    except Exception:
+        np = None  # type: ignore
+
+    random.seed(seed)
+    if np is not None:
+        np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+    # Make CuDNN deterministic where applicable
+    try:
+        torch.backends.cudnn.deterministic = True  # type: ignore[attr-defined]
+        torch.backends.cudnn.benchmark = False  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
+    # HF helper (also seeds python/random/np/torch when available)
+    try:
+        from transformers import set_seed as hf_set_seed  # type: ignore
+        hf_set_seed(seed)
+    except Exception:
+        pass
+
+
+def select_action_with_loaded_model(state_text: str, tokenizer, model) -> str:
+    """Select action using logits on the next token, without re-loading models per sample."""
+    inputs = tokenizer(state_text, return_tensors="pt")
+    inputs = {k: v.to(model.device) for k, v in inputs.items()}
+
+    with torch.no_grad():
+        logits = model(**inputs).logits
+        next_token_logits = logits[0, -1, :]
+
+        action_tokens = ["Clarify", "Execute"]
+        action_token_ids = [tokenizer.convert_tokens_to_ids(token) for token in action_tokens]
+
+        valid_actions = []
+        valid_ids = []
+        for token, token_id in zip(action_tokens, action_token_ids):
+            if token_id is not None:
+                valid_actions.append(token)
+                valid_ids.append(token_id)
+
+        if not valid_ids:
+            return "Execute"
+
+        action_logits = next_token_logits[valid_ids]
+        best_action_idx = torch.argmax(action_logits).item()
+        return valid_actions[best_action_idx]
+
+
+def generate_with_template_local(
+    model,
+    tokenizer,
+    template: str,
+    task_prompt: str,
+    max_new_tokens: int = 400,
+) -> str:
+    """Generate a response from a local HF model using a system+user template."""
+    messages = [
+        {"role": "system", "content": template},
+        {"role": "user", "content": f"[Task]\n{task_prompt}"},
+    ]
+
+    if hasattr(tokenizer, "apply_chat_template") and tokenizer.chat_template:
+        prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    else:
+        prompt = f"{template}\n\n[Task]\n{task_prompt}\n\nAssistant:"
+
+    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
+    inputs = {k: v.to(model.device) for k, v in inputs.items()}
+
+    # For PeftModel, disable adapter during code generation to keep "separated" behavior.
+    adapter_ctx = model.disable_adapter() if hasattr(model, "disable_adapter") else nullcontext()
+
+    with torch.no_grad(), adapter_ctx:
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=True,
+            temperature=0.7,
+            top_p=0.9,
+            pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
+        )
+
+    generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    if "Assistant:" in generated_text:
+        generated_text = generated_text.split("Assistant:")[-1].strip()
+    return generated_text
 
 
 def generate_response(model, tokenizer, prompt: str, max_length: int = 2048) -> str:
@@ -348,11 +446,14 @@ def evaluate_model(
     base_model: str,
     prefs_path: str,
     max_samples: Optional[int] = None,
-    output_path: Optional[str] = None
+    output_path: Optional[str] = None,
+    seed: int = 42,
 ):
     """评估DPO模型"""
     print(f"📊 加载模型: {model_dir}")
     print(f"📊 Base模型: {base_model}")
+    print(f"🎲 Seed: {seed}")
+    set_global_seed(seed)
     
     # Scheme A: Separated Architecture
     # Policy model only predicts action, code generation is separate
@@ -362,8 +463,16 @@ def evaluate_model(
     
     # 加载测试数据
     prefs = load_jsonl(Path(prefs_path))
+    # IMPORTANT:
+    # Do NOT take the first N examples — prefs JSONL ordering is arbitrary and can heavily
+    # bias results. Instead, sample deterministically using the evaluation seed.
     if max_samples:
-        prefs = prefs[:max_samples]
+        if max_samples >= len(prefs):
+            pass
+        else:
+            import random
+            rng = random.Random(seed)
+            prefs = rng.sample(prefs, k=max_samples)
     
     print(f"📊 评估 {len(prefs)} 个样本", flush=True)
     
@@ -385,6 +494,33 @@ def evaluate_model(
     else:
         print("✅ 使用Base Llama模型进行代码生成（不需要API）")
         code_model_name = base_model  # Use base Llama model for code generation
+
+    # Load policy model ONCE (previously re-loaded per sample, making eval extremely slow and noisy)
+    print("🔧 预加载Policy模型（一次加载，循环复用）", flush=True)
+    try:
+        policy_tokenizer = AutoTokenizer.from_pretrained(model_dir, use_fast=True)
+    except Exception:
+        policy_tokenizer = AutoTokenizer.from_pretrained(base_model, use_fast=True)
+        special_tokens = {"additional_special_tokens": ["Clarify", "Execute"]}
+        policy_tokenizer.add_special_tokens(special_tokens)
+
+    if policy_tokenizer.pad_token is None:
+        policy_tokenizer.pad_token = policy_tokenizer.eos_token
+
+    base_model_obj = AutoModelForCausalLM.from_pretrained(
+        base_model,
+        torch_dtype=torch.bfloat16,
+        device_map="auto",
+        low_cpu_mem_usage=True,
+    )
+    if len(policy_tokenizer) != base_model_obj.get_input_embeddings().num_embeddings:
+        base_model_obj.resize_token_embeddings(len(policy_tokenizer))
+
+    try:
+        policy_model = PeftModel.from_pretrained(base_model_obj, model_dir)
+    except Exception:
+        policy_model = base_model_obj
+    policy_model.eval()
     
     for i, pref in enumerate(prefs):
         state = pref["state"]
@@ -392,19 +528,24 @@ def evaluate_model(
         # Scheme A: Separated Architecture
         # Step 1: Predict action using policy model
         state_text = render_state(state)
-        predicted_action = select_action(state_text, model_dir, base_model)
+        predicted_action = select_action_with_loaded_model(state_text, policy_tokenizer, policy_model)
         
         # Step 2: Generate code using separate code generation
         task_prompt = state.get("query", "")
         domain = state.get("domain", "coding")
-        
-        response = execute_action(
-            predicted_action,
-            task_prompt,
-            domain,
-            code_model_name=code_model_name,  # Use base Llama model if no API
-            use_openai=use_openai
-        )
+
+        template = get_template(predicted_action, domain)
+        if use_openai:
+            from llm.provider import chat_complete
+            response = chat_complete(template, f"[Task]\n{task_prompt}", model="gpt-4o-mini", max_tokens=400)
+        else:
+            response = generate_with_template_local(
+                policy_model,
+                policy_tokenizer,
+                template=template,
+                task_prompt=task_prompt,
+                max_new_tokens=400,
+            )
         
         # 提取代码（如果是coding任务）
         code = None
@@ -567,6 +708,7 @@ def main():
     parser.add_argument("--prefs", type=str, required=True, help="Preference pairs文件路径")
     parser.add_argument("--max_samples", type=int, default=None, help="最大评估样本数")
     parser.add_argument("--output", type=str, default=None, help="输出结果文件路径")
+    parser.add_argument("--seed", type=int, default=42, help="随机种子（用于可复现评估，默认: 42）")
     
     args = parser.parse_args()
     
@@ -576,6 +718,7 @@ def main():
         prefs_path=args.prefs,
         max_samples=args.max_samples,
         output_path=args.output,
+        seed=args.seed,
     )
 
 

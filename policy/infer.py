@@ -124,7 +124,7 @@ def generate_code(
     template: str,
     code_model_name: Optional[str] = None,
     use_openai: bool = False,
-    openai_model: str = "gpt-4o-mini"
+    openai_model: str = "gpt-4o-mini",
 ) -> str:
     """
     Generate code using a separate code generation model.
@@ -203,7 +203,7 @@ def execute_action(
     task_prompt: str,
     domain: str,
     code_model_name: Optional[str] = None,
-    use_openai: bool = False
+    use_openai: bool = False,
 ) -> str:
     """
     Execute action using separated architecture.
@@ -224,6 +224,11 @@ def execute_action(
         Generated code response
     """
     template = get_template(action, domain)
-    return generate_code(task_prompt, template, code_model_name, use_openai)
+    return generate_code(
+        task_prompt,
+        template,
+        code_model_name=code_model_name,
+        use_openai=use_openai,
+    )
 
 

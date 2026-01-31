@@ -1,8 +1,10 @@
 import os
+import time
 from pathlib import Path
 from typing import List, Dict
 
 from openai import OpenAI
+from openai import APIConnectionError, APITimeoutError, RateLimitError, InternalServerError
 
 # 普通的 from import 导入模块语句（from dotenv import load_dotenv）。
 # 这里用 try...except 包裹，是为了兼容调试环境防止没有安装 python-dotenv 时报错影响主程序流程。
@@ -46,18 +48,48 @@ def get_client() -> OpenAI:
 #           - system_prompt 通常定义“助手的角色和行为”；
 #           - user_prompt 是用户具体想让助手处理的内容。
 #        c. 返回模型生成的回复文本（只取第一个候选）。
-def chat_complete(system_prompt: str, user_prompt: str, model: str = "gpt-4o-mini", max_tokens: int = 512) -> str:
+def chat_complete(
+    system_prompt: str,
+    user_prompt: str,
+    model: str = "gpt-4o-mini",
+    max_tokens: int = 512,
+    temperature: float = 0.7,
+    top_p: float | None = None,
+    timeout_s: float = 60.0,
+    max_retries: int = 8,
+) -> str:
     client = get_client()
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        max_tokens=max_tokens,
-        temperature=0.7,
-    )
-    return resp.choices[0].message.content or ""
+    kwargs = {}
+    # OpenAI Chat Completions supports both temperature and top_p; keep optional for backward compatibility
+    if top_p is not None:
+        kwargs["top_p"] = top_p
+
+    # Retry transient network/429/5xx issues (keeps long-running data-gen jobs alive).
+    last_err: Exception | None = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                max_tokens=max_tokens,
+                temperature=temperature,
+                timeout=timeout_s,
+                **kwargs,
+            )
+            return resp.choices[0].message.content or ""
+        except (APIConnectionError, APITimeoutError, RateLimitError, InternalServerError) as e:
+            last_err = e
+            # Exponential backoff with cap
+            sleep_s = min(30.0, 1.5 ** attempt)
+            time.sleep(sleep_s)
+
+    # Non-transient or exceeded retries
+    if last_err is not None:
+        raise last_err
+    return ""
 # OpenAI 的聊天接口每次请求默认会返回一个或多个回复（choices），这里一般只取第一个（resp.choices[0]），因为通常只需要一条回复。
 # 如果你设置 n>1，会返回多个回复选项；但我们只返回 resp.choices[0].message.content（第一个回复的内容）。
 # 之所以有 "or \"\""，是因为在极少数情况下 content 可能为 None（比如接口异常或回复为空），为了避免出错，返回 ""作为默认值。

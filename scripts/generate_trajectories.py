@@ -14,6 +14,8 @@ import sys
 import re
 from pathlib import Path
 from typing import List, Dict, Optional
+from contextlib import nullcontext
+import time
 
 # Ensure project root is on sys.path for package imports when running as a script
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -22,6 +24,95 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from simulator import PERSONAS, react
 from utils.compute_task_uncertainty import compute_task_uncertainty_from_state
+
+
+def set_global_seed(seed: int) -> None:
+    """Best-effort seeding for reproducible trajectory generation."""
+    import random
+    try:
+        import numpy as np  # type: ignore
+    except Exception:
+        np = None  # type: ignore
+    random.seed(seed)
+    if np is not None:
+        np.random.seed(seed)
+    try:
+        import torch
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+    except Exception:
+        pass
+
+
+class LocalHFChatGenerator:
+    """Local HF chat completion (system+user) with one-time model load + reuse."""
+
+    def __init__(
+        self,
+        model_name: str,
+        dtype: str = "bfloat16",
+        device_map: str = "auto",
+        temperature: float = 0.7,
+        top_p: float = 0.9,
+        max_new_tokens: int = 400,
+        seed: Optional[int] = None,
+    ) -> None:
+        import torch
+        from transformers import AutoTokenizer, AutoModelForCausalLM
+
+        self.temperature = temperature
+        self.top_p = top_p
+        self.max_new_tokens = max_new_tokens
+        self.torch = torch
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
+        torch_dtype = torch.bfloat16 if dtype == "bfloat16" else torch.float16
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype=torch_dtype,
+            device_map=device_map,
+            low_cpu_mem_usage=True,
+        )
+        self.model.eval()
+        # NOTE: some Transformers builds reject `generator=` kwarg in generate().
+        # We rely on global torch seeding for reproducibility instead.
+        if seed is not None:
+            try:
+                torch.manual_seed(seed)
+                if torch.cuda.is_available():
+                    torch.cuda.manual_seed_all(seed)
+            except Exception:
+                pass
+
+    def chat_complete(self, system_prompt: str, user_prompt: str) -> str:
+        # Match the rest of the codebase: prompts are system + user
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        if hasattr(self.tokenizer, "apply_chat_template") and self.tokenizer.chat_template:
+            prompt = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        else:
+            prompt = f"{system_prompt}\n\n{user_prompt}\n\nAssistant:"
+
+        inputs = self.tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
+        inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
+        with self.torch.no_grad():
+            outputs = self.model.generate(
+                **inputs,
+                max_new_tokens=self.max_new_tokens,
+                do_sample=True,
+                temperature=self.temperature,
+                top_p=self.top_p,
+                pad_token_id=self.tokenizer.pad_token_id or self.tokenizer.eos_token_id,
+            )
+        text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        if "Assistant:" in text:
+            text = text.split("Assistant:")[-1].strip()
+        return text
 
 
 def load_prompt(path: Path) -> str:
@@ -200,7 +291,14 @@ def dummy_llm_output(state: Dict, action_prompt: str) -> str:
     return "这是一个最小可运行的示例代码/计划。"
 
 
-def llm_output(state: Dict, action_prompt: str, model: str, conversation_history: Optional[List[Dict]] = None) -> str:
+def llm_output(
+    state: Dict,
+    action_prompt: str,
+    model: str,
+    conversation_history: Optional[List[Dict]] = None,
+    temperature: float = 0.7,
+    top_p: float = 0.9,
+) -> str:
     """Generate assistant output using OpenAI API.
     
     Args:
@@ -217,7 +315,7 @@ def llm_output(state: Dict, action_prompt: str, model: str, conversation_history
     # Otherwise, format as initial task
     user = f"[Task]\n{state['query']}"
     
-    return chat_complete(system, user, model=model, max_tokens=400)
+    return chat_complete(system, user, model=model, max_tokens=400, temperature=temperature, top_p=top_p)
 
 
 def sanitize_clarify_message(assistant_msg: str) -> str:
@@ -364,7 +462,10 @@ def generate_multi_turn_conversation(initial_state: Dict, domain: str,
                                      persona_idx: int = 0,
                                      max_turns: int = 5,
                                      action_selection_fn=None,
-                                     force_first_action: Optional[str] = None) -> List[Dict]:
+                                     force_first_action: Optional[str] = None,
+                                     local_generator: Optional[LocalHFChatGenerator] = None,
+                                     temperature: float = 0.7,
+                                     top_p: float = 0.9) -> List[Dict]:
     """
     Generate a multi-turn conversation until task completion or max turns.
     
@@ -399,8 +500,10 @@ def generate_multi_turn_conversation(initial_state: Dict, domain: str,
         action_prompt = prompts[action]
         
         # Generate assistant message
-        if llm_model:
-            assistant_msg = llm_output(current_state, action_prompt, llm_model)
+        if local_generator is not None:
+            assistant_msg = local_generator.chat_complete(action_prompt, f"[Task]\n{current_state['query']}")
+        elif llm_model:
+            assistant_msg = llm_output(current_state, action_prompt, llm_model, temperature=temperature, top_p=top_p)
         else:
             assistant_msg = dummy_llm_output(current_state, action_prompt)
         
@@ -466,9 +569,9 @@ def generate_multi_turn_conversation(initial_state: Dict, domain: str,
         if action == "Execute":
             task_completed = check_task_completion(current_state, assistant_msg, domain)
             if task_completed:
-            traj["task_completed"] = True
+                traj["task_completed"] = True
                 traj["is_terminal"] = True  # Mark as terminal state
-            break
+                break
         
         # Check if user wants to stop (reject signal)
         if reaction.get("meta", {}).get("reject_signal", 0) > 0:
@@ -502,7 +605,12 @@ def generate_trajectories(states: List[Dict], domain: str,
                          all_personas: bool = False,
                          force_first_action: Optional[str] = None,
                          sampling_strategy: str = "heuristic",
-                         n_samples_per_state_persona: int = 1) -> List[Dict]:
+                         n_samples_per_state_persona: int = 1,
+                         local_generator: Optional[LocalHFChatGenerator] = None,
+                         temperature: float = 0.7,
+                         top_p: float = 0.9,
+                         progress_every_states: int = 10,
+                         resume_done: Optional[set] = None) -> List[Dict]:
     """
     Generate multi-turn conversation trajectories.
     
@@ -525,10 +633,12 @@ def generate_trajectories(states: List[Dict], domain: str,
         List of trajectory dicts, one per turn
     """
     import random
-        trajectories = []
+    trajectories = []
     persona_indices = range(len(PERSONAS)) if all_personas else [persona_idx]
+    t0 = time.time()
+    total_states = len(states)
     
-        for st in states:
+    for si, st in enumerate(states, start=1):
         for pid in persona_indices:
             # Determine first action based on sampling strategy
             first_actions = []
@@ -561,20 +671,48 @@ def generate_trajectories(states: List[Dict], domain: str,
             
             # Generate trajectories for each first action
             for first_action in first_actions[:n_samples_per_state_persona]:
-            multi_turn_trajs = generate_multi_turn_conversation(
+                # Resume support: in our heuristic n_samples=2 case, turn==1 and action == forced first action.
+                if resume_done is not None:
+                    persona_name = PERSONAS[pid].name
+                    action_key = first_action if first_action is not None else None
+                    # When first_action is None (auto), we cannot know; don't skip.
+                    if action_key is not None:
+                        sid = st.get("id", "unknown")
+                        if (sid, persona_name, action_key) in resume_done:
+                            continue
+
+                multi_turn_trajs = generate_multi_turn_conversation(
                     st, domain, llm_model, pid, max_turns,
-                    force_first_action=first_action
-            )
-            trajectories.extend(multi_turn_trajs)
+                    force_first_action=first_action,
+                    local_generator=local_generator,
+                    temperature=temperature,
+                    top_p=top_p,
+                )
+                trajectories.extend(multi_turn_trajs)
             
-            # Stream write if out_file is provided
-            if out_file is not None:
-                for traj in multi_turn_trajs:
-                    out_file.write(json.dumps(traj, ensure_ascii=False) + "\n")
-                out_file.flush()
+                # Stream write if out_file is provided
+                if out_file is not None:
+                    for traj in multi_turn_trajs:
+                        out_file.write(json.dumps(traj, ensure_ascii=False) + "\n")
+                    out_file.flush()
                     persona_name = PERSONAS[pid].name
                     action_str = f" (first_action={first_action})" if first_action else " (auto)"
-                    print(f"  ✓ Generated {len(multi_turn_trajs)} turn trajectories for state {st.get('id', 'unknown')} with {persona_name}{action_str}", flush=True)
+                    print(
+                        f"  ✓ Generated {len(multi_turn_trajs)} turn trajectories for state {st.get('id', 'unknown')} with {persona_name}{action_str}",
+                        flush=True,
+                    )
+
+        # Coarse progress update per state (works well in redirected logs; avoids tqdm carriage-return issues)
+        if progress_every_states > 0 and (si % progress_every_states == 0 or si == total_states):
+            elapsed = time.time() - t0
+            rate = si / elapsed if elapsed > 0 else 0.0
+            remaining = (total_states - si) / rate if rate > 0 else float("inf")
+            eta_min = remaining / 60.0 if remaining != float("inf") else float("inf")
+            print(
+                f"[Progress] states={si}/{total_states} ({si/total_states*100:.2f}%) "
+                f"elapsed={elapsed/60:.1f}m eta={eta_min:.1f}m",
+                flush=True,
+            )
     
     return trajectories
 
@@ -594,6 +732,14 @@ def main():
                        help="Output path relative to data/ directory")
     parser.add_argument("--llm_model", type=str, default="",
                        help="OpenAI model name (e.g., gpt-4o-mini). If empty, uses dummy output.")
+    parser.add_argument("--local_model", type=str, default="",
+                       help="HF model name for local generation (if set, overrides --llm_model and uses local Transformers).")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducible generation (default: 42)")
+    parser.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature for generation")
+    parser.add_argument("--top_p", type=float, default=0.9, help="Top-p nucleus sampling for generation")
+    parser.add_argument("--max_new_tokens", type=int, default=400, help="Max new tokens for generation")
+    parser.add_argument("--progress_every", type=int, default=10, help="Print a coarse progress line every N states (default: 10)")
+    parser.add_argument("--resume", action="store_true", help="Resume by appending to an existing output file path (no timestamp added) and skipping completed (state, persona, action) combos.")
     parser.add_argument("--max_turns", type=int, default=5,
                         help="Maximum number of dialogue turns per conversation (default: 5)")
     parser.add_argument("--persona_idx", type=int, default=0,
@@ -607,6 +753,7 @@ def main():
     parser.add_argument("--n_samples", type=int, default=1,
                        help="Number of samples to generate per (state, persona) combination (default: 1). For heuristic strategy, generates: 1=Execute, 2=Execute+Clarify, 3+=Execute+Clarify+Free...")
     args = parser.parse_args()
+    set_global_seed(args.seed)
 
     out_dir = Path(__file__).resolve().parent.parent / "data"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -620,10 +767,10 @@ def main():
         states = synth_states(args.domain, args.n_states)
     
     # Open output file for streaming write
-    # Add timestamp to filename if not already present
+    # Add timestamp to filename if not already present (unless resuming)
     from datetime import datetime
     out_basename = args.out
-    if not any(token in out_basename for token in ["%Y", "%m", "%d", "%H", "%M", "%S", "timestamp"]):
+    if (not args.resume) and (not any(token in out_basename for token in ["%Y", "%m", "%d", "%H", "%M", "%S", "timestamp"])):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         if "." in out_basename:
             name, ext = out_basename.rsplit(".", 1)
@@ -648,24 +795,67 @@ def main():
     print(f"   - Expected trajectories: variable (depends on conversation length)")
     print()
     
+    # Resume: load completed combos from existing output file
+    resume_done = None
+    if args.resume:
+        if not out_path.exists():
+            raise SystemExit(f"--resume requires an existing output file path, but not found: {out_path}")
+        resume_done = set()
+        with out_path.open("r", encoding="utf-8") as rf:
+            for line in rf:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except Exception:
+                    continue
+                st = row.get("state") or {}
+                sid = st.get("id")
+                persona = (row.get("persona") or {}).get("name")
+                action = row.get("action")
+                turn = row.get("turn")
+                if sid and persona and action and turn == 1:
+                    resume_done.add((sid, persona, action))
+        print(f"🔁 Resume enabled: found {len(resume_done)} completed (state, persona, action) combos in {out_path}", flush=True)
+
     # Open file for streaming write
-    with out_path.open("w", encoding="utf-8") as f:
+    local_gen = None
+    if args.local_model:
+        print(f"🤖 Using local HF model for generation: {args.local_model}", flush=True)
+        local_gen = LocalHFChatGenerator(
+            args.local_model,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            max_new_tokens=args.max_new_tokens,
+            seed=args.seed,
+        )
+        llm_model = None
+    else:
+        llm_model = args.llm_model if args.llm_model else None
+
+    with out_path.open("a" if args.resume else "w", encoding="utf-8") as f:
         trajectories = generate_trajectories(
             states, 
             args.domain, 
-            args.llm_model if args.llm_model else None,
+            llm_model,
             persona_idx=args.persona_idx,
             max_turns=args.max_turns,
             out_file=f,  # Pass file object for streaming write
             all_personas=args.all_personas,
             force_first_action=args.force_first_action,
             sampling_strategy=args.sampling_strategy,
-            n_samples_per_state_persona=args.n_samples
+            n_samples_per_state_persona=args.n_samples,
+            local_generator=local_gen,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            progress_every_states=args.progress_every,
+            resume_done=resume_done,
         )
 
     # Print summary
-        n_completed = sum(1 for t in trajectories if t.get("task_completed", False))
-        avg_turns = sum(t.get("turn", 1) for t in trajectories) / len(trajectories) if trajectories else 0
+    n_completed = sum(1 for t in trajectories if t.get("task_completed", False))
+    avg_turns = sum(t.get("turn", 1) for t in trajectories) / len(trajectories) if trajectories else 0
     
     # Count unique conversations (by state_id + persona)
     from collections import defaultdict
@@ -685,9 +875,9 @@ def main():
     print(f"\n{'='*60}")
     print(f"Generation Summary")
     print(f"{'='*60}")
-        print(f"Wrote {len(trajectories)} trajectory turns to {out_path}")
+    print(f"Wrote {len(trajectories)} trajectory turns to {out_path}")
     print(f"  - Total conversations: {n_conversations}")
-        print(f"  - Average turns per conversation: {avg_turns:.2f}")
+    print(f"  - Average turns per conversation: {avg_turns:.2f}")
     print(f"  - Completed conversations: {n_completed}/{n_conversations}")
     print(f"  - First action distribution:")
     for action, count in first_actions.items():

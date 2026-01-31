@@ -192,19 +192,12 @@ def compute_rewards_for_group(
             # C_Interrupt = Σ_{t=1}^{T} (δb_t r_t + λb_t - γb_t a_t)
             meta = (t.get("user_reaction") or {}).get("meta", {})
             n_questions = assistant_msg.count("?")
-            
-            # 状况一/二：为Clarify提供可学习的正向回报（代理成功信号）
-            # 如果Clarify获得有效信息（answered_clarification + has_edge_cases_info），
-            # 将task_score提升到高分，强化“问对问题”的回报。
-            action = t.get("action", "")
-            has_edge_cases_info = t.get("has_edge_cases_info", False)
-            if action == "Clarify":
-                if meta.get("answered_clarification", 0) > 0 and has_edge_cases_info:
-                    task_score = max(task_score, 1.0)
-                elif meta.get("answered_clarification", 0) > 0:
-                    task_score = max(task_score, 0.5)
-                elif meta.get("reject_signal", 0) > 0:
-                    task_score = 0.0
+            # NOTE:
+            # Do NOT "promote" Clarify into task_score. In this project, task_score is reserved for
+            # actually completing coding tasks (i.e., passing tests under Execute).
+            # Clarify is already accounted for via interrupt_cost_v2 where answered clarifications
+            # can reduce (or even invert) the interrupt cost. Boosting task_score here double-counts
+            # Clarify and empirically collapses preferences to almost-all Clarify.
             
             # 使用新版本的interrupt cost计算
             interrupt_cost = compute_interrupt_cost_v2(
@@ -231,10 +224,23 @@ def compute_rewards_for_group(
                 additional_penalty = 0.4 * dialogue_turn
             
             # 新公式: R = R_task - C_interrupt - additional_penalty
-        # 注意：在新公式中，有效澄清的奖励已经包含在C_Interrupt的计算中
-        # （通过-γb_t a_t项减少成本，相当于奖励）
+            # 注意：在新公式中，有效澄清的奖励已经包含在C_Interrupt的计算中
+            # （通过-γb_t a_t项减少成本，相当于奖励）
             r = cfg.w_task * task_score - cfg.w_interrupt * interrupt_cost - additional_penalty
-            total_r = float(max(0.0, r))  # 确保reward不为负
+
+            # For 1-turn coding trajectories, Clarify cannot complete the task by design.
+            # Without an explicit penalty, Clarify tends to dominate because:
+            # - Execute often fails tests → task_score=0
+            # - answered clarifications can reduce interrupt_cost (sometimes negative)
+            # This penalty prevents the "always Clarify" collapse for 1-turn datasets.
+            action = t.get("action", "")
+            clarify_incomplete_penalty = 0.0
+            if domain == "coding" and action == "Clarify":
+                clarify_incomplete_penalty = 0.2
+
+            # IMPORTANT: do NOT clamp to non-negative; clamping creates many 0-ties and
+            # makes preference generation sensitive to JSONL ordering.
+            total_r = float(r - clarify_incomplete_penalty)
         
         # 3. 成功项奖励明确：只有task_completed且has_edge_cases_info为True才给满分
         # 这个逻辑已经在compute_task_score中实现了
@@ -267,41 +273,74 @@ def build_prefs_from_group(scored_trajs: List[Dict]) -> List[Dict]:
     if len(scored_trajs) < 2:
         return []
 
-    scored_sorted = sorted(scored_trajs, key=lambda t: t["total_reward"], reverse=True)
-    best = scored_sorted[0]
+    # Deterministic + meaningful sorting:
+    # - Primary: total_reward
+    # - Secondary (tie-break): prefer Execute when task is clear, prefer Clarify when unclear.
+    # This prevents 0-ties from defaulting to whatever appears first in the JSONL.
+    state = scored_trajs[0].get("state", {})
+    # For coding, default to preferring Execute in tie-breaks. The BigCodeBench masked
+    # states tend to have very high task_uncertainty (often ~0.8+), which would otherwise
+    # make tie-breaks always prefer Clarify and collapse training.
+    prefer_action = "Execute" if state.get("domain", "coding") == "coding" else "Clarify"
+    eps = 1e-3
 
-    # Prefer cross-action contrast to strengthen preference signal
-    worst = None
-    for candidate in reversed(scored_sorted):
-        if candidate.get("action") != best.get("action"):
-            worst = candidate
+    def adjusted_score(t: Dict) -> float:
+        bonus = eps if t.get("action") == prefer_action else 0.0
+        return float(t["total_reward"]) + bonus
+
+    scored_sorted = sorted(scored_trajs, key=adjusted_score, reverse=True)
+
+    # Build multiple cross-action pairs to strengthen signal.
+    # We only emit pairs where:
+    # - actions differ
+    # - assistant messages differ
+    # - either reward margin is meaningful OR tie-break decides (very small margin)
+    max_pairs = 3
+    min_margin = 0.02
+    prefs: List[Dict] = []
+
+    for i in range(len(scored_sorted)):
+        for j in range(i + 1, len(scored_sorted)):
+            if len(prefs) >= max_pairs:
+                break
+            hi = scored_sorted[i]
+            lo = scored_sorted[j]
+            if hi.get("action") == lo.get("action"):
+                continue
+            if hi.get("assistant_msg", "").strip() == lo.get("assistant_msg", "").strip():
+                continue
+
+            # Decide preference by adjusted score (includes tie-break).
+            hi_adj = adjusted_score(hi)
+            lo_adj = adjusted_score(lo)
+            if hi_adj <= lo_adj:
+                continue
+
+            # If raw rewards are too close, only keep if tie-break is the reason.
+            raw_gap = float(hi["total_reward"]) - float(lo["total_reward"])
+            if raw_gap < min_margin and hi.get("action") != prefer_action:
+                # Too close and not aligned with tie-break preference → skip noisy pair.
+                continue
+
+            prefs.append(
+                {
+                    "state": hi["state"],
+                    "chosen_action": hi["action"],
+                    "rejected_action": lo["action"],
+                    "chosen_assistant_msg": hi.get("assistant_msg", ""),
+                    "rejected_assistant_msg": lo.get("assistant_msg", ""),
+                    "chosen_reward": hi["total_reward"],
+                    "rejected_reward": lo["total_reward"],
+                    "chosen_task_score": hi["task_score"],
+                    "rejected_task_score": lo["task_score"],
+                    "chosen_interrupt_cost": hi["interrupt_cost"],
+                    "rejected_interrupt_cost": lo["interrupt_cost"],
+                }
+            )
+        if len(prefs) >= max_pairs:
             break
-    if worst is None:
-        return []
 
-    # If equal reward, skip to avoid noisy / conflicting pairs
-    if best["total_reward"] <= worst["total_reward"]:
-        return []
-
-    # If text is identical, skip to avoid ambiguous supervision
-    if (best.get("assistant_msg", "").strip() == worst.get("assistant_msg", "").strip()):
-        return []
-
-    state = best["state"]
-    pref = {
-        "state": state,
-        "chosen_action": best["action"],
-        "rejected_action": worst["action"],
-        "chosen_assistant_msg": best.get("assistant_msg", ""),  # 完整回复
-        "rejected_assistant_msg": worst.get("assistant_msg", ""),  # 完整回复
-        "chosen_reward": best["total_reward"],
-        "rejected_reward": worst["total_reward"],
-        "chosen_task_score": best["task_score"],
-        "rejected_task_score": worst["task_score"],
-        "chosen_interrupt_cost": best["interrupt_cost"],
-        "rejected_interrupt_cost": worst["interrupt_cost"],
-    }
-    return [pref]
+    return prefs
 
 
 def compute_preferences(

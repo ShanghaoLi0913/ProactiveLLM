@@ -272,32 +272,44 @@ def react(user_msg: str, assistant_msg: str, persona: Persona,
                 answer_clarity = 0.2  # 低清晰度，表示回答模糊
             else:
                 # 正常生成答案
-            # Generate answer with clarity based on expertise
-            if llm_model:
-                # Use LLM to generate realistic answer
+                # Generate answer with clarity based on expertise
+                if llm_model:
+                    # Use LLM to generate realistic answer
                     base_answer = generate_specific_answer_llm(
-                    assistant_msg, user_msg, persona.domain, llm_model=llm_model, expertise=persona.expertise
-                )
-            else:
-                # Use dummy answer for synthetic mode (testing)
+                        assistant_msg,
+                        user_msg,
+                        persona.domain,
+                        llm_model=llm_model,
+                        expertise=persona.expertise,
+                    )
+                else:
+                    # Use dummy answer for synthetic mode (testing)
                     base_answer = generate_specific_answer_dummy(
-                    assistant_msg, user_msg, persona.domain, expertise=persona.expertise
-                )
-                
+                        assistant_msg,
+                        user_msg,
+                        persona.domain,
+                        expertise=persona.expertise,
+                    )
+
                 # Apply disclosure rule if available (Step 3: disclosure rule)
                 # 状况三：分级Disclosure - 将隐藏信息拆分为2部分
                 # Pass dialogue_turn to enable step-wise disclosure based on K = ⌈Expertise × 3⌉
                 if disclosure_rule:
                     from simulator.disclosure import generate_answer_with_disclosure
                     user_reply = generate_answer_with_disclosure(
-                        assistant_msg, user_msg, disclosure_rule, persona.expertise, base_answer,
-                        dialogue_turn=dialogue_turn
+                        assistant_msg,
+                        user_msg,
+                        disclosure_rule,
+                        persona.expertise,
+                        base_answer,
+                        dialogue_turn=dialogue_turn,
                     )
                 else:
                     user_reply = base_answer
-            answered = 1
-            reject_signal = 0
-            answer_clarity = expertise_value  # answer_clarity = f(expertise)
+
+                answered = 1
+                reject_signal = 0
+                answer_clarity = expertise_value  # answer_clarity = f(expertise)
         else:
             # User rejects (with probability = 1 - effective_patience)
             # Enhanced reject messages for different personas
@@ -306,8 +318,13 @@ def react(user_msg: str, assistant_msg: str, persona: Persona,
                 user_reply = "This information is already in the prompt. Please proceed with the implementation."
             else:
                 # Default reject message
-            user_reply = "Stop asking, just give me the plan." if persona.domain == "planning" else "Stop asking, just give me the code."
-        answered = 0
+                user_reply = (
+                    "Stop asking, just give me the plan."
+                    if persona.domain == "planning"
+                    else "Stop asking, just give me the code."
+                )
+
+            answered = 0
             reject_signal = 1
             answer_clarity = 0.0  # No answer when rejected
     else:
