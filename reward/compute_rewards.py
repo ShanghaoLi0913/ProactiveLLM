@@ -48,6 +48,7 @@ Design:
 
 import argparse
 import json
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -343,10 +344,58 @@ def build_prefs_from_group(scored_trajs: List[Dict]) -> List[Dict]:
     return prefs
 
 
+def _stable_hash_to_unit_interval(text: str, seed: int) -> float:
+    """Deterministic hash -> [0, 1)."""
+    h = hashlib.sha256(f"{seed}:{text}".encode("utf-8")).hexdigest()
+    return int(h[:16], 16) / float(16 ** 16)
+
+
+def rebalance_prefs_by_action(
+    prefs: List[Dict],
+    target_execute_ratio: float,
+    seed: int,
+) -> List[Dict]:
+    """Downsample over-represented action to reach a target Execute ratio."""
+    if not prefs:
+        return prefs
+    if not (0.0 < target_execute_ratio < 1.0):
+        return prefs
+
+    execute = [p for p in prefs if p.get("chosen_action") == "Execute"]
+    clarify = [p for p in prefs if p.get("chosen_action") == "Clarify"]
+    total = len(prefs)
+    exec_ratio = len(execute) / total
+
+    # Already close enough: keep as is
+    if abs(exec_ratio - target_execute_ratio) < 0.02:
+        return prefs
+
+    if exec_ratio > target_execute_ratio:
+        # Downsample Execute relative to existing Clarify count
+        desired_exec = max(1, int(round(len(clarify) * target_execute_ratio / (1 - target_execute_ratio))))
+        keep_prob = min(1.0, desired_exec / max(1, len(execute)))
+        kept_execute = [
+            p for p in execute
+            if _stable_hash_to_unit_interval(p["state"].get("id", str(p["state"])), seed) < keep_prob
+        ]
+        return kept_execute + clarify
+    else:
+        # Downsample Clarify relative to existing Execute count
+        desired_clarify = max(1, int(round(len(execute) * (1 - target_execute_ratio) / target_execute_ratio)))
+        keep_prob = min(1.0, desired_clarify / max(1, len(clarify)))
+        kept_clarify = [
+            p for p in clarify
+            if _stable_hash_to_unit_interval(p["state"].get("id", str(p["state"])), seed) < keep_prob
+        ]
+        return execute + kept_clarify
+
+
 def compute_preferences(
     traj_path: Path,
     out_path: Path,
     cfg: RewardConfig,
+    target_execute_ratio: float,
+    rebalance_seed: int,
 ) -> None:
     """High-level function: trajectories → prefs JSONL."""
     print(f"📂 Loading trajectories from: {traj_path}")
@@ -361,6 +410,13 @@ def compute_preferences(
         scored = compute_rewards_for_group(g, cfg)
         group_prefs = build_prefs_from_group(scored)
         prefs.extend(group_prefs)
+
+    # Optional global rebalancing to avoid action collapse
+    if target_execute_ratio is not None:
+        before = len(prefs)
+        prefs = rebalance_prefs_by_action(prefs, target_execute_ratio, rebalance_seed)
+        after = len(prefs)
+        print(f"🔧 Rebalanced prefs: {before} -> {after} (target Execute ratio={target_execute_ratio})")
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8") as f:
@@ -398,6 +454,18 @@ def parse_args():
         default=0.1,
         help="Weight for interrupt cost penalty (default: 0.1)",
     )
+    parser.add_argument(
+        "--target_execute_ratio",
+        type=float,
+        default=0.8,
+        help="Target ratio for Execute in chosen prefs (default: 0.8; set <0 or >1 to disable)",
+    )
+    parser.add_argument(
+        "--rebalance_seed",
+        type=int,
+        default=42,
+        help="Seed for deterministic preference rebalancing (default: 42)",
+    )
     return parser.parse_args()
 
 
@@ -411,7 +479,17 @@ def main():
     print(f"  - w_task = {cfg.w_task}")
     print(f"  - w_interrupt = {cfg.w_interrupt}")
 
-    compute_preferences(traj_path, out_path, cfg)
+    target_ratio = args.target_execute_ratio
+    if not (0.0 < target_ratio < 1.0):
+        target_ratio = None
+
+    compute_preferences(
+        traj_path,
+        out_path,
+        cfg,
+        target_execute_ratio=target_ratio,
+        rebalance_seed=args.rebalance_seed,
+    )
 
 
 if __name__ == "__main__":

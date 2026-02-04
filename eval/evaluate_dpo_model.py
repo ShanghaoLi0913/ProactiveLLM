@@ -359,6 +359,9 @@ def generate_with_template_local(
     template: str,
     task_prompt: str,
     max_new_tokens: int = 400,
+    temperature: float = 0.7,
+    top_p: float = 0.9,
+    do_sample: bool = True,
 ) -> str:
     """Generate a response from a local HF model using a system+user template."""
     messages = [
@@ -381,9 +384,9 @@ def generate_with_template_local(
         outputs = model.generate(
             **inputs,
             max_new_tokens=max_new_tokens,
-            do_sample=True,
-            temperature=0.7,
-            top_p=0.9,
+            do_sample=do_sample,
+            temperature=temperature,
+            top_p=top_p,
             pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
         )
 
@@ -448,6 +451,10 @@ def evaluate_model(
     max_samples: Optional[int] = None,
     output_path: Optional[str] = None,
     seed: int = 42,
+    code_samples: int = 1,
+    code_temperature: float = 0.7,
+    code_top_p: float = 0.9,
+    code_do_sample: bool = True,
 ):
     """评估DPO模型"""
     print(f"📊 加载模型: {model_dir}")
@@ -535,22 +542,52 @@ def evaluate_model(
         domain = state.get("domain", "coding")
 
         template = get_template(predicted_action, domain)
+        code = None
         if use_openai:
             from llm.provider import chat_complete
             response = chat_complete(template, f"[Task]\n{task_prompt}", model="gpt-4o-mini", max_tokens=400)
         else:
-            response = generate_with_template_local(
-                policy_model,
-                policy_tokenizer,
-                template=template,
-                task_prompt=task_prompt,
-                max_new_tokens=400,
-            )
+            # If executing, optionally sample multiple code candidates and keep the best by tests.
+            if state["domain"] == "coding" and predicted_action == "Execute" and code_samples > 1:
+                best = {"score": -1.0, "response": "", "code": None}
+                for _ in range(code_samples):
+                    resp = generate_with_template_local(
+                        policy_model,
+                        policy_tokenizer,
+                        template=template,
+                        task_prompt=task_prompt,
+                        max_new_tokens=400,
+                        temperature=code_temperature,
+                        top_p=code_top_p,
+                        do_sample=code_do_sample,
+                    )
+                    code_candidate = extract_code_from_text(resp)
+                    if not code_candidate:
+                        score = 0.0
+                    else:
+                        tests = state.get("convcodeworld_tests")
+                        score = score_code_passfail(code_candidate, tests, debug=False) if tests else 0.0
+                    if score > best["score"]:
+                        best = {"score": score, "response": resp, "code": code_candidate}
+                response = best["response"]
+                code = best["code"]
+            else:
+                response = generate_with_template_local(
+                    policy_model,
+                    policy_tokenizer,
+                    template=template,
+                    task_prompt=task_prompt,
+                    max_new_tokens=400,
+                    temperature=code_temperature,
+                    top_p=code_top_p,
+                    do_sample=code_do_sample,
+                )
         
         # 提取代码（如果是coding任务）
-        code = None
         if state["domain"] == "coding":
-            code = extract_code_from_text(response)
+            # If we already picked a best code candidate above, keep it.
+            if code is None:
+                code = extract_code_from_text(response)
             # 调试信息：记录代码提取情况
             if not code and (i < 3 or (i + 1) % 20 == 0):
                 # 根据predicted_action判断：Clarify action是问问题，这是正常的
@@ -709,6 +746,15 @@ def main():
     parser.add_argument("--max_samples", type=int, default=None, help="最大评估样本数")
     parser.add_argument("--output", type=str, default=None, help="输出结果文件路径")
     parser.add_argument("--seed", type=int, default=42, help="随机种子（用于可复现评估，默认: 42）")
+    parser.add_argument("--code_samples", type=int, default=1, help="每个任务生成的代码候选数（>1启用best-of）")
+    parser.add_argument("--code_temperature", type=float, default=0.7, help="代码生成温度（默认0.7）")
+    parser.add_argument("--code_top_p", type=float, default=0.9, help="代码生成top_p（默认0.9）")
+    parser.add_argument(
+        "--code_do_sample",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="是否使用采样生成代码（默认: True）",
+    )
     
     args = parser.parse_args()
     
@@ -719,6 +765,10 @@ def main():
         max_samples=args.max_samples,
         output_path=args.output,
         seed=args.seed,
+        code_samples=args.code_samples,
+        code_temperature=args.code_temperature,
+        code_top_p=args.code_top_p,
+        code_do_sample=args.code_do_sample,
     )
 
 

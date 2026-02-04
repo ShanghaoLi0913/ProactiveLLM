@@ -88,7 +88,9 @@ def train(
 
     print(f"🔡 Loading tokenizer: {model_name}")
     hf_token = os.environ.get("HF_TOKEN")
-    cache_dir = os.environ.get("HF_HOME")
+    # Prefer an explicit HF_HOME, but fall back to the default Hugging Face cache under ~/.cache
+    # so training doesn't unexpectedly hit the network in offline / firewalled environments.
+    cache_dir = os.environ.get("HF_HOME") or str(Path.home() / ".cache")
     # Try to find local snapshot directory first
     snapshot_dir = None
     if cache_dir:
