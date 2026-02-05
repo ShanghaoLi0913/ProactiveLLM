@@ -50,7 +50,9 @@ def compute_task_score(sample: Dict, domain: str, assistant_output: Optional[str
                 if not code:
                     return 0.0
 
-                pass_rate = float(score_code_passfail(code, tests, timeout=30))
+                # Use shorter timeout (5s) to avoid long-running tests
+                # If timeout, catch exception and return 0 (skip this test)
+                pass_rate = float(score_code_passfail(code, tests, timeout=5))
                 if pass_rate <= 0.5:
                     return 0.0
 
@@ -64,7 +66,9 @@ def compute_task_score(sample: Dict, domain: str, assistant_output: Optional[str
                 if task_uncertainty >= 0.4:
                     return 0.4
                 return 0.7
-            except Exception:
+            except Exception as e:
+                # Timeout or other errors: skip this test and return 0
+                # print(f"Warning: Test execution failed or timed out: {e}")
                 return 0.0
 
         # No tests available: use heuristic scoring
