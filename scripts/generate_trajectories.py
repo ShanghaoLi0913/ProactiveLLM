@@ -361,7 +361,7 @@ def select_mainline_action_from_persona(persona, state: Optional[Dict] = None) -
         return "Execute"
     
     # Otherwise: Clarify (allow asking questions)
-        return "Clarify"
+    return "Clarify"
 
 
 def has_code_output(assistant_msg: str) -> bool:
@@ -550,13 +550,18 @@ def generate_multi_turn_conversation(initial_state: Dict, domain: str,
             "is_terminal": False,  # Will be set to True if task completed or user stopped
             "has_edge_cases_info": has_edge_cases_info,  # Track if edge_cases info was obtained
         }
-        trajectories.append(traj)
         
         # Check if task is completed (only for Execute action)
+        task_completed_this_turn = False
         if action == "Execute":
             # Track Execute outputs that contain no code
             if not has_code_output(assistant_msg):
                 traj["no_code_execute"] = True
+            else:
+                # Execute with code → task completed, should end conversation
+                task_completed_this_turn = True
+                traj["is_terminal"] = True
+                traj["task_completed"] = True
         
         # Check if user wants to stop (reject signal)
         # User rejection means they don't want to answer Clarify, but we still provide code via Execute
@@ -568,6 +573,13 @@ def generate_multi_turn_conversation(initial_state: Dict, domain: str,
             # If this is near the end, allow an extra Execute turn
             if turn >= max_turns - 1:
                 allow_extra_execute = True
+        
+        # Add trajectory to list
+        trajectories.append(traj)
+        
+        # If task completed (Execute with code), end conversation
+        if task_completed_this_turn:
+            break
         
         # Update state for next turn
         # is_same_turn=False because this is moving to the next dialogue turn (not within same turn)
