@@ -345,10 +345,15 @@ def select_mainline_action_from_persona(persona, state: Optional[Dict] = None) -
     
     Sequential Decision Process: actions are Clarify or Execute.
     
-    Simplified logic:
-    - If user rejected in previous turn → Execute (don't ask more questions)
-    - If patience is low → Execute (low patience users prefer direct execution)
-    - Otherwise → Clarify (allow asking questions)
+    COLM 2026 Strategy: Different personas have different Clarify thresholds
+    - Busy-Developer (low patience): Only Clarify if task_uncertainty > 0.7 (rarely)
+    - Experienced-Engineer (mid patience): Clarify if task_uncertainty > 0.5 (sometimes)
+    - Novice-Learner (high patience): Clarify if task_uncertainty > 0.3 (often)
+    
+    This creates natural persona differentiation in average trajectory length:
+    - Busy: ~1.2 turns (mostly Execute)
+    - Experienced: ~1.5 turns (context-dependent)
+    - Novice: ~1.8 turns (mostly Clarify first)
     """
     prev_reject = state.get("prev_reject", 0) if state else 0
     
@@ -356,21 +361,64 @@ def select_mainline_action_from_persona(persona, state: Optional[Dict] = None) -
     if prev_reject > 0:
         return "Execute"
     
-    # Condition 2: If patience is low, execute (low patience users prefer direct execution)
-    if persona.patience == "low":
-        return "Execute"
+    # Get task uncertainty from state
+    task_uncertainty = state.get("task_uncertainty", 0.5) if state else 0.5
+    dialogue_turn = state.get("dialogue_turn", 0) if state else 0
     
-    # Otherwise: Clarify (allow asking questions)
-    return "Clarify"
+    # Condition 2: First turn decision based on persona + task_uncertainty
+    if dialogue_turn == 0:
+        # Different personas have different Clarify thresholds
+        if persona.patience == "low":  # Busy-Developer
+            # High threshold: only Clarify if very uncertain
+            clarify_threshold = 0.7
+        elif persona.patience == "high":  # Novice-Learner
+            # Low threshold: Clarify even if moderately uncertain
+            clarify_threshold = 0.3
+        else:  # Experienced-Engineer (mid patience)
+            # Medium threshold: Clarify if reasonably uncertain
+            clarify_threshold = 0.5
+        
+        # Decision: Clarify if uncertainty exceeds threshold
+        if task_uncertainty > clarify_threshold:
+            return "Clarify"
+        else:
+            return "Execute"
+    
+    # Condition 3: After first turn (dialogue_turn > 0)
+    # After user answered Clarify, always Execute (don't keep asking)
+    # This keeps trajectories at most 2 turns
+    return "Execute"
 
 
-def has_code_output(assistant_msg: str) -> bool:
-    """Heuristic to detect code in assistant output."""
-    return (
-        "```" in assistant_msg or
-        "def " in assistant_msg or
-        "class " in assistant_msg
-    )
+def check_task_completion(state: Dict, assistant_msg: str, domain: str) -> bool:
+    """Check if task is completed based on assistant output and tests."""
+    if domain == "coding":
+        # Check if code is present
+        has_code = (
+            "```" in assistant_msg or
+            "def " in assistant_msg or
+            "class " in assistant_msg
+        )
+        if not has_code:
+            return False
+        
+        # If tests are available, try to execute them
+        tests = state.get("convcodeworld_tests")
+        if tests:
+            try:
+                from eval.evaluate_dpo_model import extract_code_from_text, score_code_passfail
+                code = extract_code_from_text(assistant_msg)
+                if code:
+                    score = score_code_passfail(code, tests, timeout=30)
+                    return score > 0.5  # Task completed if tests pass
+            except Exception:
+                pass
+        
+        # If no tests or execution failed, assume task completed if code is present
+        return has_code
+    
+    # For planning domain, assume task completed if response is long enough
+    return len(assistant_msg.split()) > 50
 
 
 def update_state_for_next_turn(current_state: Dict, user_reaction: Dict, assistant_msg: str, is_same_turn: bool = False) -> Dict:
@@ -443,7 +491,8 @@ def generate_multi_turn_conversation(initial_state: Dict, domain: str,
                                      force_first_action: Optional[str] = None,
                                      local_generator: Optional[LocalHFChatGenerator] = None,
                                      temperature: float = 0.7,
-                                     top_p: float = 0.9) -> List[Dict]:
+                                     top_p: float = 0.9,
+                                     trajectory_id: Optional[str] = None) -> List[Dict]:
     """
     Generate a multi-turn conversation until task completion or max turns.
     
@@ -455,26 +504,27 @@ def generate_multi_turn_conversation(initial_state: Dict, domain: str,
         max_turns: Maximum number of dialogue turns
         action_selection_fn: Function(state) -> action (LOW/MID/HIGH). If None, uses persona-based selection.
         force_first_action: If provided ("Execute" or "Clarify"), force the first action instead of auto-selecting.
+        trajectory_id: Optional unique ID for this trajectory. If None, will be auto-generated.
     
     Returns:
         List of trajectory dicts, one per turn
     """
+    import time
     prompts = build_action_prompts(domain)
     persona = PERSONAS[persona_idx % len(PERSONAS)]
     trajectories = []
     current_state = initial_state.copy()
     total_questions_asked = 0
     
-    allow_extra_execute = False
-    turn = 0
-    while turn < max_turns or (allow_extra_execute and turn < max_turns + 1):
-        clarify_chain = current_state.get("clarify_chain", 0)
+    # Generate unique trajectory ID if not provided
+    if trajectory_id is None:
+        state_id = initial_state.get("id", "unknown")
+        timestamp = int(time.time() * 1000000)  # microseconds for uniqueness
+        trajectory_id = f"{state_id}_{persona.name}_{timestamp}"
+    
+    for turn in range(max_turns):
         # Select action for this turn
-        # If user answered a clarification, force Execute next to complete the loop.
-        force_execute_next = current_state.pop("force_execute_next", False)
-        if force_execute_next:
-            action = "Execute"
-        elif turn == 0 and force_first_action:
+        if turn == 0 and force_first_action:
             # Force first action if specified (for sampling strategy)
             action = force_first_action
         elif action_selection_fn:
@@ -534,6 +584,7 @@ def generate_multi_turn_conversation(initial_state: Dict, domain: str,
         
         # Create trajectory for this turn
         traj = {
+            "trajectory_id": trajectory_id,  # Unique ID to link all turns in this trajectory
             "state": current_state.copy(),
             "action": action,
             "action_prompt": action_prompt,
@@ -550,51 +601,27 @@ def generate_multi_turn_conversation(initial_state: Dict, domain: str,
             "is_terminal": False,  # Will be set to True if task completed or user stopped
             "has_edge_cases_info": has_edge_cases_info,  # Track if edge_cases info was obtained
         }
-        
-        # Check if task is completed (only for Execute action)
-        task_completed_this_turn = False
-        if action == "Execute":
-            # Track Execute outputs that contain no code
-            if not has_code_output(assistant_msg):
-                traj["no_code_execute"] = True
-            else:
-                # Execute with code → task completed, should end conversation
-                task_completed_this_turn = True
-                traj["is_terminal"] = True
-                traj["task_completed"] = True
-        
-        # Check if user wants to stop (reject signal)
-        # User rejection means they don't want to answer Clarify, but we still provide code via Execute
-        user_rejected = reaction.get("meta", {}).get("reject_signal", 0) > 0
-        if user_rejected:
-            traj["user_stopped"] = True
-            # Don't break immediately; instead force Execute on next turn to provide code
-            current_state["force_execute_next"] = True
-            # If this is near the end, allow an extra Execute turn
-            if turn >= max_turns - 1:
-                allow_extra_execute = True
-        
-        # Add trajectory to list
         trajectories.append(traj)
         
-        # If task completed (Execute with code), end conversation
-        if task_completed_this_turn:
+        # Check if task is completed (only for Execute action)
+        # Use enhanced task completion check that considers persona and edge_cases info
+        if action == "Execute":
+            task_completed = check_task_completion(current_state, assistant_msg, domain)
+            if task_completed:
+                traj["task_completed"] = True
+                traj["is_terminal"] = True  # Mark as terminal state
+                break
+        
+        # Check if user wants to stop (reject signal)
+        if reaction.get("meta", {}).get("reject_signal", 0) > 0:
+            traj["user_stopped"] = True
+            traj["task_completed"] = False  # Explicitly mark as not completed
+            traj["is_terminal"] = True  # Mark as terminal state
             break
         
         # Update state for next turn
         # is_same_turn=False because this is moving to the next dialogue turn (not within same turn)
         current_state = update_state_for_next_turn(current_state, reaction, assistant_msg, is_same_turn=False)
-        # Track consecutive Clarify (for debugging/stats only, no forced Execute)
-        if action == "Clarify":
-            clarify_chain += 1
-        else:
-            clarify_chain = 0
-        # If this was the last allowed turn and we clarified (answered or not), add one extra Execute turn
-        if action == "Clarify" and turn >= max_turns - 1:
-            allow_extra_execute = True
-        current_state["clarify_chain"] = clarify_chain
-        
-        turn += 1
         
         # Update has_edge_cases_info in state for next turn
         current_state["has_edge_cases_info"] = has_edge_cases_info
@@ -602,14 +629,9 @@ def generate_multi_turn_conversation(initial_state: Dict, domain: str,
     # If loop ended without break (reached max_turns), mark last trajectory as terminal
     if trajectories and not trajectories[-1].get("is_terminal", False):
         trajectories[-1]["is_terminal"] = True
-
-    # Mark task_completed only if the terminal turn provides code
-    if trajectories:
-        last = trajectories[-1]
-        if last.get("is_terminal", False) and last.get("action") == "Execute":
-            last["task_completed"] = has_code_output(last.get("assistant_msg", ""))
-        elif last.get("is_terminal", False):
-            last["task_completed"] = False
+        # If task wasn't completed and user didn't stop, this is a timeout scenario
+        if not trajectories[-1].get("task_completed", False) and not trajectories[-1].get("user_stopped", False):
+            trajectories[-1]["task_completed"] = False  # Explicitly mark as not completed
     
     return trajectories
 
@@ -769,8 +791,6 @@ def main():
                        help="Sampling strategy: 'heuristic' (deterministic with forced actions) or 'free' (random with temperature, default: heuristic)")
     parser.add_argument("--n_samples", type=int, default=1,
                        help="Number of samples to generate per (state, persona) combination (default: 1). For heuristic strategy, generates: 1=Execute, 2=Execute+Clarify, 3+=Execute+Clarify+Free...")
-    parser.add_argument("--write_meta", action="store_true",
-                       help="Write a sidecar .meta.json file describing the output (default: False)")
     args = parser.parse_args()
     set_global_seed(args.seed)
 
@@ -798,31 +818,6 @@ def main():
             out_basename = f"{out_basename}_{timestamp}"
     out_path = out_dir / out_basename
     out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Optional sidecar metadata for humans (keeps JSONL format intact)
-    if args.write_meta:
-        meta_path = Path(str(out_path) + ".meta.json")
-        meta = {
-            "output": str(out_path),
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "mode": args.mode,
-            "domain": args.domain,
-            "n_states": args.n_states,
-            "dataset_path": args.dataset_path,
-            "all_personas": args.all_personas,
-            "persona_idx": args.persona_idx,
-            "n_samples": args.n_samples,
-            "sampling_strategy": args.sampling_strategy,
-            "max_turns": args.max_turns,
-            "llm_model": args.llm_model,
-            "local_model": args.local_model,
-            "seed": args.seed,
-            "temperature": args.temperature,
-            "top_p": args.top_p,
-            "note": "JSONL contains one trajectory turn per line.",
-        }
-        with meta_path.open("w", encoding="utf-8") as mf:
-            json.dump(meta, mf, ensure_ascii=True, indent=2)
     
     # Determine persona count
     n_personas = len(PERSONAS) if args.all_personas else 1

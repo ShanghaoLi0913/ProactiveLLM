@@ -274,22 +274,22 @@ def react(user_msg: str, assistant_msg: str, persona: Persona,
                 # 正常生成答案
                 # Generate answer with clarity based on expertise
                 if llm_model:
-                    # Use LLM to generate realistic answer
+                # Use LLM to generate realistic answer
                     base_answer = generate_specific_answer_llm(
                         assistant_msg,
                         user_msg,
                         persona.domain,
                         llm_model=llm_model,
                         expertise=persona.expertise,
-                    )
-                else:
-                    # Use dummy answer for synthetic mode (testing)
+                )
+            else:
+                # Use dummy answer for synthetic mode (testing)
                     base_answer = generate_specific_answer_dummy(
                         assistant_msg,
                         user_msg,
                         persona.domain,
                         expertise=persona.expertise,
-                    )
+                )
 
                 # Apply disclosure rule if available (Step 3: disclosure rule)
                 # 状况三：分级Disclosure - 将隐藏信息拆分为2部分
@@ -307,9 +307,9 @@ def react(user_msg: str, assistant_msg: str, persona: Persona,
                 else:
                     user_reply = base_answer
 
-                answered = 1
-                reject_signal = 0
-                answer_clarity = expertise_value  # answer_clarity = f(expertise)
+            answered = 1
+            reject_signal = 0
+            answer_clarity = expertise_value  # answer_clarity = f(expertise)
         else:
             # User rejects (with probability = 1 - effective_patience)
             # Enhanced reject messages for different personas
@@ -324,7 +324,7 @@ def react(user_msg: str, assistant_msg: str, persona: Persona,
                     else "Stop asking, just give me the code."
                 )
 
-            answered = 0
+        answered = 0
             reject_signal = 1
             answer_clarity = 0.0  # No answer when rejected
     else:

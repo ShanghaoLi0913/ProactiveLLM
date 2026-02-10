@@ -91,9 +91,46 @@ def load_trajectories(path: Path) -> List[Dict]:
     return trajs
 
 
+def group_by_trajectory(trajs: List[Dict]) -> Dict[str, List[Dict]]:
+    """
+    Group trajectories by trajectory_id for trajectory-level reward computation.
+    
+    Each trajectory_id represents a complete multi-turn conversation.
+    All turns in the same trajectory will share the final task outcome.
+    
+    Args:
+        trajs: List of trajectory dicts, each should have "trajectory_id"
+    
+    Returns:
+        Dict mapping trajectory_id to list of turns (sorted by dialogue_turn)
+    """
+    from collections import defaultdict
+    groups = defaultdict(list)
+    
+    for t in trajs:
+        traj_id = t.get("trajectory_id")
+        if traj_id is None:
+            # Fallback for old data without trajectory_id
+            # Group by (state_id, persona) - not perfect but better than nothing
+            state_id = t.get("state", {}).get("id", "unknown")
+            persona_name = t.get("persona", {}).get("name", "unknown")
+            traj_id = f"{state_id}_{persona_name}"
+        
+        groups[traj_id].append(t)
+    
+    # Sort each trajectory by dialogue_turn
+    for traj_id in groups:
+        groups[traj_id] = sorted(groups[traj_id], key=lambda x: x.get("state", {}).get("dialogue_turn", 0))
+    
+    return groups
+
+
 def group_by_state(trajs: List[Dict]) -> Dict[Tuple[str, int], List[Dict]]:
     """
-    Group trajectories by (state_id, dialogue_turn).
+    Group trajectories by (state_id, dialogue_turn) for step-level processing.
+    
+    DEPRECATED: Use group_by_trajectory for trajectory-level reward.
+    This function is kept for backward compatibility.
     
     This ensures that preference pairs are generated within the same dialogue turn,
     preventing the model from learning feature drift (e.g., longer query = higher reward)
@@ -259,6 +296,102 @@ def compute_rewards_for_group(
     return scored
 
 
+def compute_trajectory_level_rewards(
+    trajectory_turns: List[Dict],
+    cfg: RewardConfig,
+) -> List[Dict]:
+    """
+    Compute trajectory-level rewards for a complete multi-turn conversation.
+    
+    Key idea: All turns in a trajectory share the FINAL task outcome (R_task),
+    but each turn has its own interrupt cost (C_interrupt).
+    
+    Formula for each turn:
+        R_turn = R_final - C_interrupt_turn
+    
+    Where:
+        R_final = task_score from the last turn (or best Execute turn)
+        C_interrupt_turn = interrupt cost for this specific turn
+    
+    Args:
+        trajectory_turns: List of turns in a single trajectory (sorted by dialogue_turn)
+        cfg: Reward configuration
+    
+    Returns:
+        List of trajectory dicts with computed rewards
+    """
+    if not trajectory_turns:
+        return []
+    
+    domain = trajectory_turns[0]["state"].get("domain", "coding")
+    
+    # Step 1: Find the final task score for this trajectory
+    # Look for the last Execute action or the terminal turn
+    final_task_score = 0.0
+    
+    for turn in reversed(trajectory_turns):
+        action = turn.get("action", "")
+        assistant_msg = turn.get("assistant_msg", "")
+        
+        # Only Execute actions can have task_score > 0
+        if action == "Execute" and assistant_msg:
+            # Compute task score for this Execute
+            # Need to pass state + action info
+            state_with_action = turn["state"].copy()
+            state_with_action["action"] = action  # Add action to state for compute_task_score
+            state_with_action["has_edge_cases_info"] = turn.get("has_edge_cases_info", False)
+            
+            task_score = compute_task_score(
+                state_with_action,
+                domain,
+                assistant_msg
+            )
+            
+            # Use the first (last in reverse) Execute's score as final
+            if task_score > 0:
+                final_task_score = task_score
+                break
+    
+    # Step 2: Compute reward for each turn
+    scored = []
+    for turn in trajectory_turns:
+        state = turn["state"]
+        action = turn.get("action", "")
+        assistant_msg = turn.get("assistant_msg", "")
+        
+        # Compute interrupt cost for this turn
+        user_reaction = turn.get("user_reaction", {})
+        meta = user_reaction.get("meta", {})
+        n_questions = assistant_msg.count("?") if assistant_msg else 0
+        
+        interrupt_cost = compute_interrupt_cost_v2(
+            meta,
+            n_questions=n_questions,
+            assistant_msg=assistant_msg,
+        )
+        
+        # Check if user stopped
+        user_stopped = turn.get("user_stopped", False)
+        if user_stopped:
+            # User stopped: trajectory failed, reward = 0
+            total_r = 0.0
+        else:
+            # Normal case: R = R_final - C_interrupt
+            # Note: NO clarify_incomplete_penalty needed!
+            # Clarify naturally gets credit from final success
+            total_r = float(cfg.w_task * final_task_score - cfg.w_interrupt * interrupt_cost)
+        
+        # Store results
+        scored.append({
+            **turn,
+            "task_score": float(final_task_score),  # All turns share final score
+            "interrupt_cost": float(interrupt_cost),  # Each turn has its own cost
+            "total_reward": total_r,
+        })
+    
+    return scored
+
+
 def build_prefs_from_group(scored_trajs: List[Dict]) -> List[Dict]:
     """
     Given scored trajectories for a single (state_id, dialogue_turn),
@@ -326,10 +459,12 @@ def build_prefs_from_group(scored_trajs: List[Dict]) -> List[Dict]:
             prefs.append(
                 {
                     "state": hi["state"],
+                    "persona": hi.get("persona", {}),  # ← 添加persona信息！
                     "chosen_action": hi["action"],
                     "rejected_action": lo["action"],
-                    "chosen_assistant_msg": hi.get("assistant_msg", ""),
-                    "rejected_assistant_msg": lo.get("assistant_msg", ""),
+                    # V16: 添加action前缀，让模型学会先决策再生成
+                    "chosen_assistant_msg": f"{hi['action']}\n{hi.get('assistant_msg', '')}",
+                    "rejected_assistant_msg": f"{lo['action']}\n{lo.get('assistant_msg', '')}",
                     "chosen_reward": hi["total_reward"],
                     "rejected_reward": lo["total_reward"],
                     "chosen_task_score": hi["task_score"],
@@ -396,20 +531,70 @@ def compute_preferences(
     cfg: RewardConfig,
     target_execute_ratio: float,
     rebalance_seed: int,
+    use_trajectory_level: bool = True,
 ) -> None:
-    """High-level function: trajectories → prefs JSONL."""
+    """High-level function: trajectories → prefs JSONL.
+    
+    Args:
+        traj_path: Path to trajectories JSONL
+        out_path: Output path for preferences JSONL
+        cfg: Reward configuration
+        target_execute_ratio: Target ratio for Execute in chosen prefs
+        rebalance_seed: Seed for deterministic rebalancing
+        use_trajectory_level: If True, use trajectory-level reward (recommended).
+                             If False, use step-level reward (legacy).
+    """
     print(f"📂 Loading trajectories from: {traj_path}")
     trajs = load_trajectories(traj_path)
-    print(f"📊 Loaded {len(trajs)} trajectories")
-
-    groups = group_by_state(trajs)
-    print(f"📊 Grouped into {len(groups)} (state_id, dialogue_turn) groups")
+    print(f"📊 Loaded {len(trajs)} trajectory turns")
 
     prefs: List[Dict] = []
-    for (sid, dialogue_turn), g in groups.items():
-        scored = compute_rewards_for_group(g, cfg)
-        group_prefs = build_prefs_from_group(scored)
-        prefs.extend(group_prefs)
+    
+    if use_trajectory_level:
+        print("🎯 Using TRAJECTORY-LEVEL reward computation")
+        # Group by trajectory_id to get complete trajectories
+        trajectory_groups = group_by_trajectory(trajs)
+        print(f"📊 Grouped into {len(trajectory_groups)} complete trajectories")
+        
+        # Compute trajectory-level rewards
+        all_scored = []
+        for traj_id, turns in trajectory_groups.items():
+            scored_turns = compute_trajectory_level_rewards(turns, cfg)
+            all_scored.extend(scored_turns)
+        
+        print(f"📊 Computed rewards for {len(all_scored)} turns across all trajectories")
+        
+        # Now group by (state_id, dialogue_turn, persona) for preference pair generation
+        # This ensures we compare actions at the same turn within the SAME persona
+        # Different personas should have different preferences!
+        turn_groups = {}
+        for t in all_scored:
+            state_id = t["state"]["id"]
+            dialogue_turn = t["state"]["dialogue_turn"]
+            persona_name = t.get("persona", {}).get("name", "Unknown")
+            key = (state_id, dialogue_turn, persona_name)  # ← 添加persona到key！
+            if key not in turn_groups:
+                turn_groups[key] = []
+            turn_groups[key].append(t)
+        
+        print(f"📊 Regrouped into {len(turn_groups)} (state_id, dialogue_turn, persona) groups for preference generation")
+        
+        # Generate preference pairs
+        for key, g in turn_groups.items():
+            group_prefs = build_prefs_from_group(g)
+            prefs.extend(group_prefs)
+    
+    else:
+        print("⚠️  Using STEP-LEVEL reward computation (legacy mode)")
+        groups = group_by_state(trajs)
+        print(f"📊 Grouped into {len(groups)} (state_id, dialogue_turn) groups")
+
+        for (sid, dialogue_turn), g in groups.items():
+            scored = compute_rewards_for_group(g, cfg)
+            group_prefs = build_prefs_from_group(scored)
+            prefs.extend(group_prefs)
+
+    print(f"📊 Generated {len(prefs)} preference pairs")
 
     # Optional global rebalancing to avoid action collapse
     if target_execute_ratio is not None:
@@ -466,6 +651,18 @@ def parse_args():
         default=42,
         help="Seed for deterministic preference rebalancing (default: 42)",
     )
+    parser.add_argument(
+        "--use_trajectory_level",
+        action="store_true",
+        default=True,
+        help="Use trajectory-level reward computation (default: True, recommended)",
+    )
+    parser.add_argument(
+        "--use_step_level",
+        dest="use_trajectory_level",
+        action="store_false",
+        help="Use step-level reward computation (legacy mode)",
+    )
     return parser.parse_args()
 
 
@@ -489,6 +686,7 @@ def main():
         cfg,
         target_execute_ratio=target_ratio,
         rebalance_seed=args.rebalance_seed,
+        use_trajectory_level=args.use_trajectory_level,
     )
 
 

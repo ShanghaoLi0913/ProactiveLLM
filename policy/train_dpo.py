@@ -43,7 +43,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from policy.render_state import render_state
 
 
-def to_dpo_format(records):
+def to_dpo_format(records, tokenizer):
     """Convert preference JSONL to TRL DPO format.
     
     Sequential Decision Process:
@@ -54,6 +54,12 @@ def to_dpo_format(records):
     IMPORTANT: Uses render_state() which contains ONLY pure state information,
     NO action_prompts or templates. This allows the model to freely decide
     which action to take based on state (task_uncertainty, dialogue_turn, prev_reject).
+    
+    PERSONA-AWARE: Each state includes persona information, allowing the model
+    to learn different proactivity levels for different user types.
+    
+    V15 FIX: Uses chat template to provide clear prompt/response boundary.
+    This ensures the model knows where to start generating the response.
     """
 
     dataset = {
@@ -62,10 +68,26 @@ def to_dpo_format(records):
         "rejected": [],
     }
     for ex in records:
-        dataset["prompt"].append(render_state(ex["state"]))
-        # Use action tokens, not full messages
-        dataset["chosen"].append(ex["chosen_action"])  # action token: Clarify/Execute
-        dataset["rejected"].append(ex["rejected_action"])  # action token
+        # Merge persona info into state for rendering
+        state_with_persona = ex["state"].copy()
+        if "persona" in ex:
+            state_with_persona["persona"] = ex["persona"]
+        
+        # Render state to text
+        state_text = render_state(state_with_persona)
+        
+        # ✅ V15 Fix: Use chat template for clear prompt/response boundary
+        messages = [{"role": "user", "content": state_text}]
+        prompt = tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True  # Adds <|start_header_id|>assistant<|end_header_id|>
+        )
+        
+        dataset["prompt"].append(prompt)
+        # Full response (code/question)
+        dataset["chosen"].append(ex["chosen_assistant_msg"])
+        dataset["rejected"].append(ex["rejected_assistant_msg"])
     return dataset
 
 
@@ -83,30 +105,15 @@ def train(
     print(f"📂 Loading preference pairs from: {data_path}")
     records = load_prefs(Path(data_path))
     print(f"📊 Loaded {len(records)} preference pairs")
-    dpo_data = to_dpo_format(records)
-    print(f"📊 Using {len(dpo_data['prompt'])} examples for training (sequential decision: Clarify/Execute)")
-
+    
     print(f"🔡 Loading tokenizer: {model_name}")
     hf_token = os.environ.get("HF_TOKEN")
-    # Prefer an explicit HF_HOME, but fall back to the default Hugging Face cache under ~/.cache
-    # so training doesn't unexpectedly hit the network in offline / firewalled environments.
-    cache_dir = os.environ.get("HF_HOME") or str(Path.home() / ".cache")
-    # Try to find local snapshot directory first
-    snapshot_dir = None
-    if cache_dir:
-        import glob
-        pattern = f"{cache_dir}/huggingface/hub/models--meta-llama--Llama-3.1-8B-Instruct/snapshots/*"
-        snapshots = glob.glob(pattern)
-        if snapshots:
-            snapshot_dir = snapshots[0]
-            print(f"📁 Found local snapshot: {snapshot_dir}")
     
     tokenizer = AutoTokenizer.from_pretrained(
-        snapshot_dir if snapshot_dir else model_name,
+        model_name,
         use_fast=True,
-        token=hf_token if not snapshot_dir else None,
-        cache_dir=cache_dir if not snapshot_dir else None,
-        local_files_only=snapshot_dir is not None,
+        token=hf_token,
+        trust_remote_code=False,
     )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -115,6 +122,10 @@ def train(
     special_tokens = {"additional_special_tokens": ["Clarify", "Execute"]}
     tokenizer.add_special_tokens(special_tokens)
     print("✅ Added special tokens: Clarify, Execute")
+    
+    # ✅ V15 Fix: Convert to DPO format using chat template
+    dpo_data = to_dpo_format(records, tokenizer)
+    print(f"📊 Using {len(dpo_data['prompt'])} examples for training (sequential decision: Clarify/Execute)")
 
     # Model loading with optional 4-bit quantization (QLoRA)
     use_qlora = False
@@ -133,37 +144,31 @@ def train(
             )
             print("✅ Using 4-bit quantization (QLoRA)")
             model = AutoModelForCausalLM.from_pretrained(
-                snapshot_dir if snapshot_dir else model_name,
+                model_name,
                 quantization_config=quantization_config,
                 device_map=device_map,
                 torch_dtype=torch.bfloat16 if use_bf16 else torch.float16,
                 low_cpu_mem_usage=True,
-                token=hf_token if not snapshot_dir else None,
-                cache_dir=cache_dir if not snapshot_dir else None,
-                local_files_only=snapshot_dir is not None,
+                token=hf_token,
             )
             use_qlora = True
         except Exception as e:  # pragma: no cover - runtime safeguard
             print(f"⚠️  QLoRA load failed ({e}), falling back to FP16")
             model = AutoModelForCausalLM.from_pretrained(
-                snapshot_dir if snapshot_dir else model_name,
+                model_name,
                 torch_dtype=torch.float16 if use_fp16 else torch.float32,
                 device_map=device_map,
                 low_cpu_mem_usage=True,
-                token=hf_token if not snapshot_dir else None,
-                cache_dir=cache_dir if not snapshot_dir else None,
-                local_files_only=snapshot_dir is not None,
+                token=hf_token,
             )
     else:
         print("⚠️  bitsandbytes not available, using FP16/FP32")
         model = AutoModelForCausalLM.from_pretrained(
-            snapshot_dir if snapshot_dir else model_name,
+            model_name,
             torch_dtype=torch.float16 if use_fp16 else torch.float32,
             device_map=device_map,
             low_cpu_mem_usage=True,
-            token=hf_token if not snapshot_dir else None,
-            cache_dir=cache_dir if not snapshot_dir else None,
-            local_files_only=snapshot_dir is not None,
+            token=hf_token,
         )
 
     # Resize embeddings after adding special tokens
