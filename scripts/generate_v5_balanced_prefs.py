@@ -129,21 +129,17 @@ def extract_clarify_prefs(trajectories: Dict[str, List[Dict]],
             rejected_task_score = 0.0
             
             pref = {
-                "state_id": state_id,
-                "persona": persona_type,
+                "state": state,  # 完整的state字典（训练脚本需要）
                 "chosen_action": "Clarify",
                 "rejected_action": "Execute",
-                "chosen_prompt": chosen_prompt,
-                "chosen_response": chosen_response,
-                "rejected_prompt": rejected_prompt,
-                "rejected_response": rejected_response,
+                "chosen_assistant_msg": chosen_response,  # 使用V4格式的字段名
+                "rejected_assistant_msg": rejected_response,
                 "chosen_reward": chosen_reward,
                 "rejected_reward": rejected_reward,
                 "chosen_task_score": chosen_task_score,
                 "rejected_task_score": rejected_task_score,
-                "trajectory_based": True,  # 标记这是基于轨迹的Clarify样本
-                "final_turn_idx": len(task_turns),
-                "clarify_turn_idx": turn_idx,
+                "chosen_interrupt_cost": 0.1,
+                "rejected_interrupt_cost": 0.4,
             }
             
             clarify_prefs.append(pref)

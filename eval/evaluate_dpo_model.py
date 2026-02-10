@@ -267,13 +267,13 @@ def score_code_passfail(code: str, tests: str, timeout: int = 30, debug: bool = 
             passed = max(0, total - failures - errors)
             return passed / total
         # 执行失败且无法解析，记录错误信息（仅在debug模式下）
-        if debug:
-            print(f"   执行错误 (returncode={result.returncode}):")
-            if result.stderr:
-                print(f"   stderr: {result.stderr[:500]}")
-            if result.stdout:
-                print(f"   stdout: {result.stdout[:500]}")
-        return 0.0
+            if debug:
+                print(f"   执行错误 (returncode={result.returncode}):")
+                if result.stderr:
+                    print(f"   stderr: {result.stderr[:500]}")
+                if result.stdout:
+                    print(f"   stdout: {result.stdout[:500]}")
+            return 0.0
     except subprocess.TimeoutExpired:
         if debug:
             print(f"   执行超时 (>{timeout}s)")
@@ -540,7 +540,7 @@ def evaluate_model(
         # Step 2: Generate code using separate code generation
         task_prompt = state.get("query", "")
         domain = state.get("domain", "coding")
-
+        
         template = get_template(predicted_action, domain)
         code = None
         if use_openai:
@@ -581,7 +581,7 @@ def evaluate_model(
                     temperature=code_temperature,
                     top_p=code_top_p,
                     do_sample=code_do_sample,
-                )
+        )
         
         # 提取代码（如果是coding任务）
         if state["domain"] == "coding":
@@ -630,13 +630,14 @@ def evaluate_model(
             tests = state.get("convcodeworld_tests")
             if tests:
                 task_score = score_code_passfail(code, tests, debug=(i < 3))
-                test_pass_rates.append(task_score)
-                if task_score > 0:
-                    task_success_count += 1
-                    if predicted_action == "Execute":
-                        execute_success_count += 1
-                if task_score >= 0.5:
-                    soft_success_count += 1
+                if task_score is not None:
+                    test_pass_rates.append(task_score)
+                    if task_score > 0:
+                        task_success_count += 1
+                        if predicted_action == "Execute":
+                            execute_success_count += 1
+                    if task_score >= 0.5:
+                        soft_success_count += 1
                 elif i < 3 or (i + 1) % 20 == 0:
                     print(f"\n⚠️  样本 {i+1}: 代码执行失败 (score=0)")
                     print(f"   提取的代码长度: {len(code)}")
@@ -687,8 +688,11 @@ def evaluate_model(
     # 计算统计信息
     task_success_rate = (task_success_count / total_samples * 100) if total_samples > 0 else 0.0
     execute_success_rate = (execute_success_count / execute_count * 100) if execute_count > 0 else 0.0
-    avg_reward = sum(r["total_reward"] for r in results) / len(results) if results else 0.0
-    avg_task_score = sum(r["task_score"] for r in results) / len(results) if results else 0.0
+    # 过滤掉None值
+    valid_rewards = [r["total_reward"] for r in results if r.get("total_reward") is not None]
+    valid_task_scores = [r["task_score"] for r in results if r.get("task_score") is not None]
+    avg_reward = sum(valid_rewards) / len(valid_rewards) if valid_rewards else 0.0
+    avg_task_score = sum(valid_task_scores) / len(valid_task_scores) if valid_task_scores else 0.0
     avg_test_pass_rate = sum(test_pass_rates) / len(test_pass_rates) if test_pass_rates else 0.0
     soft_task_success_rate = (soft_success_count / total_samples * 100) if total_samples > 0 else 0.0
     
