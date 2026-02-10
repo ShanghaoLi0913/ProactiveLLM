@@ -68,13 +68,12 @@ def to_dpo_format(records, tokenizer):
         "rejected": [],
     }
     for ex in records:
-        # Merge persona info into state for rendering
-        state_with_persona = ex["state"].copy()
-        if "persona" in ex:
-            state_with_persona["persona"] = ex["persona"]
+        # ⭐ Pass persona as separate parameter for explicit persona-awareness
+        state = ex["state"]
+        persona = ex.get("persona", None)
         
-        # Render state to text
-        state_text = render_state(state_with_persona)
+        # Render state to text with persona
+        state_text = render_state(state, persona=persona)
         
         # ✅ V15 Fix: Use chat template for clear prompt/response boundary
         messages = [{"role": "user", "content": state_text}]
