@@ -54,3 +54,24 @@ Thumbs.db
 data/external/ConvCodeWorld/*
 scripts/run_experiment.sh
 scripts/activate_env.sh
+
+# Temporary test files
+*.txt
+!requirements.txt
+*.zip
+test_output*.json
+empty*.json
+headers_only*.json
+
+# Temporary directories
+test_*/
+docs_backup/
+data/data/
+
+# Old version scripts (keep only latest)
+scripts/eval_v[0-9]*.py
+scripts/train_v[0-9]*.sh
+scripts/watch_*.sh
+scripts/check_*.sh
+scripts/auto_*.sh
+scripts/*_repair*.py
