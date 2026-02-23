@@ -385,9 +385,36 @@ def select_mainline_action_from_persona(persona, state: Optional[Dict] = None) -
             return "Execute"
     
     # Condition 3: After first turn (dialogue_turn > 0)
-    # After user answered Clarify, always Execute (don't keep asking)
-    # This keeps trajectories at most 2 turns
-    return "Execute"
+    # Multi-turn conversation: persona differences should persist
+    # Check if previous turn was Clarify and user answered
+    query = state.get("query", "") if state else ""
+    prev_was_clarify = "[User]:" in query  # If query contains "[User]:", previous turn was Clarify and user answered
+    
+    if prev_was_clarify:
+        # Previous turn was Clarify and user answered
+        # Check if uncertainty is still high enough to continue Clarify (based on persona)
+        # Different personas have different thresholds for continuing Clarify
+        if persona.patience == "low":  # Busy-Developer
+            # Even if uncertainty is high, Execute after one Clarify (don't keep asking)
+            return "Execute"
+        elif persona.patience == "high":  # Novice-Learner
+            # Continue Clarify if uncertainty is still high
+            clarify_threshold = 0.3
+            if task_uncertainty > clarify_threshold:
+                return "Clarify"
+            else:
+                return "Execute"
+        else:  # Experienced-Engineer (mid patience)
+            # Continue Clarify only if uncertainty is very high
+            clarify_threshold = 0.5
+            if task_uncertainty > clarify_threshold:
+                return "Clarify"
+            else:
+                return "Execute"
+    else:
+        # Previous turn was not Clarify (or user didn't answer)
+        # This shouldn't happen if Execute ends conversation, but handle it anyway
+        return "Execute"
 
 
 def check_task_completion(state: Dict, assistant_msg: str, domain: str) -> bool:
@@ -607,10 +634,10 @@ def generate_multi_turn_conversation(initial_state: Dict, domain: str,
         # Use enhanced task completion check that considers persona and edge_cases info
         if action == "Execute":
             task_completed = check_task_completion(current_state, assistant_msg, domain)
-            if task_completed:
-                traj["task_completed"] = True
-                traj["is_terminal"] = True  # Mark as terminal state
-                break
+            traj["task_completed"] = task_completed
+            traj["is_terminal"] = True  # Mark as terminal state
+            # Execute之后必须结束对话（无论任务是否完成）
+            break
         
         # Check if user wants to stop (reject signal)
         if reaction.get("meta", {}).get("reject_signal", 0) > 0:

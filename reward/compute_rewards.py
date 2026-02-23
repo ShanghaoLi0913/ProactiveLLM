@@ -51,7 +51,7 @@ import json
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 # Allow running as a script: add project root to sys.path and import reward.compute
 import sys
@@ -354,10 +354,18 @@ def compute_trajectory_level_rewards(
     
     # Step 2: Compute reward for each turn
     scored = []
-    for turn in trajectory_turns:
+    for i, turn in enumerate(trajectory_turns):
         state = turn["state"]
         action = turn.get("action", "")
         assistant_msg = turn.get("assistant_msg", "")
+        dialogue_turn = state.get("dialogue_turn", 0)
+        
+        # Find previous action for multi-turn behavior learning
+        prev_action = None
+        if dialogue_turn > 0 and i > 0:
+            # Get the previous turn's action
+            prev_turn = trajectory_turns[i - 1]
+            prev_action = prev_turn.get("action")
         
         # Compute interrupt cost for this turn
         user_reaction = turn.get("user_reaction", {})
@@ -376,10 +384,110 @@ def compute_trajectory_level_rewards(
             # User stopped: trajectory failed, reward = 0
             total_r = 0.0
         else:
-            # Normal case: R = R_final - C_interrupt
-            # Note: NO clarify_incomplete_penalty needed!
-            # Clarify naturally gets credit from final success
-            total_r = float(cfg.w_task * final_task_score - cfg.w_interrupt * interrupt_cost)
+            # Persona-aware reward adjustment
+            persona_name = (turn.get("persona", {}) or {}).get("name", "")
+            task_uncertainty = state.get("task_uncertainty", 0.0)
+            
+            # Base reward: R = R_final - C_interrupt
+            base_reward = float(cfg.w_task * final_task_score - cfg.w_interrupt * interrupt_cost)
+            
+            # Persona-specific adjustments
+            persona_adjustment = 0.0
+            
+            if persona_name == "Novice-Learner":
+                # Novice-Learner: Clarify multiple turns, then Execute
+                # More tolerant of Clarify, especially for high uncertainty tasks
+                if dialogue_turn == 0:
+                    # Turn 0: Strong preference for Clarify
+                    if action == "Clarify":
+                        uncertainty_bonus = task_uncertainty * 0.20  # Up to 0.20 bonus for high uncertainty at Turn 0
+                        persona_adjustment = uncertainty_bonus
+                    elif action == "Execute":
+                        if task_uncertainty >= 0.7:
+                            persona_adjustment = -0.15  # Strong penalty for Execute on high uncertainty at Turn 0
+                        elif task_uncertainty >= 0.5:
+                            persona_adjustment = -0.10  # Penalty for Execute on medium-high uncertainty at Turn 0
+                        else:
+                            persona_adjustment = -0.05  # Small penalty for Execute at Turn 0
+                else:
+                    # Turn 1+: Continue Clarify, then Execute
+                    if action == "Clarify":
+                        # Reduce interrupt cost penalty for Clarify (make it more attractive)
+                        # Higher uncertainty → more benefit from Clarify
+                        uncertainty_bonus = task_uncertainty * 0.15  # Up to 0.15 bonus for high uncertainty
+                        persona_adjustment = uncertainty_bonus
+                        
+                        # Multi-turn bonus: If prev_action was Clarify, continue Clarify is good
+                        if prev_action == "Clarify" and task_uncertainty > 0.5:
+                            persona_adjustment += 0.15  # Increased bonus for continuing Clarify
+                    elif action == "Execute":
+                        # Execute is acceptable after multiple Clarify turns
+                        if task_uncertainty >= 0.7:
+                            persona_adjustment = -0.05  # Small penalty for Execute on high uncertainty
+                        # Multi-turn bonus: If prev_action was Clarify, Execute is acceptable
+                        if prev_action == "Clarify":
+                            persona_adjustment += 0.05  # Small bonus for Execute after Clarify
+            
+            elif persona_name == "Busy-Developer":
+                # Busy-Developer: Almost always Execute at Turn 0, strong penalty for multi-turn
+                if dialogue_turn == 0:
+                    # Turn 0: Strong preference for Execute
+                    if action == "Execute":
+                        persona_adjustment = 0.20  # Strong bonus for Execute at Turn 0
+                    elif action == "Clarify":
+                        persona_adjustment = -0.20  # Strong penalty for Clarify at Turn 0
+                elif dialogue_turn > 0:
+                    # Additional penalty for each extra turn (0.3 per turn)
+                    persona_adjustment = -0.3 * dialogue_turn
+                    # Also: slight bonus for Execute on low uncertainty (encourage direct action)
+                    if action == "Execute" and task_uncertainty < 0.4:
+                        persona_adjustment += 0.05
+                
+                # Multi-turn bonus: If prev_action was Clarify, Execute is strongly preferred
+                if prev_action == "Clarify" and action == "Execute":
+                    persona_adjustment += 0.15  # Strong bonus for Execute after Clarify
+            
+            elif persona_name == "Experienced-Engineer":
+                # Experienced-Engineer: Clarify at Turn 0, then Execute at Turn 1
+                # Should Clarify for high/medium uncertainty, Execute for low uncertainty
+                if dialogue_turn == 0:
+                    # Turn 0: Strong preference for Clarify (especially for high uncertainty)
+                    if action == "Clarify":
+                        if task_uncertainty >= 0.7:
+                            persona_adjustment = 0.25  # Strong bonus for Clarify on high uncertainty at Turn 0
+                        elif task_uncertainty >= 0.5:
+                            persona_adjustment = 0.20  # Bonus for Clarify on medium-high uncertainty at Turn 0
+                        elif task_uncertainty >= 0.4:
+                            persona_adjustment = 0.15  # Bonus for Clarify on medium uncertainty at Turn 0
+                    elif action == "Execute":
+                        if task_uncertainty >= 0.7:
+                            persona_adjustment = -0.20  # Strong penalty for Execute on high uncertainty at Turn 0
+                        elif task_uncertainty >= 0.5:
+                            persona_adjustment = -0.15  # Penalty for Execute on medium-high uncertainty at Turn 0
+                        elif task_uncertainty < 0.4:
+                            persona_adjustment = 0.05  # Small bonus for Execute on low uncertainty at Turn 0
+                else:
+                    # Turn 1+: Use original logic
+                    if action == "Clarify":
+                        if task_uncertainty >= 0.7:
+                            persona_adjustment = 0.15  # Bonus for Clarify on high uncertainty
+                        elif task_uncertainty >= 0.5:
+                            persona_adjustment = 0.10  # Bonus for Clarify on medium-high uncertainty
+                        elif task_uncertainty >= 0.4:
+                            persona_adjustment = 0.05  # Small bonus for medium uncertainty
+                    elif action == "Execute":
+                        if task_uncertainty >= 0.7:
+                            persona_adjustment = -0.10  # Penalty for Execute on high uncertainty
+                        elif task_uncertainty >= 0.5:
+                            persona_adjustment = -0.05  # Penalty for Execute on medium-high uncertainty
+                        elif task_uncertainty < 0.4:
+                            persona_adjustment = 0.05  # Bonus for Execute on low uncertainty
+                    
+                    # Multi-turn bonus: If prev_action was Clarify, Execute is preferred
+                    if prev_action == "Clarify":
+                        persona_adjustment += 0.10  # Bonus for Execute after Clarify
+            
+            total_r = float(base_reward + persona_adjustment)
         
         # Store results
         scored.append({
@@ -387,12 +495,55 @@ def compute_trajectory_level_rewards(
             "task_score": float(final_task_score),  # All turns share final score
             "interrupt_cost": float(interrupt_cost),  # Each turn has its own cost
             "total_reward": total_r,
+            "prev_action": prev_action,  # Store prev_action for multi-turn learning
+            "dialogue_turn": dialogue_turn,  # Store dialogue_turn for multi-turn learning
         })
     
     return scored
 
 
-def build_prefs_from_group(scored_trajs: List[Dict]) -> List[Dict]:
+def build_multi_turn_prefs_for_group(
+    scored_trajs: List[Dict],
+    persona_name: str,
+    dialogue_turn: int,
+) -> List[Dict]:
+    """
+    为Turn 1+生成persona-aware的preference pairs。
+    
+    注意：不修改reward值，只调整排序策略。
+    Reward已经在compute_trajectory_level_rewards中考虑了persona特性。
+    
+    这里只是通过调整排序来强化persona-aware的preference，但不改变reward本身。
+    """
+    if len(scored_trajs) < 2:
+        return []
+    
+    # 获取task_uncertainty
+    task_uncertainty = scored_trajs[0].get("state", {}).get("task_uncertainty", 0.5)
+    
+    # Persona-aware preference selection (只用于排序，不改变reward值)
+    # 通过调整排序的tie-break来体现persona偏好
+    if persona_name == "Novice-Learner":
+        # Novice-Learner: 如果uncertainty仍然高，倾向于继续Clarify
+        if task_uncertainty > 0.5:
+            preferred_action = "Clarify"
+        else:
+            preferred_action = "Execute"
+    elif persona_name == "Experienced-Engineer":
+        # Experienced-Engineer: 倾向于Execute（快速执行）
+        preferred_action = "Execute"
+    elif persona_name == "Busy-Developer":
+        # Busy-Developer: 强烈倾向于Execute（避免多轮）
+        preferred_action = "Execute"
+    else:
+        preferred_action = None
+    
+    # 使用标准方法生成preference pairs，但传入preferred_action用于tie-break
+    # build_prefs_from_group已经支持tie-break，我们只需要确保它使用preferred_action
+    return build_prefs_from_group(scored_trajs, preferred_action=preferred_action)
+
+
+def build_prefs_from_group(scored_trajs: List[Dict], preferred_action: Optional[str] = None) -> List[Dict]:
     """
     Given scored trajectories for a single (state_id, dialogue_turn),
     generate preference pairs (chosen, rejected) based on total_reward.
@@ -456,6 +607,11 @@ def build_prefs_from_group(scored_trajs: List[Dict]) -> List[Dict]:
                 # Too close and not aligned with tie-break preference → skip noisy pair.
                 continue
 
+            # Extract multi-turn information for training
+            # Both hi and lo are from the same group, so they share the same prev_action and dialogue_turn
+            prev_action = hi.get("prev_action")  # Can be None for Turn 0
+            dialogue_turn = hi.get("dialogue_turn", hi.get("state", {}).get("dialogue_turn", 0))
+            
             prefs.append(
                 {
                     "state": hi["state"],
@@ -471,6 +627,8 @@ def build_prefs_from_group(scored_trajs: List[Dict]) -> List[Dict]:
                     "rejected_task_score": lo["task_score"],
                     "chosen_interrupt_cost": hi["interrupt_cost"],
                     "rejected_interrupt_cost": lo["interrupt_cost"],
+                    "prev_action": prev_action,  # For multi-turn learning: previous action (None for Turn 0)
+                    "dialogue_turn": dialogue_turn,  # For multi-turn learning: current dialogue turn
                 }
             )
         if len(prefs) >= max_pairs:
@@ -564,24 +722,50 @@ def compute_preferences(
         
         print(f"📊 Computed rewards for {len(all_scored)} turns across all trajectories")
         
-        # Now group by (state_id, dialogue_turn, persona) for preference pair generation
+        # Now group by (state_id, dialogue_turn, persona, prev_action) for preference pair generation
         # This ensures we compare actions at the same turn within the SAME persona
+        # For Turn 1+, we also consider the previous action to enable multi-turn learning
         # Different personas should have different preferences!
         turn_groups = {}
         for t in all_scored:
             state_id = t["state"]["id"]
             dialogue_turn = t["state"]["dialogue_turn"]
             persona_name = t.get("persona", {}).get("name", "Unknown")
-            key = (state_id, dialogue_turn, persona_name)  # ← 添加persona到key！
+            
+            # For Turn 1+, include prev_action in the key to enable multi-turn learning
+            # Use prev_action from scored turn (already computed in compute_trajectory_level_rewards)
+            # This ensures consistency and avoids duplicate logic
+            prev_action = t.get("prev_action")  # Can be None for Turn 0
+            
+            # For Turn 0: group by (state_id, dialogue_turn, persona, prev_action)
+            # For Turn 1+: group by (state_id, persona, prev_action) to allow more comparisons
+            # This is because Turn 1+ data is sparse, and we want to compare actions across different dialogue_turns
+            if dialogue_turn > 0:
+                # For Turn 1+, ignore dialogue_turn in grouping to allow more comparisons
+                key = (state_id, persona_name, prev_action)
+            else:
+                # For Turn 0, include dialogue_turn (which is always 0)
+                key = (state_id, dialogue_turn, persona_name, prev_action)
             if key not in turn_groups:
                 turn_groups[key] = []
             turn_groups[key].append(t)
         
-        print(f"📊 Regrouped into {len(turn_groups)} (state_id, dialogue_turn, persona) groups for preference generation")
+        print(f"📊 Regrouped into {len(turn_groups)} (state_id, dialogue_turn, persona, prev_action) groups for preference generation")
         
-        # Generate preference pairs
+        # Generate preference pairs with persona-aware multi-turn logic
         for key, g in turn_groups.items():
+            # Handle different key formats for Turn 0 vs Turn 1+
+            if len(key) == 4:
+                state_id, dialogue_turn, persona_name, prev_action = key
+            else:
+                # Turn 1+ grouping: (state_id, persona_name, prev_action)
+                state_id, persona_name, prev_action = key
+                dialogue_turn = None  # Not used for Turn 1+ grouping
+            
+            # Use standard method for all cases
+            # Reward already considers prev_action in compute_trajectory_level_rewards
             group_prefs = build_prefs_from_group(g)
+            
             prefs.extend(group_prefs)
     
     else:

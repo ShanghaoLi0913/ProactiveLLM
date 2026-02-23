@@ -17,6 +17,20 @@ import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from peft import PeftModel
 
+# 设置代理（如果环境变量中有）
+import os
+proxy = os.getenv("http_proxy") or os.getenv("HTTP_PROXY")
+if proxy:
+    os.environ["HTTP_PROXY"] = proxy
+    os.environ["HTTPS_PROXY"] = proxy
+    # 设置huggingface_hub的代理
+    try:
+        from huggingface_hub import HfApi
+        # HfApi会自动使用环境变量中的代理
+        pass
+    except:
+        pass
+
 # 添加项目根目录到路径
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -504,21 +518,61 @@ def evaluate_model(
 
     # Load policy model ONCE (previously re-loaded per sample, making eval extremely slow and noisy)
     print("🔧 预加载Policy模型（一次加载，循环复用）", flush=True)
+    
+    # Get HF token from environment
+    hf_token = os.getenv("HF_TOKEN")
+    
+    # Check if base_model is a local path
+    use_local = base_model.startswith("/") and ("snapshots" in base_model or "models" in base_model)
+    
+    # Try to use local files first (from cache)
+    # transformers will automatically use cache if available
     try:
-        policy_tokenizer = AutoTokenizer.from_pretrained(model_dir, use_fast=True)
+        policy_tokenizer = AutoTokenizer.from_pretrained(
+            model_dir, 
+            use_fast=True,
+            token=hf_token if hf_token else None,
+            local_files_only=use_local if model_dir.startswith("/") else False,
+        )
     except Exception:
-        policy_tokenizer = AutoTokenizer.from_pretrained(base_model, use_fast=True)
+        # Try with local_files_only=False to use cache
+        policy_tokenizer = AutoTokenizer.from_pretrained(
+            base_model, 
+            use_fast=True,
+            token=hf_token if hf_token else None,
+            local_files_only=False,  # Allow using cache
+        )
         special_tokens = {"additional_special_tokens": ["Clarify", "Execute"]}
         policy_tokenizer.add_special_tokens(special_tokens)
 
     if policy_tokenizer.pad_token is None:
         policy_tokenizer.pad_token = policy_tokenizer.eos_token
 
+    # Load base model - try 8-bit quantization first (like evaluate_v17)
+    # This may help avoid download issues
+    print(f"🔄 加载base model (尝试8-bit量化以节省内存)...", flush=True)
+    try:
+        from transformers import BitsAndBytesConfig
+        quantization_config = BitsAndBytesConfig(
+            load_in_8bit=True,
+            llm_int8_threshold=6.0,
+        )
+        print("🔄 使用8-bit量化加载模型...", flush=True)
+        base_model_obj = AutoModelForCausalLM.from_pretrained(
+            base_model,
+            quantization_config=quantization_config,
+            device_map="auto",
+            low_cpu_mem_usage=True,
+            token=hf_token if hf_token else None,
+        )
+    except Exception as e:
+        print(f"⚠️  8-bit量化失败 ({e}), 使用bfloat16", flush=True)
     base_model_obj = AutoModelForCausalLM.from_pretrained(
         base_model,
         torch_dtype=torch.bfloat16,
         device_map="auto",
         low_cpu_mem_usage=True,
+            token=hf_token if hf_token else None,
     )
     if len(policy_tokenizer) != base_model_obj.get_input_embeddings().num_embeddings:
         base_model_obj.resize_token_embeddings(len(policy_tokenizer))

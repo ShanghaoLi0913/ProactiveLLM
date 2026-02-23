@@ -104,7 +104,7 @@ def train(
     print(f"📂 Loading preference pairs from: {data_path}")
     records = load_prefs(Path(data_path))
     print(f"📊 Loaded {len(records)} preference pairs")
-    
+
     print(f"🔡 Loading tokenizer: {model_name}")
     hf_token = os.environ.get("HF_TOKEN")
     

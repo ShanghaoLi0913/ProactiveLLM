@@ -1,6 +1,8 @@
 # Model outputs / artifacts
 outputs/
 data/models/
+checkpoints/
+eval_results/
 *.tar
 
 # Scratch / temporary data files that shouldn't be versioned

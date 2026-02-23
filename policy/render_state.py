@@ -88,7 +88,7 @@ def render_state(state: Dict, persona: Dict = None) -> str:
     
     # ⭐ Persona优先从参数获取，否则从state获取
     if persona is None:
-        persona = state.get("persona", {})
+    persona = state.get("persona", {})
     
     # 提取persona信息
     if isinstance(persona, dict):

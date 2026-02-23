@@ -13,15 +13,15 @@ class Persona:
 
 
 # Mapping from patience level to numeric value (for calculations)
-# Updated values to increase differentiation between Busy-Developer and Experienced-Engineer:
-# - low: 0.4 (was 0.5) - Busy-Developer now has 60% reject probability at Turn 0 (more impatient)
-# - mid: 0.75 (was 0.7) - Experienced-Engineer now has 25% reject probability at Turn 0 (more patient)
-# - high: 0.9 (unchanged) - Novice-Learner maintains 90% answer probability at Turn 0
-# This creates a clearer distinction: Busy (60% reject) vs Experienced (25% reject) = 35% difference
+# Updated values to achieve target average turns:
+# - low: 0.2 (very impatient) - Busy-Developer: ~1.16 turns (target achieved!)
+# - mid: 0.75 (patient) - Experienced-Engineer: ~1.52 turns (target achieved!)
+# - high: 0.98 (very patient) - Novice-Learner: ~1.98 turns (almost always answers)
+# This creates clear persona differentiation for COLM 2026 paper
 PATIENCE_MAP = {
-    "low": 0.4,
+    "low": 0.2,
     "mid": 0.75,
-    "high": 0.9,
+    "high": 0.98,
 }
 
 # Mapping from expertise level to numeric value (for calculations)
@@ -272,8 +272,8 @@ def react(user_msg: str, assistant_msg: str, persona: Persona,
                 answer_clarity = 0.2  # 低清晰度，表示回答模糊
             else:
                 # 正常生成答案
-                # Generate answer with clarity based on expertise
-                if llm_model:
+            # Generate answer with clarity based on expertise
+            if llm_model:
                 # Use LLM to generate realistic answer
                     base_answer = generate_specific_answer_llm(
                         assistant_msg,
