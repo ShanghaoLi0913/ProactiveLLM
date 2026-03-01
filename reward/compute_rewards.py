@@ -49,6 +49,7 @@ Design:
 import argparse
 import json
 import hashlib
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
@@ -590,7 +591,12 @@ def build_prefs_from_group(scored_trajs: List[Dict], preferred_action: Optional[
                 break
             hi = scored_sorted[i]
             lo = scored_sorted[j]
-            if hi.get("action") == lo.get("action"):
+            # Allow same-action pairs if rewards differ (for learning better Clarify/Execute)
+            # But still prefer cross-action pairs for Turn 0
+            same_action = hi.get("action") == lo.get("action")
+            dialogue_turn = hi.get("dialogue_turn", hi.get("state", {}).get("dialogue_turn", 0))
+            if same_action and dialogue_turn == 0:
+                # Turn 0: prefer cross-action pairs (Clarify vs Execute)
                 continue
             if hi.get("assistant_msg", "").strip() == lo.get("assistant_msg", "").strip():
                 continue
@@ -683,6 +689,190 @@ def rebalance_prefs_by_action(
         return execute + kept_clarify
 
 
+def rebalance_prefs_by_persona(
+    prefs: List[Dict],
+    base_execute_ratio: float,
+    seed: int,
+) -> List[Dict]:
+    """
+    Rebalance preference pairs by persona, allowing different personas to have different action ratios.
+    
+    Persona-specific target ratios:
+    - Busy-Developer: 0.8-0.9 Execute (high, prefers direct execution)
+    - Experienced-Engineer: 0.3-0.4 Execute at Turn 0, 0.7-0.8 at Turn 1+ (clarify first, then execute)
+    - Novice-Learner: 0.2-0.3 Execute (low, prefers multiple clarifications)
+    """
+    if not prefs:
+        return prefs
+    
+    from collections import defaultdict
+    
+    # Group by persona
+    persona_groups = defaultdict(list)
+    for pref in prefs:
+        persona_name = pref.get("persona_name") or pref.get("persona", {}).get("name", "Unknown")
+        persona_groups[persona_name].append(pref)
+    
+    rebalanced_prefs = []
+    
+    # First pass: rebalance each persona to target ratio
+    persona_rebalanced = {}
+    for persona_name, persona_prefs in persona_groups.items():
+        # Determine persona-specific target ratio
+        if persona_name == "Busy-Developer":
+            target_ratio = 0.85  # High Execute ratio
+        elif persona_name == "Experienced-Engineer":
+            # Check if Turn 0 or Turn 1+
+            turn0_count = sum(1 for p in persona_prefs if p.get("dialogue_turn", 0) == 0)
+            if turn0_count > len(persona_prefs) * 0.5:
+                target_ratio = 0.35  # Low Execute at Turn 0 (prefer Clarify)
+            else:
+                target_ratio = 0.75  # Higher Execute at Turn 1+ (prefer Execute after Clarify)
+        elif persona_name == "Novice-Learner":
+            target_ratio = 0.25  # Low Execute ratio (prefer multiple Clarify)
+        else:
+            # Default: use base ratio
+            target_ratio = base_execute_ratio
+        
+        # Check actual ratio first
+        execute_count = sum(1 for p in persona_prefs if p.get("chosen_action") == "Execute")
+        clarify_count = sum(1 for p in persona_prefs if p.get("chosen_action") == "Clarify")
+        actual_ratio = execute_count / len(persona_prefs) if persona_prefs else 0.0
+        
+        # If actual ratio is very different from target, adjust target to be more lenient
+        # This prevents over-filtering when data doesn't match expected distribution
+        if abs(actual_ratio - target_ratio) > 0.3:
+            # If gap is too large, adjust target to be closer to actual to avoid losing too much data
+            # Use a more lenient target (closer to actual ratio)
+            adjusted_target = actual_ratio + 0.1 * (target_ratio - actual_ratio)  # Move 10% towards target
+            print(f"  {persona_name}: Large gap detected (actual={actual_ratio:.2f}, target={target_ratio:.2f}), "
+                  f"using adjusted target={adjusted_target:.2f} to preserve data")
+            target_ratio = adjusted_target
+        
+        # Separate Turn 0 and Turn 1+ pairs before rebalancing
+        # Priority: Preserve all Turn 1+ pairs (they are crucial for multi-turn learning)
+        turn0_persona_prefs = [p for p in persona_prefs if p.get("dialogue_turn", 0) == 0]
+        turn1plus_persona_prefs = [p for p in persona_prefs if p.get("dialogue_turn", 0) > 0]
+        
+        # Rebalance only Turn 0 pairs
+        rebalanced_turn0 = rebalance_prefs_by_action(turn0_persona_prefs, target_ratio, seed)
+        
+        # Always keep all Turn 1+ pairs (they are important for multi-turn learning)
+        rebalanced = rebalanced_turn0 + turn1plus_persona_prefs
+        
+        # If rebalancing resulted in too few pairs, keep original data
+        # This prevents over-filtering when data doesn't match expected distribution
+        min_pairs_threshold = 20  # Minimum pairs to keep per persona (reduced from 50 to preserve more data)
+        if len(rebalanced) < min_pairs_threshold and len(persona_prefs) >= min_pairs_threshold:
+            print(f"  {persona_name}: Rebalance resulted in too few pairs ({len(rebalanced)} < {min_pairs_threshold}), "
+                  f"keeping original {len(persona_prefs)} pairs")
+            persona_rebalanced[persona_name] = persona_prefs
+        else:
+            persona_rebalanced[persona_name] = rebalanced
+        
+        # Log rebalancing results
+        final_prefs = persona_rebalanced[persona_name]
+        execute_count = sum(1 for p in final_prefs if p.get("chosen_action") == "Execute")
+        clarify_count = sum(1 for p in final_prefs if p.get("chosen_action") == "Clarify")
+        actual_ratio = execute_count / len(final_prefs) if final_prefs else 0.0
+        print(f"  {persona_name}: {len(persona_prefs)} -> {len(final_prefs)} pairs "
+              f"(target Execute={target_ratio:.2f}, actual={actual_ratio:.2f})")
+    
+    # Second pass: Balance data volume across personas (only if needed)
+    # Priority: Preserve all Turn 0 pairs (should be 121 per persona)
+    # Then balance Turn 1+ data if needed
+    
+    for persona_name, persona_prefs in persona_rebalanced.items():
+        # Separate Turn 0 and Turn 1+ pairs
+        turn0_pairs = [p for p in persona_prefs if p.get("dialogue_turn", 0) == 0]
+        turn1plus_pairs = [p for p in persona_prefs if p.get("dialogue_turn", 0) > 0]
+        
+        # Always keep all Turn 0 pairs (they should be balanced by design)
+        # For Turn 0, if there are multiple pairs per state, keep only the best one per state
+        # But don't enforce a strict limit - keep all unique state pairs
+        state_best = {}
+        for p in turn0_pairs:
+            state_id = p.get("state", {}).get("id", "")
+            if state_id not in state_best or p.get("chosen_reward", 0) > state_best[state_id].get("chosen_reward", 0):
+                state_best[state_id] = p
+        turn0_pairs = list(state_best.values())
+        # Log if significantly different from expected, but don't enforce limit
+        expected_turn0 = len([p for p in persona_prefs if p.get("dialogue_turn", 0) == 0])
+        if abs(len(turn0_pairs) - expected_turn0) > 10:
+            print(f"  {persona_name}: Turn 0 pairs adjusted from {expected_turn0} to {len(turn0_pairs)} (keeping all unique state pairs)")
+        
+        rebalanced_prefs.extend(turn0_pairs)
+        rebalanced_prefs.extend(turn1plus_pairs)
+    
+    # Third pass: Balance Turn 1+ data across personas if needed
+    # IMPORTANT: Preserve all Turn 3+ pairs (they are crucial for learning multi-turn behavior)
+    persona_turn1plus = {}
+    turn3plus_pairs = []  # Separate Turn 3+ pairs to preserve them
+    for p in rebalanced_prefs:
+        dialogue_turn = p.get("dialogue_turn", 0)
+        if dialogue_turn > 0:
+            if dialogue_turn >= 3:
+                # Preserve all Turn 3+ pairs (they are important and rare)
+                turn3plus_pairs.append(p)
+            else:
+                # Turn 1-2 pairs can be balanced
+                persona_name = p.get("persona_name") or p.get("persona", {}).get("name", "Unknown")
+                if persona_name not in persona_turn1plus:
+                    persona_turn1plus[persona_name] = []
+                persona_turn1plus[persona_name].append(p)
+    
+    # Remove Turn 1+ pairs from rebalanced_prefs, we'll add them back after balancing
+    rebalanced_prefs = [p for p in rebalanced_prefs if p.get("dialogue_turn", 0) == 0]
+    
+    # Always keep all Turn 3+ pairs
+    rebalanced_prefs.extend(turn3plus_pairs)
+    if len(turn3plus_pairs) > 0:
+        print(f"  Preserved {len(turn3plus_pairs)} Turn 3+ pairs (not balanced)")
+    
+    if persona_turn1plus:
+        sizes_list = [len(prefs) for prefs in persona_turn1plus.values()]
+        if sizes_list and len(sizes_list) > 1:
+            max_size = max(sizes_list)
+            min_size = min(sizes_list)
+            # Only balance if the ratio is more than 3:1 AND min_size > 0 (changed from 2:1 to 3:1 to preserve more data)
+            # If min_size is 0, keep all Turn 1+ pairs (they are important for multi-turn learning)
+            if min_size > 0 and max_size > min_size * 3:
+                target_size = int(min_size * 2)  # Increased from 1.5 to 2 to preserve more data
+                print(f"  Balancing Turn 1-2 data: max={max_size}, min={min_size}, target={target_size}")
+                
+                for persona_name, turn1plus_prefs in persona_turn1plus.items():
+                    if len(turn1plus_prefs) > target_size:
+                        # Deterministic downsampling
+                        keep_prob = target_size / len(turn1plus_prefs)
+                        sampled = [
+                            p for p in turn1plus_prefs
+                            if _stable_hash_to_unit_interval(
+                                f"{persona_name}:{p.get('state', {}).get('id', '')}:{p.get('chosen_action', '')}:{p.get('dialogue_turn', 0)}",
+                                seed
+                            ) < keep_prob
+                        ]
+                        if len(sampled) < target_size:
+                            sampled = sorted(turn1plus_prefs, key=lambda p: _stable_hash_to_unit_interval(
+                                f"{persona_name}:{p.get('state', {}).get('id', '')}:{p.get('chosen_action', '')}:{p.get('dialogue_turn', 0)}",
+                                seed
+                            ))[:target_size]
+                        print(f"  {persona_name}: Turn 1-2 downsampled from {len(turn1plus_prefs)} to {len(sampled)} pairs")
+                        rebalanced_prefs.extend(sampled)
+                    else:
+                        rebalanced_prefs.extend(turn1plus_prefs)
+            else:
+                # No need to balance, keep all Turn 1-2 data
+                # This is especially important when min_size=0 (some personas have no Turn 1+ data)
+                for turn1plus_prefs in persona_turn1plus.values():
+                    rebalanced_prefs.extend(turn1plus_prefs)
+        else:
+            # Only one persona has Turn 1-2 data, keep all
+            for turn1plus_prefs in persona_turn1plus.values():
+                rebalanced_prefs.extend(turn1plus_prefs)
+    
+    return rebalanced_prefs
+
+
 def compute_preferences(
     traj_path: Path,
     out_path: Path,
@@ -737,30 +927,74 @@ def compute_preferences(
             # This ensures consistency and avoids duplicate logic
             prev_action = t.get("prev_action")  # Can be None for Turn 0
             
-            # For Turn 0: group by (state_id, dialogue_turn, persona, prev_action)
-            # For Turn 1+: group by (state_id, persona, prev_action) to allow more comparisons
-            # This is because Turn 1+ data is sparse, and we want to compare actions across different dialogue_turns
+            # For Turn 0: group by (state_id, dialogue_turn, persona) - no prev_action needed
+            # For Turn 1+: group by (state_id, dialogue_turn, persona, prev_action) to allow comparing
+            # different trajectories at the same dialogue_turn with the same prev_action
+            # This ensures we can generate pairs for Turn 1+ when multiple trajectories exist
             if dialogue_turn > 0:
-                # For Turn 1+, ignore dialogue_turn in grouping to allow more comparisons
-                key = (state_id, persona_name, prev_action)
-            else:
-                # For Turn 0, include dialogue_turn (which is always 0)
+                # For Turn 1+, include dialogue_turn to separate different turns
+                # This allows comparing different trajectories at the same turn
                 key = (state_id, dialogue_turn, persona_name, prev_action)
+            else:
+                # For Turn 0, don't include prev_action (it's always None) to allow comparing Clarify vs Execute
+                key = (state_id, dialogue_turn, persona_name)
             if key not in turn_groups:
                 turn_groups[key] = []
             turn_groups[key].append(t)
+        
+        # Special handling for Turn 3+ Execute: if a state has only 1 Execute turn,
+        # allow grouping across states to enable pair generation
+        # This is a special case for the automatically added Execute turns
+        turn3plus_execute_groups = defaultdict(list)
+        for key, g in turn_groups.items():
+            if len(key) == 4:  # Turn 1+ format
+                state_id, dialogue_turn, persona_name, prev_action = key
+                if dialogue_turn >= 3:  # Turn 3 or later
+                    # Check if this group has Execute actions
+                    execute_turns = [t for t in g if t.get("action") == "Execute"]
+                    if len(execute_turns) == 1 and len(g) == 1:  # Only 1 Execute turn in this state, and it's the only turn
+                        # Group by (dialogue_turn, persona_name, prev_action) across states
+                        cross_state_key = (dialogue_turn, persona_name, prev_action)
+                        turn3plus_execute_groups[cross_state_key].extend(execute_turns)
+        
+        # Add cross-state groups to turn_groups if they have at least 2 turns
+        for cross_state_key, execute_turns in turn3plus_execute_groups.items():
+            if len(execute_turns) >= 2:
+                # Use a special key format to indicate cross-state grouping
+                dialogue_turn, persona_name, prev_action = cross_state_key
+                # Use a special state_id to indicate cross-state grouping
+                cross_state_group_key = (f"__CROSS_STATE__{dialogue_turn}", dialogue_turn, persona_name, prev_action)
+                turn_groups[cross_state_group_key] = execute_turns
         
         print(f"📊 Regrouped into {len(turn_groups)} (state_id, dialogue_turn, persona, prev_action) groups for preference generation")
         
         # Generate preference pairs with persona-aware multi-turn logic
         for key, g in turn_groups.items():
             # Handle different key formats for Turn 0 vs Turn 1+
-            if len(key) == 4:
+            # Turn 0: (state_id, dialogue_turn, persona_name) - 3 elements, dialogue_turn is int (0)
+            # Turn 1+: (state_id, dialogue_turn, persona_name, prev_action) - 4 elements, dialogue_turn is int (>0)
+            if len(key) == 3:
+                # Turn 0 grouping: (state_id, dialogue_turn, persona_name)
+                state_id, dialogue_turn, persona_name = key
+                prev_action = None  # Turn 0 has no previous action
+            elif len(key) == 4:
+                # Turn 1+ grouping: (state_id, dialogue_turn, persona_name, prev_action)
                 state_id, dialogue_turn, persona_name, prev_action = key
+                # Handle cross-state grouping (special state_id format)
+                if isinstance(state_id, str) and state_id.startswith("__CROSS_STATE__"):
+                    # This is a cross-state group, pairs will be generated across states
+                    # Use the first turn's state for preference pairs (for consistency)
+                    if g:
+                        state_id = g[0]["state"]["id"]
             else:
-                # Turn 1+ grouping: (state_id, persona_name, prev_action)
-                state_id, persona_name, prev_action = key
-                dialogue_turn = None  # Not used for Turn 1+ grouping
+                # Fallback: try to parse as Turn 1+ format (old format for backward compatibility)
+                if len(key) == 3 and not isinstance(key[1], int):
+                    # Old Turn 1+ format: (state_id, persona_name, prev_action)
+                    state_id, persona_name, prev_action = key
+                    dialogue_turn = None  # Not available in old format
+                else:
+                    # Unknown format, skip
+                    continue
             
             # Use standard method for all cases
             # Reward already considers prev_action in compute_trajectory_level_rewards
@@ -780,12 +1014,18 @@ def compute_preferences(
 
     print(f"📊 Generated {len(prefs)} preference pairs")
 
-    # Optional global rebalancing to avoid action collapse
-    if target_execute_ratio is not None:
+    # Optional persona-aware rebalancing to avoid action collapse
+    # Different personas have different ideal action ratios:
+    # - Busy-Developer: high Execute ratio (~0.8-0.9)
+    # - Experienced-Engineer: medium Execute ratio (~0.3-0.4 at Turn 0, higher at Turn 1+)
+    # - Novice-Learner: low Execute ratio (~0.2-0.3)
+    if args.no_rebalance:
+        print(f"⏭️  Rebalancing disabled, using all {len(prefs)} generated pairs")
+    elif target_execute_ratio is not None:
         before = len(prefs)
-        prefs = rebalance_prefs_by_action(prefs, target_execute_ratio, rebalance_seed)
+        prefs = rebalance_prefs_by_persona(prefs, target_execute_ratio, rebalance_seed)
         after = len(prefs)
-        print(f"🔧 Rebalanced prefs: {before} -> {after} (target Execute ratio={target_execute_ratio})")
+        print(f"🔧 Rebalanced prefs by persona: {before} -> {after} (base Execute ratio={target_execute_ratio})")
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8") as f:
@@ -861,7 +1101,7 @@ def main():
     print(f"  - w_interrupt = {cfg.w_interrupt}")
 
     target_ratio = args.target_execute_ratio
-    if not (0.0 < target_ratio < 1.0):
+    if args.no_rebalance or not (0.0 < target_ratio < 1.0):
         target_ratio = None
 
     compute_preferences(

@@ -1,0 +1,10 @@
+{"id": "coding-test-0", "domain": "coding", "query": "Write a Python function to sort a list of dictionaries by a specific key", "dialogue_turn": 0, "prev_reject": 0, "task_uncertainty": 0.4}
+{"id": "coding-test-1", "domain": "coding", "query": "Create a web scraper", "dialogue_turn": 0, "prev_reject": 0, "task_uncertainty": 0.9}
+{"id": "coding-test-2", "domain": "coding", "query": "Write a function that finds all prime numbers up to n using the Sieve of Eratosthenes algorithm", "dialogue_turn": 0, "prev_reject": 0, "task_uncertainty": 0.2}
+{"id": "coding-test-3", "domain": "coding", "query": "Implement a binary search tree with insert and search methods", "dialogue_turn": 0, "prev_reject": 0, "task_uncertainty": 0.5}
+{"id": "coding-test-4", "domain": "coding", "query": "Write code to connect to database", "dialogue_turn": 0, "prev_reject": 0, "task_uncertainty": 0.95}
+{"id": "coding-test-5", "domain": "coding", "query": "Create a REST API endpoint that returns user information from a database using Flask", "dialogue_turn": 0, "prev_reject": 0, "task_uncertainty": 0.3}
+{"id": "coding-test-6", "domain": "coding", "query": "Write something to process data", "dialogue_turn": 0, "prev_reject": 0, "task_uncertainty": 0.98}
+{"id": "coding-test-7", "domain": "coding", "query": "Implement a LRU cache with get and put operations in O(1) time complexity", "dialogue_turn": 0, "prev_reject": 0, "task_uncertainty": 0.15}
+{"id": "coding-test-8", "domain": "coding", "query": "Build a machine learning model", "dialogue_turn": 0, "prev_reject": 0, "task_uncertainty": 0.92}
+{"id": "coding-test-9", "domain": "coding", "query": "Write a decorator function that measures execution time and logs it, supporting both sync and async functions", "dialogue_turn": 0, "prev_reject": 0, "task_uncertainty": 0.25}

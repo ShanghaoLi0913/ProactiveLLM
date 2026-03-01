@@ -272,18 +272,18 @@ def react(user_msg: str, assistant_msg: str, persona: Persona,
                 answer_clarity = 0.2  # 低清晰度，表示回答模糊
             else:
                 # 正常生成答案
-            # Generate answer with clarity based on expertise
-            if llm_model:
-                # Use LLM to generate realistic answer
+                # Generate answer with clarity based on expertise
+                if llm_model:
+                    # Use LLM to generate realistic answer
                     base_answer = generate_specific_answer_llm(
                         assistant_msg,
                         user_msg,
                         persona.domain,
                         llm_model=llm_model,
                         expertise=persona.expertise,
-                )
-            else:
-                # Use dummy answer for synthetic mode (testing)
+                    )
+                else:
+                    # Use dummy answer for synthetic mode (testing)
                     base_answer = generate_specific_answer_dummy(
                         assistant_msg,
                         user_msg,
@@ -324,7 +324,7 @@ def react(user_msg: str, assistant_msg: str, persona: Persona,
                     else "Stop asking, just give me the code."
                 )
 
-        answered = 0
+            answered = 0
             reject_signal = 1
             answer_clarity = 0.0  # No answer when rejected
     else:

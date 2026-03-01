@@ -87,7 +87,24 @@ class LocalHFChatGenerator:
             except Exception:
                 pass
 
-    def chat_complete(self, system_prompt: str, user_prompt: str) -> str:
+    def chat_complete(self, system_prompt: str, user_prompt: str, state: Optional[Dict] = None, action: Optional[str] = None) -> str:
+        """
+        Generate chat completion.
+        
+        Args:
+            system_prompt: System prompt
+            user_prompt: User prompt (can be overridden by state+action logic)
+            state: Optional state dict (for knowledge distillation: Execute uses original query)
+            action: Optional action type ("Execute" or "Clarify")
+        """
+        # Knowledge distillation: For Execute action, use original query if available
+        # This improves training data quality while maintaining uncertainty judgment authenticity
+        if state is not None and action == "Execute" and state.get("original_instruct_prompt"):
+            user_prompt = f"[Task]\n{state['original_instruct_prompt']}"
+        elif state is not None:
+            # For Clarify or when original not available, use masked query
+            user_prompt = f"[Task]\n{state.get('query', user_prompt)}"
+        
         # Match the rest of the codebase: prompts are system + user
         messages = [
             {"role": "system", "content": system_prompt},
@@ -263,6 +280,12 @@ def load_states_from_dataset(dataset_path: Path, domain: str, limit: Optional[in
                 "prev_reject": int(row.get("prev_reject", 0)),
                 "task_uncertainty": task_uncertainty,
                 "convcodeworld_tests": tests,  # Support both "test" and "convcodeworld_tests"
+                # Preserve original_instruct_prompt for knowledge distillation (Execute uses original query)
+                "original_instruct_prompt": row.get("original_instruct_prompt", ""),
+                # Preserve other fields that might be useful
+                "canonical_solution": row.get("canonical_solution", ""),
+                "entry_point": row.get("entry_point", ""),
+                "disclosure_rule": row.get("disclosure_rule", {}),
             }
         )
     return result
@@ -298,6 +321,7 @@ def llm_output(
     conversation_history: Optional[List[Dict]] = None,
     temperature: float = 0.7,
     top_p: float = 0.9,
+    action: Optional[str] = None,  # Action type: "Execute" or "Clarify"
 ) -> str:
     """Generate assistant output using OpenAI API.
     
@@ -306,14 +330,22 @@ def llm_output(
         action_prompt: Action template/prompt
         model: LLM model name
         conversation_history: Optional list of previous turns [{role, content}, ...]
+        action: Action type ("Execute" or "Clarify"). If "Execute" and original_instruct_prompt exists, use it for better code quality.
     """
     from llm.provider import chat_complete
     system = action_prompt
     
     # Build user message from state query
+    # For Execute action: use original_instruct_prompt if available (for better code quality in training data)
+    # For Clarify action: always use masked query (to maintain task_uncertainty authenticity)
     # If query contains conversation history (multi-turn), use it directly
-    # Otherwise, format as initial task
-    user = f"[Task]\n{state['query']}"
+    if action == "Execute" and state.get("original_instruct_prompt"):
+        # Use original query for Execute to generate high-quality code (knowledge distillation)
+        # This improves training data quality while maintaining uncertainty judgment authenticity
+        user = f"[Task]\n{state['original_instruct_prompt']}"
+    else:
+        # Use masked query for Clarify or when original_instruct_prompt is not available
+        user = f"[Task]\n{state['query']}"
     
     return chat_complete(system, user, model=model, max_tokens=400, temperature=temperature, top_p=top_p)
 
@@ -430,7 +462,8 @@ def check_task_completion(state: Dict, assistant_msg: str, domain: str) -> bool:
             return False
         
         # If tests are available, try to execute them
-        tests = state.get("convcodeworld_tests")
+        # Support both "convcodeworld_tests" and "test" field names
+        tests = state.get("convcodeworld_tests") or state.get("test")
         if tests:
             try:
                 from eval.evaluate_dpo_model import extract_code_from_text, score_code_passfail
@@ -565,10 +598,12 @@ def generate_multi_turn_conversation(initial_state: Dict, domain: str,
         action_prompt = prompts[action]
         
         # Generate assistant message
+        # Knowledge distillation: Execute uses original query for better code quality
+        # Action selection still uses masked query (maintains task_uncertainty authenticity)
         if local_generator is not None:
-            assistant_msg = local_generator.chat_complete(action_prompt, f"[Task]\n{current_state['query']}")
+            assistant_msg = local_generator.chat_complete(action_prompt, f"[Task]\n{current_state['query']}", state=current_state, action=action)
         elif llm_model:
-            assistant_msg = llm_output(current_state, action_prompt, llm_model, temperature=temperature, top_p=top_p)
+            assistant_msg = llm_output(current_state, action_prompt, llm_model, temperature=temperature, top_p=top_p, action=action)
         else:
             assistant_msg = dummy_llm_output(current_state, action_prompt)
         
@@ -640,11 +675,12 @@ def generate_multi_turn_conversation(initial_state: Dict, domain: str,
             break
         
         # Check if user wants to stop (reject signal)
-        if reaction.get("meta", {}).get("reject_signal", 0) > 0:
+        user_stopped = reaction.get("meta", {}).get("reject_signal", 0) > 0
+        if user_stopped:
             traj["user_stopped"] = True
             traj["task_completed"] = False  # Explicitly mark as not completed
             traj["is_terminal"] = True  # Mark as terminal state
-            break
+            # Don't break yet - we'll check if Execute is needed after the loop
         
         # Update state for next turn
         # is_same_turn=False because this is moving to the next dialogue turn (not within same turn)
@@ -652,6 +688,14 @@ def generate_multi_turn_conversation(initial_state: Dict, domain: str,
         
         # Update has_edge_cases_info in state for next turn
         current_state["has_edge_cases_info"] = has_edge_cases_info
+        
+        # Break if user stopped (but we'll check for Execute after the loop)
+        if user_stopped:
+            break
+    
+    # Check if trajectory needs an Execute turn (for both max_turns and user_stopped cases)
+    # This ensures all trajectories end with Execute, enabling better pair generation
+    has_execute = any(t.get("action") == "Execute" for t in trajectories)
     
     # If loop ended without break (reached max_turns), mark last trajectory as terminal
     if trajectories and not trajectories[-1].get("is_terminal", False):
@@ -659,6 +703,74 @@ def generate_multi_turn_conversation(initial_state: Dict, domain: str,
         # If task wasn't completed and user didn't stop, this is a timeout scenario
         if not trajectories[-1].get("task_completed", False) and not trajectories[-1].get("user_stopped", False):
             trajectories[-1]["task_completed"] = False  # Explicitly mark as not completed
+    
+    # If trajectory has no Execute turn, add an Execute turn (regardless of user_stopped or max_turns)
+    # This applies to both cases: user stopped or reached max_turns
+    if not has_execute and trajectories:
+        last_traj = trajectories[-1]
+        if last_traj.get("action") == "Clarify":
+            # Add an Execute turn to complete the trajectory
+            # Use the last trajectory's state (before it was updated for next turn)
+            # and update it once to get the correct state for the Execute turn
+            last_state = last_traj.get("state", {}).copy()
+            execute_state = update_state_for_next_turn(
+                last_state, 
+                last_traj.get("user_reaction", {}), 
+                last_traj.get("assistant_msg", ""), 
+                is_same_turn=False
+            )
+            execute_state["has_edge_cases_info"] = last_traj.get("has_edge_cases_info", False)
+            
+            # Generate Execute action
+            execute_action = "Execute"
+            execute_prompt = prompts[execute_action]
+            
+            # Generate assistant message for Execute
+            # Knowledge distillation: Execute uses original query for better code quality
+            if local_generator is not None:
+                execute_assistant_msg = local_generator.chat_complete(execute_prompt, f"[Task]\n{execute_state['query']}", state=execute_state, action="Execute")
+            elif llm_model:
+                execute_assistant_msg = llm_output(execute_state, execute_prompt, llm_model, temperature=temperature, top_p=top_p, action="Execute")
+            else:
+                execute_assistant_msg = dummy_llm_output(execute_state, execute_prompt)
+            
+            # Get user reaction (for Execute, user typically doesn't react, but we still need the structure)
+            execute_reaction = react(
+                execute_state["query"],
+                execute_assistant_msg,
+                persona,
+                llm_model=llm_model,
+                total_questions_asked=total_questions_asked,
+                disclosure_rule=execute_state.get("disclosure_rule"),
+                dialogue_turn=execute_state.get("dialogue_turn", 0),
+            )
+            
+            # Check task completion
+            execute_task_completed = check_task_completion(execute_state, execute_assistant_msg, domain)
+            
+            # Create Execute trajectory
+            execute_traj = {
+                "trajectory_id": trajectory_id,
+                "state": execute_state.copy(),
+                "action": execute_action,
+                "action_prompt": execute_prompt,
+                "assistant_msg": execute_assistant_msg,
+                "persona": {
+                    "name": persona.name,
+                    "domain": persona.domain,
+                    "expertise": persona.expertise,
+                    "patience": persona.patience,
+                },
+                "user_reaction": execute_reaction,
+                "turn": len(trajectories) + 1,  # Next turn after current trajectories
+                "is_mainline": True,
+                "is_terminal": True,  # Execute always terminates
+                "task_completed": execute_task_completed,
+                "has_edge_cases_info": execute_state.get("has_edge_cases_info", False),
+                "prev_action": "Clarify",  # Previous action was Clarify
+                "user_stopped": False,  # Reset user_stopped for Execute turn (even if previous turn had user_stopped)
+            }
+            trajectories.append(execute_traj)
     
     return trajectories
 
@@ -714,16 +826,20 @@ def generate_trajectories(states: List[Dict], domain: str,
                 first_actions = [force_first_action]
             elif sampling_strategy == "heuristic":
                 # Heuristic strategy: generate samples with different forced actions
-                # Sample 1: Force Execute (blind guess)
-                # Sample 2: Force Clarify (ask questions)
-                # Sample 3 & 4: Free (auto-select from persona)
-                if n_samples_per_state_persona >= 1:
+                # For n_samples=4: generate 2 Execute + 2 Clarify
+                # For n_samples=2: generate 1 Execute + 1 Clarify
+                # For n_samples=3: generate 1 Execute + 1 Clarify + 1 Free
+                # For n_samples=1: generate 1 Execute
+                if n_samples_per_state_persona == 4:
+                    # Special case: 2 Execute + 2 Clarify
+                    first_actions = ["Execute", "Execute", "Clarify", "Clarify"]
+                elif n_samples_per_state_persona >= 1:
                     first_actions.append("Execute")  # Sample 1: Force Execute
-                if n_samples_per_state_persona >= 2:
-                    first_actions.append("Clarify")  # Sample 2: Force Clarify
-                # Sample 3+ : Free (None = auto-select)
-                for _ in range(max(0, n_samples_per_state_persona - 2)):
-                    first_actions.append(None)
+                    if n_samples_per_state_persona >= 2:
+                        first_actions.append("Clarify")  # Sample 2: Force Clarify
+                    # Sample 3+ : Free (None = auto-select)
+                    for _ in range(max(0, n_samples_per_state_persona - 2)):
+                        first_actions.append(None)
             elif sampling_strategy == "free":
                 # Free strategy: random first action or auto-select
                 for _ in range(n_samples_per_state_persona):

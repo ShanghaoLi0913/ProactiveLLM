@@ -1,0 +1,19 @@
+{"id": "coding-train-94", "domain": "coding", "query": "Implement bubble sort algorithm for a list of integers with error handling", "dialogue_turn": 0, "prev_reject": 0, "task_uncertainty": 0.23596354002537467}
+{"id": "coding-train-19", "domain": "coding", "query": "Implement a function that checks if a string is a palindrome with error handling", "dialogue_turn": 0, "prev_reject": 0, "task_uncertainty": 0.10471163754247345}
+{"id": "coding-train-5", "domain": "coding", "query": "Write a Python function to sort a list of dictionaries by a specific key", "dialogue_turn": 0, "prev_reject": 0, "task_uncertainty": 0.38956319010606644}
+{"id": "coding-train-42", "domain": "coding", "query": "Create a function that counts the number of vowels in a string in Python", "dialogue_turn": 0, "prev_reject": 0, "task_uncertainty": 0.10005861130502984}
+{"id": "coding-train-40", "domain": "coding", "query": "Create a function to calculate the sum of all elements in a list with error handling", "dialogue_turn": 0, "prev_reject": 0, "task_uncertainty": 0.1375852940378194}
+{"id": "coding-train-39", "domain": "coding", "query": "Create a function that reverses a string without using built-in methods in Python", "dialogue_turn": 0, "prev_reject": 0, "task_uncertainty": 0.14538159275210802}
+{"id": "coding-train-20", "domain": "coding", "query": "Write a function that calculates the factorial of a number using recursion", "dialogue_turn": 0, "prev_reject": 0, "task_uncertainty": 0.1109649130350659}
+{"id": "coding-train-15", "domain": "coding", "query": "Create a function that parses and validates email addresses using regex in Python", "dialogue_turn": 0, "prev_reject": 0, "task_uncertainty": 0.37193207591572836}
+{"id": "coding-train-87", "domain": "coding", "query": "Create a function that parses and validates email addresses using regex in Python", "dialogue_turn": 0, "prev_reject": 0, "task_uncertainty": 0.40883087184572336}
+{"id": "coding-train-12", "domain": "coding", "query": "Create a function that parses and validates email addresses using regex in Python", "dialogue_turn": 0, "prev_reject": 0, "task_uncertainty": 0.4084585990223541}
+{"id": "coding-train-67", "domain": "coding", "query": "Write a decorator function that measures execution time and logs it with error handling", "dialogue_turn": 0, "prev_reject": 0, "task_uncertainty": 0.5260602165257231}
+{"id": "coding-train-4", "domain": "coding", "query": "Create a function that parses and validates email addresses using regex with error handling", "dialogue_turn": 0, "prev_reject": 0, "task_uncertainty": 0.41554386652948805}
+{"id": "coding-train-1", "domain": "coding", "query": "Implement a binary search tree with insert and search methods with error handling", "dialogue_turn": 0, "prev_reject": 0, "task_uncertainty": 0.5442909714335055}
+{"id": "coding-train-80", "domain": "coding", "query": "Implement a LRU cache with get and put operations in O(1) time complexity", "dialogue_turn": 0, "prev_reject": 0, "task_uncertainty": 0.5995149356660895}
+{"id": "coding-train-13", "domain": "coding", "query": "Write a script to read CSV data and generate summary statistics with error handling", "dialogue_turn": 0, "prev_reject": 0, "task_uncertainty": 0.48978228836024773}
+{"id": "coding-train-38", "domain": "coding", "query": "Make a dashboard", "dialogue_turn": 0, "prev_reject": 0, "task_uncertainty": 0.8753723706329206}
+{"id": "coding-train-84", "domain": "coding", "query": "Build a recommendation system in Python", "dialogue_turn": 0, "prev_reject": 0, "task_uncertainty": 0.8921004195868266}
+{"id": "coding-train-2", "domain": "coding", "query": "Write code to connect to database", "dialogue_turn": 0, "prev_reject": 0, "task_uncertainty": 0.9876367626472669}
+{"id": "coding-train-36", "domain": "coding", "query": "Create a data pipeline in Python", "dialogue_turn": 0, "prev_reject": 0, "task_uncertainty": 0.8311552173595876}

@@ -58,7 +58,12 @@ def extract_code_from_text(text: str) -> Optional[str]:
         for code in matches:
             code = code.strip()
             # 跳过错误信息（更严格的检查）
-            if any(keyword in code for keyword in ["Traceback", "Error:", 'File "__test__', "Traceback (most recent call last)", "ZeroDivisionError", "ValueError", "Exception"]):
+            # 注意：不要过滤包含"raise ValueError"等正常异常处理的代码
+            # 只过滤真正的错误信息（Traceback、Error:等）
+            has_traceback = "Traceback" in code or 'File "__test__' in code or "Traceback (most recent call last)" in code
+            # 检查是否是错误信息格式（包含Error:但不是raise语句）
+            has_error_format = "Error:" in code and "raise" not in code
+            if has_traceback or has_error_format:
                 continue
             # 跳过测试代码（包含 unittest 或 test_）
             if any(keyword in code for keyword in ["unittest", "test_", "TestCases", "class Test", "def test_"]):
@@ -75,15 +80,32 @@ def extract_code_from_text(text: str) -> Optional[str]:
             valid_blocks.append(code)
         
         if valid_blocks:
-            # 如果有多个代码块，选择最像“完整解法”的一个
+            # 如果有多个代码块，选择最像"完整解法"的一个
+            # 优先选择最长的、有函数体的代码块
             best_code = None
             best_score = 0
             for code in valid_blocks:
                 lines = code.split('\n')
                 has_def = any('def ' in line for line in lines)
                 has_import = any(line.strip().startswith(("import ", "from ")) for line in lines)
-                body_lines = sum(1 for line in lines if line.strip() and line[0] in ' \t')
-                score = len(code) + body_lines * 10 + (50 if has_def else 0) + (10 if has_import else 0)
+                # 计算函数体行数（缩进的行，或者函数定义后的非空行）
+                body_lines = 0
+                in_function = False
+                for line in lines:
+                    stripped = line.strip()
+                    if stripped.startswith('def '):
+                        in_function = True
+                    elif in_function and stripped and not stripped.startswith('#'):
+                        # 函数体内的行（有缩进或函数逻辑）
+                        if line[0] in ' \t' or any(stripped.startswith(kw) for kw in ['if ', 'for ', 'while ', 'return ', 'raise ', 'plt.', 'df.', 'import ', 'from ']):
+                            body_lines += 1
+                    elif in_function and stripped == '':
+                        # 空行也算函数体的一部分
+                        body_lines += 0.5
+                
+                # 大幅提高body_lines的权重，确保选择有完整函数体的代码块
+                # 同时优先选择最长的代码块
+                score = len(code) * 2 + body_lines * 50 + (100 if has_def else 0) + (20 if has_import else 0)
                 if score > best_score:
                     best_score = score
                     best_code = code
@@ -95,6 +117,7 @@ def extract_code_from_text(text: str) -> Optional[str]:
                         cleaned_code = cleaned_code[:marker_pos].strip()
                         break
                 return cleaned_code.strip()
+            # 如果没有找到最佳代码，返回最长的代码块
             return max(valid_blocks, key=len)
     
     # 如果没有代码块，尝试提取函数定义（包括完整函数体）
@@ -525,61 +548,56 @@ def evaluate_model(
     # Check if base_model is a local path
     use_local = base_model.startswith("/") and ("snapshots" in base_model or "models" in base_model)
     
-    # Try to use local files first (from cache)
-    # transformers will automatically use cache if available
+    # Load tokenizer from model_dir (should have special tokens already)
     try:
         policy_tokenizer = AutoTokenizer.from_pretrained(
             model_dir, 
             use_fast=True,
             token=hf_token if hf_token else None,
-            local_files_only=use_local if model_dir.startswith("/") else False,
         )
-    except Exception:
-        # Try with local_files_only=False to use cache
+        print(f"✅ Loaded tokenizer from {model_dir} (vocab size: {len(policy_tokenizer)})")
+    except Exception as e:
+        print(f"⚠️  Failed to load tokenizer from {model_dir}: {e}")
+        # Fallback: load from base model and add special tokens
         policy_tokenizer = AutoTokenizer.from_pretrained(
             base_model, 
             use_fast=True,
             token=hf_token if hf_token else None,
-            local_files_only=False,  # Allow using cache
+            local_files_only=False,
         )
         special_tokens = {"additional_special_tokens": ["Clarify", "Execute"]}
         policy_tokenizer.add_special_tokens(special_tokens)
+        print(f"✅ Loaded tokenizer from base model and added special tokens (vocab size: {len(policy_tokenizer)})")
 
     if policy_tokenizer.pad_token is None:
         policy_tokenizer.pad_token = policy_tokenizer.eos_token
 
-    # Load base model - try 8-bit quantization first (like evaluate_v17)
-    # This may help avoid download issues
-    print(f"🔄 加载base model (尝试8-bit量化以节省内存)...", flush=True)
-    try:
-        from transformers import BitsAndBytesConfig
-        quantization_config = BitsAndBytesConfig(
-            load_in_8bit=True,
-            llm_int8_threshold=6.0,
-        )
-        print("🔄 使用8-bit量化加载模型...", flush=True)
-        base_model_obj = AutoModelForCausalLM.from_pretrained(
-            base_model,
-            quantization_config=quantization_config,
-            device_map="auto",
-            low_cpu_mem_usage=True,
-            token=hf_token if hf_token else None,
-        )
-    except Exception as e:
-        print(f"⚠️  8-bit量化失败 ({e}), 使用bfloat16", flush=True)
+    # Get target vocab size BEFORE loading model
+    target_vocab_size = len(policy_tokenizer)
+    print(f"📏 Target vocab size: {target_vocab_size}")
+
+    # Load base model
+    print(f"🔄 Loading base model...", flush=True)
     base_model_obj = AutoModelForCausalLM.from_pretrained(
         base_model,
         torch_dtype=torch.bfloat16,
         device_map="auto",
         low_cpu_mem_usage=True,
-            token=hf_token if hf_token else None,
+        token=hf_token if hf_token else None,
     )
-    if len(policy_tokenizer) != base_model_obj.get_input_embeddings().num_embeddings:
-        base_model_obj.resize_token_embeddings(len(policy_tokenizer))
-
+    
+    # Resize embeddings BEFORE loading PEFT (to match training-time size)
+    base_vocab_size = base_model_obj.get_input_embeddings().num_embeddings
+    if base_vocab_size != target_vocab_size:
+        print(f"📏 Resizing embeddings: {base_vocab_size} -> {target_vocab_size}")
+        base_model_obj.resize_token_embeddings(target_vocab_size, mean_resizing=False)
+    
+    # Now load PEFT adapter
     try:
         policy_model = PeftModel.from_pretrained(base_model_obj, model_dir)
-    except Exception:
+        print("✅ Loaded PEFT adapter")
+    except Exception as e:
+        print(f"⚠️  Failed to load PEFT adapter: {e}, using base model")
         policy_model = base_model_obj
     policy_model.eval()
     
@@ -686,7 +704,9 @@ def evaluate_model(
                 task_score = score_code_passfail(code, tests, debug=(i < 3))
                 if task_score is not None:
                     test_pass_rates.append(task_score)
-                    if task_score > 0:
+                    # Task Success = 通过所有测试 (task_score == 1.0)
+                    # 符合标准基准（如HumanEval、BigCodeBench）的定义
+                    if task_score >= 1.0:
                         task_success_count += 1
                         if predicted_action == "Execute":
                             execute_success_count += 1

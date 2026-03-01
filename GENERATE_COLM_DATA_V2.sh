@@ -37,12 +37,13 @@ PREFS_TRAIN="data/dpo/${OUTPUT_PREFIX}_train_prefs.jsonl"
 PREFS_TEST="data/dpo/${OUTPUT_PREFIX}_test_prefs.jsonl"
 
 # Step 1: 生成轨迹数据
-echo "[Step 1/4] 生成2轮轨迹数据..."
+echo "[Step 1/4] 生成多轮轨迹数据..."
 echo "  - States: $N_STATES"
 echo "  - Personas: All (3)"
-echo "  - Samples per (state, persona): 2"
-echo "  - Sampling: heuristic (Force Execute + Force Clarify)"
+echo "  - Samples per (state, persona): 4 (2 Execute + 2 Clarify)"
+echo "  - Sampling: heuristic (2×Execute + 2×Clarify)"
 echo "  - Max turns: $MAX_TURNS"
+echo "  - 目的: 确保有多个trajectories进入Turn 1+，可以生成Turn 1+的pairs"
 echo ""
 
 python scripts/generate_trajectories.py \
@@ -51,7 +52,7 @@ python scripts/generate_trajectories.py \
   --domain coding \
   --n_states "$N_STATES" \
   --all_personas \
-  --n_samples 2 \
+  --n_samples 4 \
   --sampling_strategy heuristic \
   --max_turns "$MAX_TURNS" \
   --llm_model "$LLM_MODEL" \

@@ -281,7 +281,9 @@ def evaluate_model(
         # 记录结果
         results_by_persona[persona_name]["total"] += 1
         results_by_persona[persona_name]["action_correct"] += int(action_correct)
-        results_by_persona[persona_name]["task_success"] += int(task_score > 0.5)
+        # Task Success = 通过所有测试 (task_score >= 1.0)
+        # 符合标准基准（如HumanEval、BigCodeBench）的定义
+        results_by_persona[persona_name]["task_success"] += int(task_score >= 1.0)
         results_by_persona[persona_name]["total_reward"] += total_reward_val
         results_by_persona[persona_name]["total_interrupt_cost"] += interrupt_cost
         
