@@ -24,7 +24,7 @@ from typing import Dict, List, Optional, Tuple
 from collections import defaultdict, Counter
 
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, LogitsProcessor
 from peft import PeftModel
 
 # Add project root to path
@@ -44,6 +44,7 @@ from simulator.simulate import react
 from llm.provider import chat_complete
 from policy.render_state import render_state
 from eval.evaluate_dpo_model import extract_code_from_text, score_code_passfail
+from eval.reconstruct_state import reconstruct_state_for_execute
 
 
 def load_jsonl(path: Path) -> List[Dict]:
@@ -56,25 +57,105 @@ def load_jsonl(path: Path) -> List[Dict]:
     return data
 
 
+class ForceActionPrefixProcessor(LogitsProcessor):
+    """LogitsProcessor that forces the first generated token to be 'Clarify' or 'Execute'."""
+    
+    def __init__(self, tokenizer: AutoTokenizer, prompt_length: int):
+        """
+        Args:
+            tokenizer: Tokenizer to get token IDs for Clarify and Execute
+            prompt_length: Length of the prompt (input_ids before generation)
+        """
+        self.tokenizer = tokenizer
+        self.prompt_length = prompt_length
+        
+        # Get token IDs for Clarify and Execute
+        clarify_id = tokenizer.convert_tokens_to_ids("Clarify")
+        execute_id = tokenizer.convert_tokens_to_ids("Execute")
+        
+        # Handle cases where tokens might not be found
+        self.allowed_token_ids = []
+        if clarify_id is not None and clarify_id != tokenizer.unk_token_id:
+            self.allowed_token_ids.append(clarify_id)
+        if execute_id is not None and execute_id != tokenizer.unk_token_id:
+            self.allowed_token_ids.append(execute_id)
+        
+        # Fallback: try encoding the full strings
+        if not self.allowed_token_ids:
+            clarify_encoded = tokenizer.encode("Clarify", add_special_tokens=False)
+            execute_encoded = tokenizer.encode("Execute", add_special_tokens=False)
+            if clarify_encoded:
+                self.allowed_token_ids.extend(clarify_encoded)
+            if execute_encoded:
+                self.allowed_token_ids.extend(execute_encoded)
+        
+        # Remove duplicates and ensure we have valid IDs
+        self.allowed_token_ids = list(set([tid for tid in self.allowed_token_ids if tid is not None]))
+        
+        if not self.allowed_token_ids:
+            print("⚠️  Warning: Could not find token IDs for 'Clarify' or 'Execute'. "
+                  "Action prefix forcing will be disabled.")
+        else:
+            print(f"✅ ForceActionPrefixProcessor initialized:")
+            print(f"   Prompt length: {prompt_length}")
+            print(f"   Allowed token IDs: {self.allowed_token_ids}")
+            print(f"   Clarify ID: {clarify_id}, Execute ID: {execute_id}")
+    
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
+        """
+        Mask all tokens except Clarify/Execute at the first generation step.
+        
+        Args:
+            input_ids: Current input sequence (including prompt + generated tokens so far)
+            scores: Logits for next token prediction (shape: [batch_size, vocab_size])
+        
+        Returns:
+            Modified scores with non-action tokens masked
+        """
+        # Only apply at the first generation step (when input_ids length equals prompt_length)
+        # This means we're generating the very first token after the prompt
+        if input_ids.shape[1] == self.prompt_length and self.allowed_token_ids:
+            # Create mask: set all tokens to -inf except allowed ones
+            # This forces the model to choose between Clarify and Execute
+            mask = torch.full_like(scores, float('-inf'))
+            mask[:, self.allowed_token_ids] = 0.0
+            scores = scores + mask
+            # Debug: print when mask is applied (only first few times to avoid spam)
+            if not hasattr(self, '_debug_count'):
+                self._debug_count = 0
+            if self._debug_count < 3:
+                print(f"🔧 LogitsProcessor applied: input_ids.shape={input_ids.shape}, "
+                      f"prompt_length={self.prompt_length}, allowed_ids={self.allowed_token_ids}")
+                self._debug_count += 1
+        
+        return scores
+
+
 def select_action_with_model(
     state: Dict,
     tokenizer: AutoTokenizer,
     model: torch.nn.Module,
     persona: Dict,
 ) -> str:
-    """Use trained model to select action."""
+    """Use trained model to select action by free generation (matching training format).
+    
+    This method simulates real inference:
+    - Prompt: render_state(state, persona) (only state info, no action question)
+    - Model generates full response: 'Clarify\n...' or 'Execute\n...'
+    - Extract action from first line of response
+    
+    ⭐ SCHEME 1: Uses LogitsProcessor to force the first token to be 'Clarify' or 'Execute'.
+    This ensures 100% prefix generation, addressing the issue where the model
+    learned content preferences but not format constraints.
+    
+    This is 'free generation' with format constraint, not pure classification.
+    """
     # Render state to text (using unified render_state function)
+    # This matches training format: only state info, no action instruction
     state_text = render_state(state, persona=persona)
     
-    # Add action selection prompt
-    persona_name = persona.get("name", "Unknown")
-    full_prompt = f"""{state_text}
-
-Based on the persona ({persona_name}), should you Clarify or Execute?
-
-Action:"""
-    
-    messages = [{"role": "user", "content": full_prompt}]
+    # Use chat template (matching training format)
+    messages = [{"role": "user", "content": state_text}]
     prompt = tokenizer.apply_chat_template(
         messages,
         tokenize=False,
@@ -82,32 +163,111 @@ Action:"""
     )
     
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+    prompt_length = inputs.input_ids.shape[1]
     
+    # ⭐ SCHEME 1: Create LogitsProcessor to force action prefix
+    force_prefix_processor = ForceActionPrefixProcessor(tokenizer, prompt_length)
+    
+    # Generate full response (matching training: model generates complete message)
+    # ⭐ SCHEME 1: Use logits_processor to force first token to be Clarify/Execute
     with torch.no_grad():
         outputs = model.generate(
             **inputs,
-            max_new_tokens=50,
-            temperature=0.1,
-            do_sample=False,
+            max_new_tokens=200,  # Generate enough tokens for full response
+            temperature=0.7,  # Use sampling for more natural generation
+            do_sample=True,
+            top_p=0.9,
             pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
+            logits_processor=[force_prefix_processor],  # ⭐ SCHEME 1: Force action prefix
         )
     
+    # ⭐ SCHEME 1: Don't skip special tokens to preserve "Clarify"/"Execute" prefix
+    # Note: skip_special_tokens=False to keep the action prefix tokens
+    generated_token_ids = outputs[0][inputs.input_ids.shape[1]:]
+    
+    # Debug: Check first generated token
+    if len(generated_token_ids) > 0:
+        first_token_id = generated_token_ids[0].item()
+        first_token_text = tokenizer.decode([first_token_id], skip_special_tokens=False)
+        if not hasattr(select_action_with_model, '_debug_count'):
+            select_action_with_model._debug_count = 0
+        if select_action_with_model._debug_count < 3:
+            print(f"🔍 First generated token: ID={first_token_id}, text='{first_token_text}'")
+            print(f"   Allowed IDs: {force_prefix_processor.allowed_token_ids}")
+            print(f"   Is in allowed: {first_token_id in force_prefix_processor.allowed_token_ids}")
+            select_action_with_model._debug_count += 1
+    
     response = tokenizer.decode(
-        outputs[0][inputs.input_ids.shape[1]:], 
-        skip_special_tokens=True
+        generated_token_ids, 
+        skip_special_tokens=False  # ⭐ Changed: preserve special tokens to see action prefix
     )
     
-    # Extract action
-    response_lower = response.lower()
-    if "clarify" in response_lower:
-        return "Clarify"
-    elif "execute" in response_lower:
-        return "Execute"
-    else:
-        # Default: use persona-based selection
+    # ⭐ SCHEME 1: Extract action from first token (since LogitsProcessor forces it)
+    # The first token should always be Clarify or Execute
+    if len(generated_token_ids) > 0:
+        first_token_id = generated_token_ids[0].item()
+        if first_token_id in force_prefix_processor.allowed_token_ids:
+            # Decode just the first token to get the action
+            first_token_text = tokenizer.decode([first_token_id], skip_special_tokens=False).strip()
+            if first_token_text.lower() == "clarify":
+                return "Clarify"
+            elif first_token_text.lower() == "execute":
+                return "Execute"
+    
+    # Fallback: Extract action from first line of response
+    # Training format: 'Clarify\n...' or 'Execute\n...'
+    # ⭐ SCHEME 1: With forced prefix, first token should always be Clarify or Execute
+    response_lines = response.strip().split('\n')
+    if not response_lines:
+        # Fallback if empty response
         persona_name = persona.get("name", "Unknown")
         persona_obj = next((p for p in PERSONAS if p.name == persona_name), PERSONAS[0])
         return select_mainline_action_from_persona(persona_obj, state)
+    
+    first_line = response_lines[0].strip()
+    first_line_lower = first_line.lower()
+    
+    # Check if first line starts with action token
+    # ⭐ SCHEME 1: With forced prefix, this should always match
+    if first_line_lower.startswith("clarify"):
+        return "Clarify"
+    elif first_line_lower.startswith("execute"):
+        return "Execute"
+    
+    # Fallback: check if response contains action indicators
+    # (in case model generates without explicit prefix - should be rare with SCHEME 1)
+    response_lower = response.lower()
+    
+    # Check for code indicators first (Execute)
+    if "```" in response_lower[:200] or "def " in response_lower[:200] or "import " in response_lower[:200]:
+        # Contains code block, function definition, or import → Execute
+        return "Execute"
+    
+    # Check for Clarify indicators (more comprehensive)
+    # 1. Check for "clarify" keyword (extend to 200 chars)
+    if "clarify" in response_lower[:200]:
+        return "Clarify"
+    
+    # 2. Check for question marks (extend to 300 chars, as questions may come later)
+    if "?" in response_lower[:300] and "```" not in response_lower[:300]:
+        return "Clarify"
+    
+    # 3. Check for clarification keywords (extend to 200 chars)
+    clarify_keywords = ["could you", "can you", "would you", "please clarify", 
+                       "i need to", "i'd like to", "to ensure", "to provide"]
+    if any(keyword in response_lower[:200] for keyword in clarify_keywords):
+        # But make sure it's not code
+        if "```" not in response_lower[:200] and "def " not in response_lower[:200]:
+            return "Clarify"
+    
+    # 4. Check for "execute" keyword (less common, but check anyway)
+    if "execute" in response_lower[:200]:
+        return "Execute"
+    
+    # Final fallback: use persona-based selection
+    persona_name = persona.get("name", "Unknown")
+    persona_obj = next((p for p in PERSONAS if p.name == persona_name), PERSONAS[0])
+    return select_mainline_action_from_persona(persona_obj, state)
 
 
 def generate_assistant_message(
@@ -122,18 +282,37 @@ def generate_assistant_message(
 ) -> str:
     """Generate assistant message for the given action.
     
+    ⭐ 改进：Execute阶段使用结构化state reconstruction，而不是直接拼接对话历史。
+    
     Args:
         policy_model: Trained model (Llama + PEFT) - should be used for code generation
         base_model_obj: Base model (fallback if policy_model not provided)
     """
     prompts = build_action_prompts(domain)
     action_prompt = prompts.get(action, prompts["Execute"])
-    task_prompt = state.get("query", "")
+    
+    # ⭐ 改进：Execute时使用结构化state reconstruction
+    if action == "Execute":
+        # 重构state：提取原始query + 结构化clarified requirements
+        reconstructed = reconstruct_state_for_execute(state)
+        original_query = reconstructed["original_query"]
+        clarified_requirements = reconstructed["clarified_requirements"]
+        
+        # 构建结构化的task prompt
+        if clarified_requirements:
+            # 有澄清信息：使用结构化格式
+            task_prompt = f"{original_query}\n\n[Clarified Requirements]\n{clarified_requirements}\n\n[Instruction]\nWrite the implementation.\nDo not ask further questions."
+        else:
+            # 没有澄清信息：直接使用原始query
+            task_prompt = original_query
+    else:
+        # Clarify时仍使用原始query（包含对话历史，用于上下文）
+        task_prompt = state.get("query", "")
     
     if use_openai:
         response = chat_complete(
             action_prompt,
-            f"[Task]\n{task_prompt}",
+            f"[Task]\n{task_prompt}" if action == "Execute" else task_prompt,
             model="gpt-4o-mini",
             max_tokens=400
         )
@@ -143,9 +322,15 @@ def generate_assistant_message(
         model_to_use = policy_model if policy_model is not None else base_model_obj
         
         if model_to_use is not None and tokenizer is not None:
+            # ⭐ 改进：Execute时使用结构化的task prompt
+            if action == "Execute":
+                user_content = f"[Task]\n{task_prompt}"
+            else:
+                user_content = task_prompt
+            
             messages = [
                 {"role": "system", "content": action_prompt},
-                {"role": "user", "content": f"[Task]\n{task_prompt}"},
+                {"role": "user", "content": user_content},
             ]
             prompt = tokenizer.apply_chat_template(
                 messages,
@@ -456,7 +641,7 @@ def evaluate_multi_turn_conversation(
             stats["avg_turns_per_conversation"] = stats["total_turns"] / stats["total_conversations"]
             total_actions = stats["clarify_turns"] + stats["execute_turns"]
             if total_actions > 0:
-                stats["clarify_rate"] = stats["clarify_turns"] / total_actions
+                stats["clarify_rate"]ß = stats["clarify_turns"] / total_actions
         
         # Calculate task success metrics
         if stats["task_evaluated_count"] > 0:

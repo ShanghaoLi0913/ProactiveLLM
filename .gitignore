@@ -77,3 +77,19 @@ scripts/watch_*.sh
 scripts/check_*.sh
 scripts/auto_*.sh
 scripts/*_repair*.py
+
+# Temporary shell scripts (experiment-specific)
+*_MEDIUM_SCALE.sh
+*_PRELIMINARY.sh
+*_V[0-9]*.sh
+check_*.sh
+TEST_*.sh
+
+# Temporary analysis documents
+*_ANALYSIS.md
+*_PRIORITY*.md
+*_RESULTS.md
+*_FIXES.md
+*_PROGRESS*.md
+EVALUATION_METHOD_SUMMARY.md
+MEDIUM_SCALE_PIPELINE.md

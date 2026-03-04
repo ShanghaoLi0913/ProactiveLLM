@@ -14,3 +14,4 @@ def function_name(...):
     # Your code here
 ```
 
+Note: If [Clarified Requirements] section is provided, incorporate those requirements into your implementation.
