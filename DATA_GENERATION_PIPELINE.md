@@ -172,19 +172,61 @@
 - **测试用例**: 确保所有prefs都有测试用例用于计算`task_score`
 - **数据分割**: 按state分割避免数据泄漏
 
-### 5. 知识蒸馏设计
-- **代码生成**: 
-  - Execute action时使用`original_instruct_prompt`（完整信息）
-  - 使用`gpt-4o-mini`生成高质量代码
-  - 提高训练数据质量
-- **Action选择**: 
-  - 始终使用masked query（`state['query']`）
-  - 保持`task_uncertainty`判断的真实性
-  - 不受代码生成逻辑影响
-- **目的**: 
-  - 模型学习GPT的代码生成能力（知识蒸馏）
-  - 同时学会判断`task_uncertainty`（基于masked query）
-  - 平衡代码质量和不确定性评估能力
+### 5. 两阶段代码生成设计（方案2）
+
+**核心思想**: 同时生成两个版本的代码，用于不同的目的。
+
+#### 5.1 代码生成策略
+
+- **assistant_code** (实际代码):
+  - 使用 `masked query + 澄清问题`（真实场景）
+  - 用于DPO训练（通过`assistant_msg`字段）
+  - 模拟真实的信息获取过程
+  - 体现澄清的价值：澄清后代码质量提升
+
+- **teacher_code** (理想代码):
+  - 使用 `full query`（完整信息）
+  - 用于分析和对比实验
+  - 提供高质量的参考代码
+  - 不会破坏因果解释（因为不用于训练）
+
+#### 5.2 数据格式
+
+每个Execute的trajectory包含：
+```json
+{
+  "assistant_msg": "Execute\n{assistant_code}",  // 用于DPO训练
+  "assistant_code": "...",  // 实际代码（masked query + 澄清问题）
+  "teacher_code": "...",    // 理想代码（full query，可选）
+  ...
+}
+```
+
+#### 5.3 研究价值
+
+**对比实验**: 比较 `success(masked execution)` vs `success(teacher execution)`
+
+- **实验设计**:
+  - 对每个Execute动作，同时评估`assistant_code`和`teacher_code`的成功率
+  - 计算两个版本的`task_score`
+  - 对比分析：`success(teacher_code)` vs `success(assistant_code)`
+
+- **研究假设**:
+  - 如果 `success(teacher_code) >> success(assistant_code)`
+  - 可以证明 **clarification matters**（澄清的价值）
+  - 说明通过澄清获取信息确实能提高代码质量
+
+- **Paper价值**:
+  - 这是reviewer非常喜欢的结果
+  - 提供了强有力的证据证明澄清的价值
+  - 避免了privileged baseline问题（teacher_code不用于训练）
+
+#### 5.4 实现细节
+
+- **生成时机**: Execute动作时同时生成两个版本
+- **成本**: 需要两次LLM调用（但提供了重要的研究价值）
+- **Pipeline影响**: DPO训练流程完全不变（继续使用`assistant_msg`）
+- **分析工具**: 可以使用`teacher_code`进行详细的对比分析
 
 ---
 

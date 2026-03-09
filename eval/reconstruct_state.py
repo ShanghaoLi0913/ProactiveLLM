@@ -12,6 +12,100 @@ State Reconstruction Module
 import re
 from typing import Dict, List, Optional
 
+# Canonicalization mapping: normalize various expressions to canonical tokens
+# This addresses the "synonym expression coverage" problem in reconstruction
+CANONICAL_MAP = {
+    # Edge cases canonicalization
+    "empty": {
+        "patterns": [r"empty\s+(?:string|input|list|array|dict|sequence|collection)", 
+                     r"empty\s+input", r"empty\s+list", r"empty\s+string"],
+        "canonical": "EMPTY_INPUT"
+    },
+    "null": {
+        "patterns": [r"null|none|null\s+value", r"none\s+value"],
+        "canonical": "NULL_VALUE"
+    },
+    "single": {
+        "patterns": [r"single\s+element", r"one\s+element", r"single\s+item"],
+        "canonical": "SINGLE_ELEMENT"
+    },
+    "negative": {
+        "patterns": [r"negative\s+(?:number|value|input)", r"negative\s+numbers"],
+        "canonical": "NEGATIVE_NUMBERS"
+    },
+    "zero": {
+        "patterns": [r"zero\s+(?:value|input|number)", r"zero\s+value"],
+        "canonical": "ZERO_VALUE"
+    },
+    "duplicate": {
+        "patterns": [r"duplicate\s+(?:value|element|item)", r"duplicate\s+values"],
+        "canonical": "DUPLICATE_VALUES"
+    },
+    "large": {
+        "patterns": [r"large\s+(?:input|size|number)", r"large\s+inputs"],
+        "canonical": "LARGE_INPUTS"
+    },
+    
+    # Output format canonicalization
+    "counter": {
+        "patterns": [r"counter|Counter|should\s+output\s+with\s+counter", r"return\s+(?:a\s+)?counter"],
+        "canonical": "OUTPUT_COUNTER"
+    },
+    "dict": {
+        "patterns": [r"dict|dictionary|should\s+output\s+with\s+dict", r"return\s+(?:a\s+)?dict"],
+        "canonical": "OUTPUT_DICT"
+    },
+    "list": {
+        "patterns": [r"list|array|should\s+output\s+with\s+list", r"return\s+(?:a\s+)?list"],
+        "canonical": "OUTPUT_LIST"
+    },
+    
+    # Complexity canonicalization
+    "linear": {
+        "patterns": [r"O\(n\)|linear\s+time|time\s+complexity\s+is\s+linear", r"时间复杂度.*线性"],
+        "canonical": "TIME_LINEAR"
+    },
+    "quadratic": {
+        "patterns": [r"O\(n\^2\)|quadratic|O\(n2\)", r"时间复杂度.*平方"],
+        "canonical": "TIME_QUADRATIC"
+    },
+    "logarithmic": {
+        "patterns": [r"O\(log\s*n\)|O\(log\(n\)\)|logarithmic", r"时间复杂度.*对数"],
+        "canonical": "TIME_LOGARITHMIC"
+    },
+}
+
+
+def canonicalize_text(text: str) -> str:
+    """
+    Canonicalize text by normalizing various expressions to canonical tokens.
+    
+    This addresses the "synonym expression coverage" problem:
+    - empty list / empty input / empty string → EMPTY_INPUT
+    - output should be Counter / return a Counter → OUTPUT_COUNTER
+    - O(n) / linear time / time complexity is linear → TIME_LINEAR
+    
+    Args:
+        text: Input text to canonicalize
+        
+    Returns:
+        canonical_text: Text with canonical tokens inserted (for matching)
+    """
+    text_lower = text.lower()
+    canonical_tokens = []
+    
+    # Check each canonical category
+    for category, mapping in CANONICAL_MAP.items():
+        for pattern in mapping["patterns"]:
+            if re.search(pattern, text_lower, re.IGNORECASE):
+                canonical_tokens.append(mapping["canonical"])
+                break  # Only add once per category
+    
+    # Return original text with canonical tokens appended (for matching)
+    if canonical_tokens:
+        return f"{text} {' '.join(canonical_tokens)}"
+    return text
+
 
 def extract_user_answers_from_query(query: str) -> List[str]:
     """
@@ -66,19 +160,21 @@ def extract_original_query(query: str) -> str:
     return query
 
 
-def parse_user_answer_to_structured_spec(user_answer: str, disclosure_rule: Optional[Dict] = None) -> Dict[str, List[str]]:
+def parse_user_answer_to_structured_spec(user_answer: str) -> Dict[str, List[str]]:
     """
     将用户回答解析为结构化的spec字段。
     
-    映射规则：
+    ⚠️ CRITICAL: 这是一个纯函数，只读取用户回答文本，不读取任何disclosure_rule或隐藏字段。
+    这确保了reconstruction的因果解释：只使用对话中用户实际提供的信息。
+    
+    映射规则（基于关键词匹配）：
     - Edge cases: "empty", "null", "single", "large", "negative"等关键词
     - Output format: "should output", "output format", "return"等
     - Constraints: "time complexity", "space complexity", "recursion", "iteration"等
     - Input constraints: "default", "range", "type"等
     
     Args:
-        user_answer: 用户回答文本
-        disclosure_rule: 可选的disclosure_rule，用于验证和补充信息
+        user_answer: 用户回答文本（来自对话历史，不包含任何隐藏字段）
         
     Returns:
         structured_spec: 结构化的spec字典
@@ -96,9 +192,29 @@ def parse_user_answer_to_structured_spec(user_answer: str, disclosure_rule: Opti
         "input_constraints": []
     }
     
-    user_answer_lower = user_answer.lower()
+    # 改进：使用canonicalization层处理同义表达
+    # 这解决了"关键词匹配对表达敏感"的问题
+    canonicalized_answer = canonicalize_text(user_answer)
+    user_answer_lower = canonicalized_answer.lower()
     
-    # 提取Edge cases
+    # 提取Edge cases（使用canonical tokens）
+    edge_case_mapping = {
+        "EMPTY_INPUT": "empty input",
+        "NULL_VALUE": "null/None values",
+        "SINGLE_ELEMENT": "single element",
+        "LARGE_INPUTS": "large inputs",
+        "NEGATIVE_NUMBERS": "negative numbers",
+        "ZERO_VALUE": "zero value",
+        "DUPLICATE_VALUES": "duplicate values",
+    }
+    
+    # 先检查canonical tokens（更可靠）
+    for canonical_token, description in edge_case_mapping.items():
+        if canonical_token in canonicalized_answer:
+            if description not in structured_spec["edge_cases"]:
+                structured_spec["edge_cases"].append(description)
+    
+    # 也保留原有的pattern匹配（作为fallback）
     edge_case_patterns = [
         (r"empty\s+(?:string|input|list|array|dict)", "empty input"),
         (r"null|none", "null/None values"),
@@ -110,11 +226,23 @@ def parse_user_answer_to_structured_spec(user_answer: str, disclosure_rule: Opti
     ]
     
     for pattern, description in edge_case_patterns:
-        if re.search(pattern, user_answer_lower):
-            if description not in structured_spec["edge_cases"]:
-                structured_spec["edge_cases"].append(description)
+        if re.search(pattern, user_answer_lower) and description not in structured_spec["edge_cases"]:
+            structured_spec["edge_cases"].append(description)
     
-    # 提取Output format
+    # 提取Output format（使用canonical tokens）
+    output_format_mapping = {
+        "OUTPUT_COUNTER": "should output with Counter",
+        "OUTPUT_DICT": "should output with dict",
+        "OUTPUT_LIST": "should output with list",
+    }
+    
+    # 先检查canonical tokens
+    for canonical_token, description in output_format_mapping.items():
+        if canonical_token in canonicalized_answer:
+            if description not in structured_spec["output_format"]:
+                structured_spec["output_format"].append(description)
+    
+    # 也保留原有的pattern匹配
     output_patterns = [
         (r"should\s+output\s+with[:\s]+([^\.]+)", "output specification"),
         (r"output\s+format[:\s]+([^\.]+)", "output format"),
@@ -135,7 +263,19 @@ def parse_user_answer_to_structured_spec(user_answer: str, disclosure_rule: Opti
                 structured_spec["output_format"].append(spec_text)
     
     # 提取Constraints（时间/空间复杂度、算法要求等）
-    # 优先匹配完整的复杂度描述（支持中英文）
+    # 使用canonical tokens处理复杂度
+    complexity_mapping = {
+        "TIME_LINEAR": "time complexity O(n)",
+        "TIME_QUADRATIC": "time complexity O(n^2)",
+        "TIME_LOGARITHMIC": "time complexity O(log n)",
+    }
+    
+    for canonical_token, description in complexity_mapping.items():
+        if canonical_token in canonicalized_answer:
+            if description not in structured_spec["constraints"]:
+                structured_spec["constraints"].append(description)
+    
+    # 也保留原有的pattern匹配（作为fallback）
     time_complexity_keywords = r"(?:time\s+complexity|时间复杂度|时间复杂)"
     if re.search(time_complexity_keywords, user_answer_lower, re.IGNORECASE):
         # 提取 "time complexity O(n)" 或 "时间复杂度O(n)"
@@ -223,10 +363,14 @@ def reconstruct_state_for_execute(state: Dict) -> Dict[str, str]:
     """
     重构state，为Execute阶段生成结构化的prompt。
     
+    ⚠️ CRITICAL DESIGN: 这是一个纯函数，只读取对话历史中的用户回答。
+    不读取disclosure_rule、disclosure_info或任何隐藏字段。
+    这确保了因果解释：Execute的成功来自Clarify获取的信息，而不是privileged access。
+    
     关键改进：
     1. 提取原始query（去掉对话历史）
-    2. 提取所有用户回答
-    3. 将用户回答解析为结构化spec
+    2. 提取所有用户回答（只从对话历史中提取）
+    3. 将用户回答解析为结构化spec（纯文本解析，不读取disclosure_rule）
     4. 生成结构化的[Clarified Requirements]部分
     
     Args:
@@ -237,16 +381,21 @@ def reconstruct_state_for_execute(state: Dict) -> Dict[str, str]:
         {
             "original_query": 原始masked query,
             "clarified_requirements": 结构化的requirements文本,
-            "has_clarifications": 是否有澄清信息
+            "has_clarifications": 是否有澄清信息,
+            "reconstruction_coverage": 提取到的类别列表
         }
     """
     query = state.get("query", "")
-    disclosure_rule = state.get("disclosure_rule", {})
+    
+    # ⚠️ ASSERT: 不读取disclosure_rule，确保reconstruction是纯函数
+    # reconstruction module input = conversation logs only
+    # 这确保了因果解释：只使用用户实际在对话中提供的信息
+    # disclosure_rule = state.get("disclosure_rule", {})  # ❌ 不使用
     
     # 提取原始query
     original_query = extract_original_query(query)
     
-    # 提取用户回答
+    # 提取用户回答（只从对话历史中提取）
     user_answers = extract_user_answers_from_query(query)
     
     if not user_answers:
@@ -254,13 +403,14 @@ def reconstruct_state_for_execute(state: Dict) -> Dict[str, str]:
         return {
             "original_query": original_query,
             "clarified_requirements": "",
-            "has_clarifications": False
+            "has_clarifications": False,
+            "reconstruction_coverage": []
         }
     
-    # 解析每个用户回答为结构化spec
+    # 解析每个用户回答为结构化spec（纯函数，不读取disclosure_rule）
     structured_specs = []
     for user_answer in user_answers:
-        spec = parse_user_answer_to_structured_spec(user_answer, disclosure_rule)
+        spec = parse_user_answer_to_structured_spec(user_answer)  # ⚠️ 不传递disclosure_rule
         structured_specs.append(spec)
     
     # 合并所有spec
@@ -295,8 +445,20 @@ def reconstruct_state_for_execute(state: Dict) -> Dict[str, str]:
     
     clarified_requirements = "\n".join(requirements_lines).strip()
     
+    # 计算reconstruction coverage（提取到哪些类别）
+    reconstruction_coverage = []
+    if merged_spec["edge_cases"]:
+        reconstruction_coverage.append("edge_cases")
+    if merged_spec["output_format"]:
+        reconstruction_coverage.append("output_format")
+    if merged_spec["constraints"]:
+        reconstruction_coverage.append("constraints")
+    if merged_spec["input_constraints"]:
+        reconstruction_coverage.append("input_constraints")
+    
     return {
         "original_query": original_query,
         "clarified_requirements": clarified_requirements,
-        "has_clarifications": len(user_answers) > 0
+        "has_clarifications": len(user_answers) > 0,
+        "reconstruction_coverage": reconstruction_coverage
     }

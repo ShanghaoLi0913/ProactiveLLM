@@ -24,6 +24,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from simulator import PERSONAS, react
 from utils.compute_task_uncertainty import compute_task_uncertainty_from_state
+from eval.reconstruct_state import reconstruct_state_for_execute
 
 
 def set_global_seed(seed: int) -> None:
@@ -97,12 +98,21 @@ class LocalHFChatGenerator:
             state: Optional state dict (for knowledge distillation: Execute uses original query)
             action: Optional action type ("Execute" or "Clarify")
         """
-        # Knowledge distillation: For Execute action, use original query if available
-        # This improves training data quality while maintaining uncertainty judgment authenticity
-        if state is not None and action == "Execute" and state.get("original_instruct_prompt"):
-            user_prompt = f"[Task]\n{state['original_instruct_prompt']}"
+        # ⭐ 方案2: 两阶段代码生成 - 这里只生成assistant_code（实际代码）
+        # teacher_code会在调用处单独生成
+        if state is not None and action == "Execute":
+            reconstructed = reconstruct_state_for_execute(state)
+            original_query = reconstructed["original_query"]
+            clarified_requirements = reconstructed["clarified_requirements"]
+            
+            # 实际输入：masked query + 澄清问题（真实场景）
+            if clarified_requirements:
+                user_prompt = f"[Task]\n{original_query}\n\n[Clarified Requirements]\n{clarified_requirements}\n\n[Instruction]\nWrite the implementation.\nDo not ask further questions."
+            else:
+                # 没有澄清：用masked query（保持一致性）
+                user_prompt = f"[Task]\n{original_query}"
         elif state is not None:
-            # For Clarify or when original not available, use masked query
+            # For Clarify, use masked query (may contain conversation history)
             user_prompt = f"[Task]\n{state.get('query', user_prompt)}"
         
         # Match the rest of the codebase: prompts are system + user
@@ -280,7 +290,7 @@ def load_states_from_dataset(dataset_path: Path, domain: str, limit: Optional[in
                 "prev_reject": int(row.get("prev_reject", 0)),
                 "task_uncertainty": task_uncertainty,
                 "convcodeworld_tests": tests,  # Support both "test" and "convcodeworld_tests"
-                # Preserve original_instruct_prompt for knowledge distillation (Execute uses original query)
+                # Preserve original_instruct_prompt for reference (not used in Execute generation to avoid privileged baseline)
                 "original_instruct_prompt": row.get("original_instruct_prompt", ""),
                 # Preserve other fields that might be useful
                 "canonical_solution": row.get("canonical_solution", ""),
@@ -330,21 +340,28 @@ def llm_output(
         action_prompt: Action template/prompt
         model: LLM model name
         conversation_history: Optional list of previous turns [{role, content}, ...]
-        action: Action type ("Execute" or "Clarify"). If "Execute" and original_instruct_prompt exists, use it for better code quality.
+        action: Action type ("Execute" or "Clarify"). Execute uses reconstructed state (masked query + structured requirements).
     """
     from llm.provider import chat_complete
     system = action_prompt
     
     # Build user message from state query
-    # For Execute action: use original_instruct_prompt if available (for better code quality in training data)
-    # For Clarify action: always use masked query (to maintain task_uncertainty authenticity)
-    # If query contains conversation history (multi-turn), use it directly
-    if action == "Execute" and state.get("original_instruct_prompt"):
-        # Use original query for Execute to generate high-quality code (knowledge distillation)
-        # This improves training data quality while maintaining uncertainty judgment authenticity
-        user = f"[Task]\n{state['original_instruct_prompt']}"
+    # ⭐ 方案2: 两阶段代码生成 - 这里只生成assistant_code（实际代码）
+    # teacher_code会在调用处单独生成
+    if action == "Execute":
+        # 重构state：提取原始query + 结构化clarified requirements
+        reconstructed = reconstruct_state_for_execute(state)
+        original_query = reconstructed["original_query"]
+        clarified_requirements = reconstructed["clarified_requirements"]
+        
+        # 实际输入：masked query + 澄清问题（真实场景）
+        if clarified_requirements:
+            user = f"[Task]\n{original_query}\n\n[Clarified Requirements]\n{clarified_requirements}\n\n[Instruction]\nWrite the implementation.\nDo not ask further questions."
+        else:
+            # 没有澄清：用masked query（保持一致性）
+            user = f"[Task]\n{original_query}"
     else:
-        # Use masked query for Clarify or when original_instruct_prompt is not available
+        # Clarify时使用masked query（包含对话历史，用于上下文）
         user = f"[Task]\n{state['query']}"
     
     return chat_complete(system, user, model=model, max_tokens=400, temperature=temperature, top_p=top_p)
@@ -552,9 +569,17 @@ def generate_multi_turn_conversation(initial_state: Dict, domain: str,
                                      local_generator: Optional[LocalHFChatGenerator] = None,
                                      temperature: float = 0.7,
                                      top_p: float = 0.9,
-                                     trajectory_id: Optional[str] = None) -> List[Dict]:
+                                     trajectory_id: Optional[str] = None,
+                                     seed: Optional[int] = None) -> List[Dict]:
     """
     Generate a multi-turn conversation until task completion or max turns.
+    
+    ⚠️ Counterfactual Comparability:
+    For DPO preference pairs, we need to ensure that Clarify vs Execute rollouts
+    are comparable (same initial state+persona, only first action differs).
+    This requires:
+    1. Fixed random seed (passed via seed parameter)
+    2. Multiple rollouts with averaging (implemented in reward computation)
     
     Args:
         initial_state: Starting state
@@ -565,11 +590,16 @@ def generate_multi_turn_conversation(initial_state: Dict, domain: str,
         action_selection_fn: Function(state) -> action (LOW/MID/HIGH). If None, uses persona-based selection.
         force_first_action: If provided ("Execute" or "Clarify"), force the first action instead of auto-selecting.
         trajectory_id: Optional unique ID for this trajectory. If None, will be auto-generated.
+        seed: Optional random seed for reproducibility (critical for counterfactual comparability)
     
     Returns:
         List of trajectory dicts, one per turn
     """
     import time
+    # ⚠️ Set seed for counterfactual comparability (if provided)
+    if seed is not None:
+        set_global_seed(seed)
+    
     prompts = build_action_prompts(domain)
     persona = PERSONAS[persona_idx % len(PERSONAS)]
     trajectories = []
@@ -598,14 +628,78 @@ def generate_multi_turn_conversation(initial_state: Dict, domain: str,
         action_prompt = prompts[action]
         
         # Generate assistant message
-        # Knowledge distillation: Execute uses original query for better code quality
-        # Action selection still uses masked query (maintains task_uncertainty authenticity)
-        if local_generator is not None:
-            assistant_msg = local_generator.chat_complete(action_prompt, f"[Task]\n{current_state['query']}", state=current_state, action=action)
-        elif llm_model:
-            assistant_msg = llm_output(current_state, action_prompt, llm_model, temperature=temperature, top_p=top_p, action=action)
+        # ⭐ 方案2扩展: 三阶段代码生成（同时生成masked_code、assistant_code和teacher_code）
+        # - masked_code: 直接用masked query（没有澄清的baseline）
+        # - assistant_code: 用masked query + 澄清问题（实际场景，用于DPO训练）
+        # - teacher_code: 用full query（理想目标，用于分析和可选训练）
+        assistant_msg = None
+        masked_code = None
+        assistant_code = None
+        teacher_code = None
+        
+        if action == "Execute":
+            # Execute时生成三个版本的代码
+            reconstructed = reconstruct_state_for_execute(current_state)
+            original_query = reconstructed["original_query"]
+            clarified_requirements = reconstructed["clarified_requirements"]
+            
+            # 版本1: masked_code - 直接用masked query（没有澄清的baseline）
+            masked_prompt = original_query
+            
+            # 版本2: assistant_code - masked query + 澄清问题（真实场景）
+            if clarified_requirements:
+                actual_prompt = f"{original_query}\n\n[Clarified Requirements]\n{clarified_requirements}\n\n[Instruction]\nWrite the implementation.\nDo not ask further questions."
+            else:
+                # 没有澄清：用masked query（保持一致性）
+                actual_prompt = original_query
+            
+            # 版本3: teacher_code - full query（用于对比分析，证明clarification matters）
+            ideal_prompt = current_state.get("original_instruct_prompt", "")
+            
+            # 生成三个版本的代码
+            if local_generator is not None:
+                # 版本1: masked_code
+                masked_code = local_generator.chat_complete(action_prompt, f"[Task]\n{masked_prompt}", state=current_state, action=action)
+                # 版本2: assistant_code
+                assistant_code = local_generator.chat_complete(action_prompt, f"[Task]\n{actual_prompt}", state=current_state, action=action)
+                # 版本3: teacher_code
+                if ideal_prompt:
+                    teacher_code = local_generator.chat_complete(action_prompt, f"[Task]\n{ideal_prompt}", state=current_state, action=action)
+            elif llm_model:
+                # 版本1: masked_code - 直接用masked query
+                masked_state = current_state.copy()
+                masked_state["query"] = masked_prompt
+                masked_code = llm_output(masked_state, action_prompt, llm_model, temperature=temperature, top_p=top_p, action=action)
+                # 版本2: assistant_code
+                assistant_code = llm_output(current_state, action_prompt, llm_model, temperature=temperature, top_p=top_p, action=action)
+                # 版本3: teacher_code
+                if ideal_prompt:
+                    teacher_state = current_state.copy()
+                    teacher_state["query"] = ideal_prompt
+                    teacher_code = llm_output(teacher_state, action_prompt, llm_model, temperature=temperature, top_p=top_p, action=action)
+            else:
+                # 版本1: masked_code
+                masked_state = current_state.copy()
+                masked_state["query"] = masked_prompt
+                masked_code = dummy_llm_output(masked_state, action_prompt)
+                # 版本2: assistant_code
+                assistant_code = dummy_llm_output(current_state, action_prompt)
+                # 版本3: teacher_code
+                if ideal_prompt:
+                    teacher_state = current_state.copy()
+                    teacher_state["query"] = ideal_prompt
+                    teacher_code = dummy_llm_output(teacher_state, action_prompt)
+            
+            # 使用assistant_code作为assistant_msg（用于DPO训练）
+            assistant_msg = assistant_code
         else:
-            assistant_msg = dummy_llm_output(current_state, action_prompt)
+            # Clarify时只生成一个版本
+            if local_generator is not None:
+                assistant_msg = local_generator.chat_complete(action_prompt, f"[Task]\n{current_state['query']}", state=current_state, action=action)
+            elif llm_model:
+                assistant_msg = llm_output(current_state, action_prompt, llm_model, temperature=temperature, top_p=top_p, action=action)
+            else:
+                assistant_msg = dummy_llm_output(current_state, action_prompt)
         
         # Enforce action/message consistency: Clarify should not include code
         if action == "Clarify":
@@ -635,14 +729,18 @@ def generate_multi_turn_conversation(initial_state: Dict, domain: str,
             edge_case_keywords = ["edge case", "empty", "negative", "zero", "null", "none", "constraint", "special", "exception", "invalid", "error", "boundary", "extreme"]
             if any(keyword.lower() in user_reply.lower() for keyword in edge_case_keywords):
                 has_edge_cases_info = True
-            
-            # If disclosure_rule has edge_cases, assume edge_cases info was obtained
-            disclosure_rule = current_state.get("disclosure_rule")
-            if disclosure_rule:
-                disclosure_info = disclosure_rule.get("disclosure_info", {})
-                input_constraints = disclosure_info.get("input_constraints", {})
-                if input_constraints.get("edge_cases"):
-                    has_edge_cases_info = True
+        
+        # ⭐ Record revealed spec for Execute actions (for paper analysis)
+        # This enables analysis of: Clarify次数 vs success, utilization rate, 哪类masked信息最关键
+        revealed_requirements = ""
+        reconstruction_coverage = []
+        answer_clarity = reaction.get("meta", {}).get("answer_clarity", 0.0)
+        
+        if action == "Execute":
+            # Reconstruct state to get revealed requirements
+            reconstructed = reconstruct_state_for_execute(current_state)
+            revealed_requirements = reconstructed.get("clarified_requirements", "")
+            reconstruction_coverage = reconstructed.get("reconstruction_coverage", [])
         
         # Create trajectory for this turn
         traj = {
@@ -650,7 +748,7 @@ def generate_multi_turn_conversation(initial_state: Dict, domain: str,
             "state": current_state.copy(),
             "action": action,
             "action_prompt": action_prompt,
-            "assistant_msg": assistant_msg,
+            "assistant_msg": assistant_msg,  # 用于DPO训练（包含action prefix + 内容）
             "persona": {
                 "name": persona.name,
                 "domain": persona.domain,
@@ -662,7 +760,24 @@ def generate_multi_turn_conversation(initial_state: Dict, domain: str,
             "is_mainline": True,  # All turns in multi-turn are mainline
             "is_terminal": False,  # Will be set to True if task completed or user stopped
             "has_edge_cases_info": has_edge_cases_info,  # Track if edge_cases info was obtained
+            # ⭐ Record revealed spec (for COLM-style analysis)
+            "revealed_requirements": revealed_requirements,  # Structured requirements extracted from user answers
+            "reconstruction_coverage": reconstruction_coverage,  # Which categories were extracted (edge_cases, output_format, etc.)
+            "answer_clarity": answer_clarity,  # Quality of user's answer to clarification (0.0-1.0)
         }
+        
+        # ⭐ 方案2扩展: 三阶段代码生成 - 保存三个版本的代码
+        # 用于研究分析：三种版本的对比
+        # - masked_code vs assistant_code: 证明澄清的价值
+        # - assistant_code vs teacher_code: 看实际场景和理想目标的差距
+        # - masked_code vs teacher_code: 看完整信息的价值
+        if action == "Execute":
+            traj["masked_code"] = masked_code  # Baseline代码（直接用masked query，没有澄清）
+            traj["assistant_code"] = assistant_code  # 实际代码（masked query + 澄清问题）
+            if teacher_code:
+                traj["teacher_code"] = teacher_code  # 理想代码（full query）
+            else:
+                traj["teacher_code"] = None  # 如果没有original_instruct_prompt，则为None
         trajectories.append(traj)
         
         # Check if task is completed (only for Execute action)
@@ -726,13 +841,63 @@ def generate_multi_turn_conversation(initial_state: Dict, domain: str,
             execute_prompt = prompts[execute_action]
             
             # Generate assistant message for Execute
-            # Knowledge distillation: Execute uses original query for better code quality
-            if local_generator is not None:
-                execute_assistant_msg = local_generator.chat_complete(execute_prompt, f"[Task]\n{execute_state['query']}", state=execute_state, action="Execute")
-            elif llm_model:
-                execute_assistant_msg = llm_output(execute_state, execute_prompt, llm_model, temperature=temperature, top_p=top_p, action="Execute")
+            # ⭐ 方案2扩展: 三阶段代码生成（同时生成masked_code、assistant_code和teacher_code）
+            execute_masked_code = None
+            execute_assistant_code = None
+            execute_teacher_code = None
+            
+            reconstructed = reconstruct_state_for_execute(execute_state)
+            original_query = reconstructed["original_query"]
+            clarified_requirements = reconstructed["clarified_requirements"]
+            
+            # 版本1: masked_code - 直接用masked query（没有澄清的baseline）
+            masked_prompt = original_query
+            
+            # 版本2: assistant_code - masked query + 澄清问题（真实场景）
+            if clarified_requirements:
+                actual_prompt = f"{original_query}\n\n[Clarified Requirements]\n{clarified_requirements}\n\n[Instruction]\nWrite the implementation.\nDo not ask further questions."
             else:
-                execute_assistant_msg = dummy_llm_output(execute_state, execute_prompt)
+                actual_prompt = original_query
+            
+            # 版本3: teacher_code - full query（用于对比分析）
+            ideal_prompt = execute_state.get("original_instruct_prompt", "")
+            
+            # 生成三个版本的代码
+            if local_generator is not None:
+                # 版本1: masked_code
+                execute_masked_code = local_generator.chat_complete(execute_prompt, f"[Task]\n{masked_prompt}", state=execute_state, action="Execute")
+                # 版本2: assistant_code
+                execute_assistant_code = local_generator.chat_complete(execute_prompt, f"[Task]\n{actual_prompt}", state=execute_state, action="Execute")
+                # 版本3: teacher_code
+                if ideal_prompt:
+                    execute_teacher_code = local_generator.chat_complete(execute_prompt, f"[Task]\n{ideal_prompt}", state=execute_state, action="Execute")
+            elif llm_model:
+                # 版本1: masked_code
+                masked_state = execute_state.copy()
+                masked_state["query"] = masked_prompt
+                execute_masked_code = llm_output(masked_state, execute_prompt, llm_model, temperature=temperature, top_p=top_p, action="Execute")
+                # 版本2: assistant_code
+                execute_assistant_code = llm_output(execute_state, execute_prompt, llm_model, temperature=temperature, top_p=top_p, action="Execute")
+                # 版本3: teacher_code
+                if ideal_prompt:
+                    teacher_state = execute_state.copy()
+                    teacher_state["query"] = ideal_prompt
+                    execute_teacher_code = llm_output(teacher_state, execute_prompt, llm_model, temperature=temperature, top_p=top_p, action="Execute")
+            else:
+                # 版本1: masked_code
+                masked_state = execute_state.copy()
+                masked_state["query"] = masked_prompt
+                execute_masked_code = dummy_llm_output(masked_state, execute_prompt)
+                # 版本2: assistant_code
+                execute_assistant_code = dummy_llm_output(execute_state, execute_prompt)
+                # 版本3: teacher_code
+                if ideal_prompt:
+                    teacher_state = execute_state.copy()
+                    teacher_state["query"] = ideal_prompt
+                    execute_teacher_code = dummy_llm_output(teacher_state, execute_prompt)
+            
+            # 使用assistant_code作为assistant_msg（用于DPO训练）
+            execute_assistant_msg = execute_assistant_code
             
             # Get user reaction (for Execute, user typically doesn't react, but we still need the structure)
             execute_reaction = react(
@@ -748,13 +913,18 @@ def generate_multi_turn_conversation(initial_state: Dict, domain: str,
             # Check task completion
             execute_task_completed = check_task_completion(execute_state, execute_assistant_msg, domain)
             
+            # Record revealed spec for Execute
+            execute_reconstructed = reconstruct_state_for_execute(execute_state)
+            execute_revealed_requirements = execute_reconstructed.get("clarified_requirements", "")
+            execute_reconstruction_coverage = execute_reconstructed.get("reconstruction_coverage", [])
+            
             # Create Execute trajectory
             execute_traj = {
                 "trajectory_id": trajectory_id,
                 "state": execute_state.copy(),
                 "action": execute_action,
                 "action_prompt": execute_prompt,
-                "assistant_msg": execute_assistant_msg,
+                "assistant_msg": execute_assistant_msg,  # 用于DPO训练
                 "persona": {
                     "name": persona.name,
                     "domain": persona.domain,
@@ -769,7 +939,20 @@ def generate_multi_turn_conversation(initial_state: Dict, domain: str,
                 "has_edge_cases_info": execute_state.get("has_edge_cases_info", False),
                 "prev_action": "Clarify",  # Previous action was Clarify
                 "user_stopped": False,  # Reset user_stopped for Execute turn (even if previous turn had user_stopped)
+                # ⭐ Record revealed spec
+                "revealed_requirements": execute_revealed_requirements,
+                "reconstruction_coverage": execute_reconstruction_coverage,
+                "answer_clarity": execute_reaction.get("meta", {}).get("answer_clarity", 0.0),
             }
+            
+            # ⭐ 方案2扩展: 三阶段代码生成 - 保存三个版本的代码
+            execute_traj["masked_code"] = execute_masked_code  # Baseline代码（直接用masked query）
+            execute_traj["assistant_code"] = execute_assistant_code  # 实际代码（masked query + 澄清问题）
+            if execute_teacher_code:
+                execute_traj["teacher_code"] = execute_teacher_code  # 理想代码（full query）
+            else:
+                execute_traj["teacher_code"] = None
+            
             trajectories.append(execute_traj)
     
     return trajectories

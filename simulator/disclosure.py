@@ -20,12 +20,10 @@ def get_disclosure_info(
     """
     根据assistant的问题，从disclosure_rule中提取相关的被mask信息
     
-    实现渐进式披露机制（更慢的披露速度，让对话持续更久）:
+    实现渐进式披露机制（简化版：固定披露步长）:
     - Novice-Learner: 每次固定1个信息点（始终不变）
-    - Busy-Developer: Turn 0-2: 每次1个, Turn 3+: 2个
-    - Experienced-Engineer: Turn 0-1: 每次1个, Turn 2: 2个, Turn 3+: 2个
-    - 这样Turn 0-2累计：Novice 3个, Busy 3个, Experienced 4个
-    - 预期能看到更多Turn 3+的对话
+    - Busy-Developer: 每次固定1个信息点（始终不变，时间压力大）
+    - Experienced-Engineer: 每次固定3个信息点（始终不变，expertise高，能一次性reveal更多）
     
     Args:
         assistant_question: Assistant的澄清问题
@@ -43,32 +41,23 @@ def get_disclosure_info(
     if not disclosure_info:
         return None
     
-    # 渐进式披露机制（更慢的披露速度，让对话持续更久）
-    # 策略：进一步减少前期披露数量，确保需要更多轮才能获得足够信息
+    # 渐进式披露机制（简化版：固定披露步长）
+    # 策略：根据expertise固定每次披露的信息点数量
     # - Novice-Learner: 每次固定1个信息点（始终不变）
-    # - Busy-Developer: Turn 0-2: 每次1个, Turn 3+: 2个
-    # - Experienced-Engineer: Turn 0-1: 每次1个, Turn 2: 2个, Turn 3+: 2个
-    # 这样Turn 0-2累计：Novice 3个, Busy 3个, Experienced 4个
-    # 预期能看到更多Turn 3+的对话
+    # - Busy-Developer: 每次固定1个信息点（始终不变，时间压力大）
+    # - Experienced-Engineer: 每次固定3个信息点（始终不变，expertise高，能一次性reveal更多）
+    # 这样更简单，也更符合persona特征
     import math
     
     if expertise == "low":
-        # Novice-Learner: 每次固定1个
-        max_points = 1
+        # Novice-Learner: 每次固定2个（提高信息完整性，虽然expertise低但patience高）
+        max_points = 2
     elif expertise == "mid":
-        # Busy-Developer: Turn 0-2: 每次1个, Turn 3+: 2个
-        if dialogue_turn <= 2:
-            max_points = 1
-        else:  # dialogue_turn >= 3
-            max_points = 2
+        # Busy-Developer: 每次固定1个（时间压力大，每次只reveal少量信息）
+        max_points = 1
     else:  # expertise == "high"
-        # Experienced-Engineer: Turn 0-1: 每次1个, Turn 2: 2个, Turn 3+: 2个
-        if dialogue_turn <= 1:
-            max_points = 1
-        elif dialogue_turn == 2:
-            max_points = 2
-        else:  # dialogue_turn >= 3
-            max_points = 2
+        # Experienced-Engineer: 每次固定3个（expertise高，能一次性reveal更多信息）
+        max_points = 3
     
     question_lower = assistant_question.lower()
     disclosure_parts = []
@@ -92,8 +81,10 @@ def get_disclosure_info(
                     if expertise == "high":
                         available_info_points.append(f"Edge case: {ec}")
                     elif expertise == "low":
-                        available_info_points.append("可能需要处理一些特殊情况。")
-                        break  # 新手只说一个模糊的点
+                        # 使用简单英文代替中文，避免reconstruction失败
+                        available_info_points.append(f"Should handle: {ec}")  # 使用简单英文
+                        if i == 0:
+                            break  # 新手第一个信息点后停止（如果max_points=1）
                     else:
                         available_info_points.append(f"Should handle: {ec}")
             
@@ -103,7 +94,8 @@ def get_disclosure_info(
                     if expertise == "high":
                         available_info_points.append(f"Input constraint: {constraint}")
                     elif expertise == "low":
-                        available_info_points.append("输入有默认值。")
+                        # 使用简单英文代替中文，避免reconstruction失败
+                        available_info_points.append(f"Input has default value: {constraint}")  # 使用简单英文
                         break
                     else:
                         available_info_points.append(f"Note: {constraint}")
@@ -120,7 +112,8 @@ def get_disclosure_info(
                 if expertise == "high":
                     available_info_points.append(f"Output specification: {spec}")
                 elif expertise == "low":
-                    available_info_points.append("需要返回正确格式的结果。")
+                    # 使用简单英文代替中文，避免reconstruction失败
+                    available_info_points.append("Should return the correct format.")  # 使用简单英文
                 else:
                     # 提取关键部分
                     if "dict" in spec.lower():
@@ -136,7 +129,8 @@ def get_disclosure_info(
                     if expertise == "high":
                         available_info_points.append(f"Output format: {fmt}")
                     elif expertise == "low":
-                        available_info_points.append("输出有特定格式要求。")
+                        # 使用简单英文代替中文，避免reconstruction失败
+                        available_info_points.append(f"Output format requirement: {fmt}")  # 使用简单英文
                         break
                     else:
                         available_info_points.append(f"Output: {fmt}")
@@ -151,7 +145,8 @@ def get_disclosure_info(
                 if expertise == "high":
                     available_info_points.append(f"Validation: {rules[0]}")
                 else:
-                    available_info_points.append("需要处理错误情况。")
+                    # 使用简单英文代替中文，避免reconstruction失败
+                    available_info_points.append("Should handle error cases.")  # 使用简单英文
     
     # 如果没有匹配的问题类别，按顺序从masked_fields中提取
     if not available_info_points:
@@ -162,7 +157,8 @@ def get_disclosure_info(
             if expertise == "high":
                 available_info_points.append(f"Input constraint: {constraint}")
             elif expertise == "low":
-                available_info_points.append("输入有默认值。")
+                # 使用简单英文代替中文，避免reconstruction失败
+                available_info_points.append(f"Input has default value: {constraint}")  # 使用简单英文
             else:
                 available_info_points.append(f"Note: {constraint}")
         
@@ -171,7 +167,8 @@ def get_disclosure_info(
             if expertise == "high":
                 available_info_points.append(f"Output format: {fmt}")
             elif expertise == "low":
-                available_info_points.append("输出有特定格式要求。")
+                # 使用简单英文代替中文，避免reconstruction失败
+                available_info_points.append(f"Output format requirement: {fmt}")  # 使用简单英文
             else:
                 available_info_points.append(f"Output: {fmt}")
     
@@ -195,12 +192,10 @@ def generate_answer_with_disclosure(
     """
     生成包含disclosure信息的回答
     
-    实现渐进式披露机制（更慢的披露速度，让对话持续更久）:
+    实现渐进式披露机制（简化版：固定披露步长）:
     - Novice-Learner: 每次固定1个信息点（始终不变）
-    - Busy-Developer: Turn 0-2: 每次1个, Turn 3+: 2个
-    - Experienced-Engineer: Turn 0-1: 每次1个, Turn 2: 2个, Turn 3+: 2个
-    - 这样Turn 0-2累计：Novice 3个, Busy 3个, Experienced 4个
-    - 预期能看到更多Turn 3+的对话
+    - Busy-Developer: 每次固定1个信息点（始终不变，时间压力大）
+    - Experienced-Engineer: 每次固定3个信息点（始终不变，expertise高，能一次性reveal更多）
     
     Args:
         assistant_question: Assistant的澄清问题

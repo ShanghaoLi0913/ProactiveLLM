@@ -32,6 +32,15 @@ EXPERTISE_MAP = {
     "high": 0.9,
 }
 
+# Mapping from persona to vague reply probability (for first clarify at Turn 0)
+# Models unhelpful user feedback with configurable probability, reflecting real-world ambiguity
+# Higher values = more likely to give vague/unhelpful replies
+VAGUE_REPLY_PROB_MAP = {
+    "Busy-Developer": 0.5,           # Busy users more likely to be vague/unhelpful (time pressure)
+    "Experienced-Engineer": 0.1,   # Experienced engineers rarely vague (high expertise), but may occasionally be impatient
+    "Novice-Learner": 0.25,         # Novice users may give vague replies due to limited expression ability, even when trying to help
+}
+
 
 PERSONAS = [
     # 1. Novice Learner: 新手学习者
@@ -248,24 +257,55 @@ def react(user_msg: str, assistant_msg: str, persona: Persona,
         
         if random.random() < effective_patience:
             # User answers (with probability = patience)
-            # 状况三：强制追问采样 - 用户第一次回复模糊，迫使再次Clarify
-            # 策略：Turn 0 的第一次 Clarify，对复杂任务有更高概率给模糊回复
+            # 改进：可配置的模糊回复概率，与persona关联（更真实、更有研究价值）
+            # We model unhelpful user feedback with a configurable probability, reflecting real-world ambiguity.
             is_first_clarify = dialogue_turn == 0
             should_give_vague_answer = False
-            if is_first_clarify and disclosure_rule and random.random() < 0.65:
+            vague_prob = VAGUE_REPLY_PROB_MAP.get(persona.name, 0.2)  # Default 0.2 if persona not found
+            
+            if is_first_clarify and disclosure_rule and random.random() < vague_prob:
                 disclosure_info = disclosure_rule.get("disclosure_info", {})
                 input_constraints = disclosure_info.get("input_constraints", {})
                 edge_cases = input_constraints.get("edge_cases", [])
-                # 如果有多个edge_cases（信息需要分步披露），第一次可以给模糊回复
+                # 如果有多个edge_cases（信息需要分步披露），可以给模糊回复
                 if len(edge_cases) > 1:
                     should_give_vague_answer = True
             
             if should_give_vague_answer:
-                # 给模糊回复，迫使Assistant再次Clarify
-                if persona.domain == "coding":
-                    user_reply = "I want a general solution that works. Just do it the standard way."
+                # 改进：模糊回复也要包含部分disclosure信息（不短路信息流）
+                # 策略：vague + partial disclosure
+                # 即使用户说得模糊，也要带一点可用信息（至少一个字段）
+                vague_base = "I want a general solution that works. Just do it the standard way."
+                
+                # 尝试从disclosure_rule中提取一个信息点
+                partial_disclosure = None
+                if disclosure_rule:
+                    from simulator.disclosure import get_disclosure_info
+                    disclosure_info_text = get_disclosure_info(
+                        assistant_msg,
+                        disclosure_rule,
+                        persona.expertise,
+                        dialogue_turn
+                    )
+                    if disclosure_info_text:
+                        # 提取第一个信息点（简化处理）
+                        info_points = disclosure_info_text.split('.')
+                        if info_points:
+                            partial_disclosure = info_points[0].strip()
+                
+                # 构建模糊回复 + 部分disclosure信息
+                if partial_disclosure:
+                    if persona.domain == "coding":
+                        user_reply = f"{vague_base} Also, {partial_disclosure.lower()}."
+                    else:
+                        user_reply = f"Just a general plan is fine. You decide. Also, {partial_disclosure.lower()}."
                 else:
-                    user_reply = "Just a general plan is fine. You decide."
+                    # Fallback: 如果没有disclosure信息，至少提到一个常见的edge case
+                    if persona.domain == "coding":
+                        user_reply = f"{vague_base} Also, please make sure it handles empty input."
+                    else:
+                        user_reply = "Just a general plan is fine. You decide."
+                
                 # 标记为回答了，但清晰度很低
                 answered = 1
                 reject_signal = 0
