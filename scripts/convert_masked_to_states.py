@@ -33,6 +33,16 @@ def convert_masked_task_to_state(masked_task: Dict, domain: str = "coding") -> D
     # 计算task_uncertainty（masked版本应该不确定性更高）
     task_uncertainty = compute_task_uncertainty(query)
     
+    # 初始化disclosure_rule，添加disclosed_info字段用于跟踪已披露信息
+    disclosure_rule = masked_task.get("disclosure_rule", {}).copy()
+    if "disclosed_info" not in disclosure_rule:
+        disclosure_rule["disclosed_info"] = {
+            "edge_cases": [],
+            "input_constraints": [],
+            "output_format": [],
+            "validation_rules": [],
+        }
+    
     state = {
         "id": masked_task.get("task_id", ""),
         "domain": domain,
@@ -45,8 +55,8 @@ def convert_masked_task_to_state(masked_task: Dict, domain: str = "coding") -> D
         "canonical_solution": masked_task.get("canonical_solution", ""),
         "test": masked_task.get("test", ""),
         "entry_point": masked_task.get("entry_point", ""),
-        # disclosure_rule用于simulator
-        "disclosure_rule": masked_task.get("disclosure_rule", {}),
+        # disclosure_rule用于simulator，包含disclosed_info用于跟踪已披露信息
+        "disclosure_rule": disclosure_rule,
     }
     
     return state

@@ -393,7 +393,7 @@ else:
 ## 🎯 立即行动（本周）
 
 1. **今天**：
-   - [ ] 修复`GENERATE_COLM_DATA_V2.sh`，使用`bigcodebench_masked_states.jsonl`
+   - [ ] 修复`scripts/ops/GENERATE_COLM_DATA_V2.sh`，使用`bigcodebench_masked_states.jsonl`
    - [ ] 重新生成100 states数据（包含测试用例）
 
 2. **明天**：

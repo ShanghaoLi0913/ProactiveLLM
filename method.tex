@@ -1,0 +1,234 @@
+\section{Method}
+
+We approach clarification as an information-seeking decision problem. 
+Given an underspecified task request, the assistant must decide whether to acquire additional information through clarification or proceed with execution based on the currently available specification. 
+
+Our method learns this decision policy from simulated interaction trajectories. 
+Each trajectory captures a multi-turn interaction between the assistant and a simulated user, including clarification attempts, user responses, and the final task outcome. 
+By evaluating these trajectories, we measure both the task success achieved by the final solution and the interaction cost introduced by clarification.
+
+Using these signals, we construct preference comparisons between alternative interaction trajectories and train the model with preference optimization. This allows the model to learn when clarification improves task success and when direct execution is preferable under different interaction contexts.
+
+Our approach consists of two main components: (1) a reward function that balances task success against interruption cost, and (2) a trajectory generation pipeline with a user simulator that models persona-aware user behaviors. We detail these components in the following subsections.
+
+\subsection{Decision Policy}
+
+We model clarification as a sequential decision process. 
+At interaction step $j$, the assistant observes a dialogue state $s_j$, which contains the current task description and interaction context: $s_j = (q_j, u_j, d_j, r_j, p)$, where $q_j$ denotes the current task description (which accumulates conversation history as the dialogue proceeds), $u_j \in [0,1]$ captures the task uncertainty reflecting how incomplete the task specification is, $d_j$ is the current dialogue turn number, $r_j \in \{0,1\}$ indicates whether the previous turn was rejected by the user, and $p$ encodes the user persona.
+
+Based on this state, the assistant selects an action $a_j \in \{\text{Clarify}, \text{Execute}\}$, where \textbf{Clarify} asks the user for additional information and \textbf{Execute} directly produces a task solution.
+
+The assistant follows a decision policy parameterized by $\theta$: $a_j \sim \pi_\theta(a_j \mid s_j)$. During training, we learn this policy from preference comparisons over interaction trajectories. For trajectory generation (before training), we use a heuristic selection function that considers task uncertainty, persona patience, and dialogue history.
+
+An interaction between the assistant and the user produces a trajectory $\tau = (s_1, a_1, s_2, a_2, \dots, s_K, a_K)$, which terminates when the assistant executes the task or when the user ends the interaction.
+
+\subsection{Reward Design}
+
+The reward function is designed to capture the trade-off between task completion success and the cumulative cost of interrupting the user. We decompose the reward into two components: task success reward and interruption cost. The overall objective is to maximize task completion while minimizing user frustration from excessive or ineffective clarification.
+
+\subsubsection{Task Success Reward}
+
+The task success reward $R_{\text{task}}$ is a sparse reward that measures whether the generated solution successfully completes the user's task. This reward is only assigned when the assistant selects \textbf{Execute} and generates a solution; if $a_t = \text{Clarify}$, then $R_{\text{task}} = 0.0$ since the task is not completed in that turn.
+
+For coding tasks, we evaluate solutions by executing test cases when available. The reward depends on both test pass rate and whether critical information (e.g., edge cases) was acquired through previous clarification:
+
+\begin{equation}
+R_{\text{task}} = \begin{cases}
+1.0 & \text{if pass rate } > 0.5 \text{ and } h_{\text{edge}} = 1 \\
+0.7 & \text{if pass rate } > 0.5 \text{ and } U < 0.4 \\
+0.4 & \text{if pass rate } > 0.5 \text{ and } 0.4 \leq U < 0.7 \\
+0.1 & \text{if pass rate } > 0.5 \text{ and } U \geq 0.7 \\
+0.0 & \text{if pass rate } \leq 0.5 \text{ or no code generated}
+\end{cases}
+\end{equation}
+
+where:
+\begin{itemize}
+    \item $h_{\text{edge}} \in \{0, 1\}$ indicates whether edge case information was acquired through previous Clarify actions.
+    \item $U \in [0, 1]$ is the task uncertainty at the time of execution.
+    \item Pass rate is computed by executing the extracted code against available test cases.
+\end{itemize}
+
+This design creates a causal relationship: acquiring important information through clarification (especially edge cases) before execution leads to higher task success rewards. When task uncertainty is high ($U \geq 0.7$) and no edge case information was acquired, the reward is capped at $0.1$, encouraging the model to clarify first.
+
+When test cases are not available, we use heuristic scoring based on code presence and edge case information, with similar uncertainty-based penalties.
+
+\subsubsection{Interruption Cost}
+
+The interruption cost $C_{\text{interrupt}}$ captures the cumulative cost of interrupting the user with clarification questions. This cost is designed to penalize ineffective or excessive clarification while rewarding effective clarification that helps complete the task.
+
+We model the interruption cost per turn as:
+
+\begin{equation}
+C_{\text{interrupt}}(a_t, o_t) = \begin{cases}
+n_t \cdot (\delta \cdot b_t \cdot r_t + \lambda \cdot b_t - \gamma \cdot b_t \cdot \alpha_t) & \text{if } a_t = \text{Clarify} \\
+0 & \text{if } a_t = \text{Execute}
+\end{cases}
+\end{equation}
+
+where:
+\begin{itemize}
+    \item $n_t$ is the number of clarification questions asked in turn $t$.
+    \item $b_t \in \{0, 1\}$ indicates whether clarification questions were asked ($b_t = 1$ if $n_t > 0$, otherwise $b_t = 0$).
+    \item $\alpha_t \in \{0, 1\}$ indicates whether the user answered the clarification ($\alpha_t = 1$) or not ($\alpha_t = 0$).
+    \item $r_t \in \{0, 1\}$ indicates whether the user rejected the clarification ($r_t = 1$) or not ($r_t = 0$).
+    \item $\delta = 0.8$ is the penalty coefficient for rejected clarifications.
+    \item $\lambda = 0.12$ is the base cost per question, preventing excessive clarification.
+    \item $\gamma = 0.08$ is the reward coefficient for effective clarifications (reduces cost when $\alpha_t = 1$).
+\end{itemize}
+
+This formulation yields three distinct cases based on user response:
+\begin{itemize}
+    \item \textbf{Effective clarification} ($\alpha_t = 1, r_t = 0$): 
+    \begin{equation}
+    C_{\text{interrupt}} = n_t \cdot (\lambda - \gamma) = n_t \cdot 0.04
+    \end{equation}
+    The cost is minimal (near reward), encouraging the model to ask questions when they lead to useful information.
+    
+    \item \textbf{Rejected clarification} ($r_t = 1$): 
+    \begin{equation}
+    C_{\text{interrupt}} = n_t \cdot (\delta + \lambda) = n_t \cdot 0.92
+    \end{equation}
+    The cost is high, strongly penalizing clarifications that frustrate the user.
+    
+    \item \textbf{Unanswered clarification} ($\alpha_t = 0, r_t = 0$): 
+    \begin{equation}
+    C_{\text{interrupt}} = n_t \cdot \lambda = n_t \cdot 0.12
+    \end{equation}
+    The cost is moderate, penalizing questions that do not receive responses.
+\end{itemize}
+
+If $a_t = \text{Execute}$, then $C_{\text{interrupt}} = 0$ since no interruption occurs.
+
+\subsubsection{Total Reward}
+
+The total reward for a single turn combines task success reward and interruption cost:
+
+\begin{equation}
+R(s_t, a_t, s_{t+1}) = w_{\text{task}} \cdot R_{\text{task}}(s_{t+1}) - w_{\text{interrupt}} \cdot C_{\text{interrupt}}(a_t, o_t)
+\end{equation}
+
+where $w_{\text{task}} = 1.0$ and $w_{\text{interrupt}} = 0.3$ are weighting parameters that balance the importance of task completion against user interruption. The weight $w_{\text{interrupt}} = 0.3$ is chosen to amplify the difference between effective and ineffective clarifications while maintaining task success as the primary objective.
+
+\textbf{Special case}: If the user stops the interaction (indicated by $r_t = 1$ and conversation termination), the reward is set to $R = 0.0$ regardless of task success. This reflects that user termination represents a fundamental failure of the interaction, regardless of any partial progress made.
+
+\subsubsection{Trajectory-Level Reward}
+
+For multi-turn conversations, we compute trajectory-level rewards to properly attribute the value of early clarification actions to the final task outcome. The key insight is that all turns in a trajectory share the final task outcome, but each turn has its own interruption cost.
+
+For each turn $t$ in a trajectory, we compute the reward as:
+
+\begin{equation}
+R_t = w_{\text{task}} \cdot R_{\text{task}}^{\text{final}} - w_{\text{interrupt}} \cdot C_{\text{interrupt}}(a_t, o_t)
+\end{equation}
+
+where $R_{\text{task}}^{\text{final}}$ is the task success reward from the final Execute action in the trajectory (or $0.0$ if no Execute action succeeded). This value is shared across all turns in the same trajectory, ensuring that early Clarify actions receive credit if they contribute to the final task success.
+
+This design allows early Clarify actions to be evaluated based on their contribution to the final task outcome. For example, a Clarify action in turn 1 that leads to acquiring edge case information will receive credit through $R_{\text{task}}^{\text{final}} = 1.0$ if the final Execute action succeeds with $h_{\text{edge}} = 1$, even though the Clarify action itself has $R_{\text{task}} = 0.0$ in that turn. Each turn's reward $R_t$ is then used independently for constructing preference pairs in DPO training.
+
+\subsection{Trajectory Generation with Simulated Users}
+
+To train the clarification policy, we construct a simulation framework that generates multi-turn interactions between the assistant and synthetic users. A key advantage of this framework is its generality: it can transform any standard benchmark (e.g., BigCodeBench for coding tasks) into a multi-turn, interactive training scenario through a two-step process—masking task details to create underspecified requests, and simulating user responses to reveal information progressively. This approach enables automatic generation of diverse training trajectories from existing benchmarks without requiring human annotators or pre-existing multi-turn datasets. The framework consists of three components: task masking, user personas, and a user simulator that models interactive behavior.
+
+\subsubsection{Task Masking and State Construction}
+
+To create scenarios where clarification is necessary, we start with fully specified tasks from standard benchmarks and mask critical information to produce underspecified task requests. Specifically, we remove information such as input constraints, output format requirements, edge cases, and validation rules from the original task description. This masking process transforms static, single-turn benchmarks into dynamic, multi-turn interaction scenarios where the assistant must actively seek information through clarification.
+
+For each masked task, we construct an initial dialogue state $s_1$. 
+This state includes the masked task description $q_1$, an initial task uncertainty score $u_1 \in [0,1]$ computed heuristically from the masked query text (based on factors such as query length, the presence of question marks, and ambiguous keywords), the dialogue turn index $d_1 = 0$, and a reject indicator $r_1 = 0$ indicating that no clarification rejection has occurred yet. 
+The query representation $q_1$ initially contains only the masked task description, and conversation history is progressively accumulated into $q_j$ as the interaction proceeds. 
+The user persona $p$ is sampled according to the persona configuration.
+The masked information is stored in a disclosure rule accessible only to the user simulator, which reveals parts of this hidden information when the assistant asks clarification questions, according to the persona's expertise level.
+
+This design creates a natural information-seeking scenario in which clarification actions allow the assistant to progressively recover missing task requirements.
+
+\subsubsection{User Personas}
+
+To model heterogeneous user preferences in collaborative interactions, we characterize users using two interpretable parameters: \textit{patience} and \textit{expertise}. 
+Patience reflects the user's tolerance for additional clarification rounds and determines the probability of answering clarification questions, which decays over dialogue turns. 
+Expertise captures the user's ability to provide precise and informative answers when clarification is requested; in our design, it also determines the amount of masked information revealed per clarification round, with higher expertise enabling more efficient information disclosure.
+
+These two parameters provide a compact abstraction of real user behavior and allow the simulator to generate a wide range of interaction styles.
+Different user personas are instantiated as specific combinations of these parameters. 
+For example, users with low patience may prefer rapid execution with minimal interruptions, while users with higher expertise can provide more informative responses that help the assistant resolve task ambiguity. 
+
+In our coding experiments, we instantiate three representative personas:
+\begin{itemize}
+\item \textbf{Busy-Developer}: low patience and moderate expertise, prioritizing rapid execution and frequently rejecting clarification.
+\item \textbf{Experienced-Engineer}: moderate patience and high expertise, answering meaningful clarification questions while rejecting redundant ones.
+\item \textbf{Novice-Learner}: high patience and lower expertise, tolerant of multiple clarification rounds and willing to provide detailed explanations.
+\end{itemize}
+This parameterized design allows the framework to simulate diverse collaboration behaviors while remaining easily extensible to other domains and interaction settings.
+
+\subsubsection{User Simulator}
+
+The user simulator models how different personas respond to assistant actions. For Clarify actions, the simulator determines:
+
+\begin{enumerate}
+    \item \textbf{Answer probability}: The probability that the user answers a clarification question is:
+    \begin{equation}
+    P(\text{answer} | \text{Clarify}, p, t) = p_{\text{base}} \cdot (0.85)^t
+    \end{equation}
+    where $p_{\text{base}}$ is the base patience level of the persona and $t$ is the dialogue turn number. This models patience decay over multiple turns.
+    
+    \item \textbf{Reject probability}: $P(\text{reject}) = 1 - P(\text{answer})$.
+    
+    \item \textbf{Answer clarity}: If the user answers, the clarity of the answer is determined by the persona's expertise level:
+    \begin{equation}
+    c_t = \text{EXPERTISE\_MAP}[\text{expertise}]
+    \end{equation}
+    where expertise levels map to clarity values (low: 0.3, mid: 0.6, high: 0.9).
+    
+    \item \textbf{Information disclosure}: When the user answers, the simulator reveals masked task information from the disclosure rule. The amount of information disclosed per turn is determined by the persona's expertise level: low expertise reveals 1 information point per turn, moderate expertise reveals 1-2 points depending on dialogue turn, and high expertise reveals 1-2 points with earlier transitions to higher disclosure rates. This design ensures that higher expertise enables more efficient information acquisition, while lower expertise requires more clarification rounds to fully recover masked requirements.
+\end{enumerate}
+
+For Execute actions, the user provides minimal reaction (e.g., "Continue.") until the final solution is evaluated.
+
+The simulator also implements persona-specific behaviors:
+\begin{itemize}
+    \item \textbf{Busy-Developer}: Rejection probability is increased to target $>80\%$ reject rate for Clarify actions.
+    \item \textbf{Experienced-Engineer}: Rejects obvious or redundant questions more frequently (patience reduced by 50\% for obvious questions).
+    \item \textbf{Novice-Learner}: Maintains high patience across multiple turns, rarely rejects.
+\end{itemize}
+
+\subsubsection{Multi-turn Trajectory Generation}
+
+For each initial state $s_1$, we generate a multi-turn conversation trajectory as follows:
+
+\begin{enumerate}
+    \item \textbf{Action Selection}: At each turn $t$, select an action $a_t$ based on the current state $s_t$ and persona $p$. We use a heuristic selection function that considers:
+    \begin{itemize}
+        \item Task uncertainty $U_t$: Higher uncertainty increases the likelihood of Clarify.
+        \item Persona patience: Lower patience increases the likelihood of Execute.
+        \item Previous reject signal: If $r_{t-1} = 1$, always select Execute.
+        \item Dialogue turn: Higher turn numbers increase the likelihood of Execute.
+    \end{itemize}
+    
+    \item \textbf{Assistant Message Generation}: Generate the assistant's message $m_t$ based on the selected action:
+    \begin{itemize}
+        \item If $a_t = \text{Clarify}$: Generate 1-2 clarifying questions using a language model.
+        \item If $a_t = \text{Execute}$: Generate a solution (e.g., code implementation) using a language model.
+    \end{itemize}
+    
+    \item \textbf{User Reaction}: Simulate user reaction $o_t$ using the user simulator based on the persona $p$ and dialogue turn $t$.
+    
+    \item \textbf{State Update}: Update the state for the next turn:
+    \begin{itemize}
+        \item If $a_t = \text{Clarify}$ and the user answered ($\alpha_t = 1$): Update task uncertainty $U_{t+1} = U_t \cdot (1 - 0.5 \cdot c_t)$ and append conversation history to $q_{t+1}$.
+        \item If $a_t = \text{Clarify}$ and the user rejected ($r_t = 1$): Set $r_{t+1} = 1$ and update $q_{t+1}$.
+        \item If $a_t = \text{Execute}$: Terminate the conversation.
+    \end{itemize}
+    
+    \item \textbf{Termination Check}: The conversation terminates when:
+    \begin{itemize}
+        \item The assistant selects Execute (regardless of task completion).
+        \item The user rejects the assistant's action ($r_t = 1$).
+        \item A maximum number of turns $K$ is reached.
+    \end{itemize}
+\end{enumerate}
+
+\subsubsection{Preference Pair Generation}
+
+After generating trajectories, we compute rewards for each turn and construct preference pairs for DPO training. For each state-persona combination, we rank trajectories by their total reward and create pairs $(s, a^+, a^-)$ where $a^+$ is the chosen action (higher reward) and $a^-$ is the rejected action (lower reward).
+
+The preference pairs are constructed at the trajectory level, ensuring that the model learns to prefer action sequences that lead to better final outcomes while minimizing interruption cost.

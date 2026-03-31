@@ -8,11 +8,10 @@ import re
 import subprocess
 import tempfile
 import os
+import signal
 from pathlib import Path
 from typing import Dict, List, Optional
 import argparse
-from contextlib import nullcontext
-
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from peft import PeftModel
@@ -255,13 +254,19 @@ def score_code_passfail(code: str, tests: str, timeout: int = 30, debug: bool = 
         temp_path = f.name
     
     try:
+        # Use subprocess.run with timeout (more reliable than Popen + threading)
+        # This ensures the process is killed if it exceeds timeout
         result = subprocess.run(
             ["python", temp_path],
             capture_output=True,
             text=True,
-            timeout=timeout
+            timeout=timeout,
+            # Add preexec_fn to set process group for better kill control
+            preexec_fn=os.setsid if hasattr(os, 'setsid') else None
         )
-        output = (result.stdout or "") + "\n" + (result.stderr or "")
+        stdout = result.stdout or ""
+        stderr = result.stderr or ""
+        output = stdout + "\n" + stderr
         # 解析unittest输出，计算部分通过率
         total = None
         m_total = re.search(r"Ran\s+(\d+)\s+tests?", output)
@@ -281,14 +286,23 @@ def score_code_passfail(code: str, tests: str, timeout: int = 30, debug: bool = 
             passed = max(0, total - failures - errors)
             return passed / total
         # 执行失败且无法解析，记录错误信息（仅在debug模式下）
-            if debug:
-                print(f"   执行错误 (returncode={result.returncode}):")
-                if result.stderr:
-                    print(f"   stderr: {result.stderr[:500]}")
-                if result.stdout:
-                    print(f"   stdout: {result.stdout[:500]}")
-            return 0.0
-    except subprocess.TimeoutExpired:
+        if debug:
+            print(f"   执行错误 (returncode={result.returncode}):")
+            if result.stderr:
+                print(f"   stderr: {result.stderr[:500]}")
+            if result.stdout:
+                print(f"   stdout: {result.stdout[:500]}")
+        return 0.0
+    except subprocess.TimeoutExpired as e:
+        # Try to kill the process group if setsid was used
+        if hasattr(os, 'setsid'):
+            try:
+                os.killpg(os.getpgid(e.process.pid), signal.SIGKILL)
+            except:
+                try:
+                    e.process.kill()
+                except:
+                    pass
         if debug:
             print(f"   执行超时 (>{timeout}s)")
         return 0.0
@@ -297,7 +311,6 @@ def score_code_passfail(code: str, tests: str, timeout: int = 30, debug: bool = 
             print(f"   执行异常: {e}")
         return 0.0
     finally:
-        import os
         try:
             os.unlink(temp_path)
         except:
@@ -307,7 +320,7 @@ def score_code_passfail(code: str, tests: str, timeout: int = 30, debug: bool = 
 # Import unified render_state function - MUST be identical to training
 # (Already has PROJECT_ROOT in sys.path from earlier)
 from policy.render_state import render_state
-from policy.infer import get_template
+from policy.infer import get_template, build_action_selection_chat_prompt, pick_action_from_logits
 
 
 def set_global_seed(seed: int) -> None:
@@ -341,30 +354,13 @@ def set_global_seed(seed: int) -> None:
 
 
 def select_action_with_loaded_model(state_text: str, tokenizer, model) -> str:
-    """Select action using logits on the next token, without re-loading models per sample."""
-    inputs = tokenizer(state_text, return_tensors="pt")
+    """Next-token argmax over Clarify/Execute (chat-wrapped prompt, same as training)."""
+    prompt = build_action_selection_chat_prompt(state_text, tokenizer)
+    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
     inputs = {k: v.to(model.device) for k, v in inputs.items()}
-
     with torch.no_grad():
         logits = model(**inputs).logits
-        next_token_logits = logits[0, -1, :]
-
-        action_tokens = ["Clarify", "Execute"]
-        action_token_ids = [tokenizer.convert_tokens_to_ids(token) for token in action_tokens]
-
-        valid_actions = []
-        valid_ids = []
-        for token, token_id in zip(action_tokens, action_token_ids):
-            if token_id is not None:
-                valid_actions.append(token)
-                valid_ids.append(token_id)
-
-        if not valid_ids:
-            return "Execute"
-
-        action_logits = next_token_logits[valid_ids]
-        best_action_idx = torch.argmax(action_logits).item()
-        return valid_actions[best_action_idx]
+    return pick_action_from_logits(tokenizer, logits[0, -1, :])
 
 
 def generate_with_template_local(
@@ -391,10 +387,8 @@ def generate_with_template_local(
     inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
     inputs = {k: v.to(model.device) for k, v in inputs.items()}
 
-    # For PeftModel, disable adapter during code generation to keep "separated" behavior.
-    adapter_ctx = model.disable_adapter() if hasattr(model, "disable_adapter") else nullcontext()
-
-    with torch.no_grad(), adapter_ctx:
+    # 与 evaluate_multi_turn_persona 一致：生成阶段使用 LoRA（训练后的策略）
+    with torch.no_grad():
         outputs = model.generate(
             **inputs,
             max_new_tokens=max_new_tokens,
@@ -410,54 +404,6 @@ def generate_with_template_local(
     return generated_text
 
 
-def generate_response(model, tokenizer, prompt: str, max_length: int = 2048) -> str:
-    """使用模型生成响应"""
-    # 对于Instruct模型，使用chat template
-    if hasattr(tokenizer, 'apply_chat_template') and tokenizer.chat_template:
-        messages = [{"role": "user", "content": prompt}]
-        prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    
-    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=max_length)
-    inputs = {k: v.to(model.device) for k, v in inputs.items()}
-
-    with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=512,
-            do_sample=True,
-            temperature=0.3,
-            top_p=0.9,
-            pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
-        )
-    generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-    # 移除prompt部分
-    if prompt in generated_text:
-        response = generated_text[len(prompt):].strip()
-    else:
-        response = generated_text.strip()
-    return response
-
-
-def extract_action_from_response(response: str, state: Dict) -> str:
-    """从响应中提取action (Clarify/Execute)"""
-    response_lower = response.lower()
-    
-    # 检查是否包含明确的action标记
-    if "action:" in response_lower or "proactivity:" in response_lower:
-        for action in ["Clarify", "Execute"]:
-            if action in response:
-                return action
-    
-    # 基于内容推断
-    question_count = response.count("?")
-    if question_count >= 1:
-        return "Clarify"
-    elif "code" in response_lower or "solution" in response_lower or "```" in response:
-        return "Execute"
-    else:
-        return "Execute"  # 默认执行
-
-
 def evaluate_model(
     model_dir: str,
     base_model: str,
@@ -469,33 +415,29 @@ def evaluate_model(
     code_temperature: float = 0.7,
     code_top_p: float = 0.9,
     code_do_sample: bool = True,
+    use_openai_for_code: bool = False,
+    full_query: bool = False,
+    strict_execute_task_score: bool = False,
+    verbose: bool = False,
 ):
     """评估DPO模型"""
-    print(f"📊 加载模型: {model_dir}")
-    print(f"📊 Base模型: {base_model}")
-    print(f"🎲 Seed: {seed}")
+    import random
+
     set_global_seed(seed)
+    fq = "full (original_instruct_prompt)" if full_query else "masked (state.query)"
+    gen = "gpt-4o-mini" if use_openai_for_code else "local Llama+LoRA"
+    strict = ", unittest only if Execute" if strict_execute_task_score else ""
+    print(
+        f"📊 eval_dpo model={model_dir} base={base_model} seed={seed} "
+        f"query={fq} gen={gen}{strict}",
+        flush=True,
+    )
     
-    # Scheme A: Separated Architecture
-    # Policy model only predicts action, code generation is separate
-    print("📋 使用分离架构 (Scheme A)")
-    print("   - Policy模型: 预测action (Clarify/Execute)")
-    print("   - Code生成: 使用独立模型（不受DPO影响）")
-    
-    # 加载测试数据
     prefs = load_jsonl(Path(prefs_path))
-    # IMPORTANT:
-    # Do NOT take the first N examples — prefs JSONL ordering is arbitrary and can heavily
-    # bias results. Instead, sample deterministically using the evaluation seed.
-    if max_samples:
-        if max_samples >= len(prefs):
-            pass
-        else:
-            import random
-            rng = random.Random(seed)
-            prefs = rng.sample(prefs, k=max_samples)
+    if max_samples is not None and max_samples < len(prefs):
+        prefs = random.Random(seed).sample(prefs, k=max_samples)
     
-    print(f"📊 评估 {len(prefs)} 个样本", flush=True)
+    print(f"📊 samples={len(prefs)}", flush=True)
     
     results = []
     task_success_count = 0
@@ -505,19 +447,10 @@ def evaluate_model(
     execute_count = 0
     execute_success_count = 0
     
-    # Code generation strategy:
-    # 1. If OpenAI API is available, use it (higher quality)
-    # 2. Otherwise, use base Llama model (no API needed)
-    use_openai = os.environ.get("OPENAI_API_KEY") is not None
-    if use_openai:
-        print("✅ 使用OpenAI API进行代码生成")
-        code_model_name = None
-    else:
-        print("✅ 使用Base Llama模型进行代码生成（不需要API）")
-        code_model_name = base_model  # Use base Llama model for code generation
-
-    # Load policy model ONCE (previously re-loaded per sample, making eval extremely slow and noisy)
-    print("🔧 预加载Policy模型（一次加载，循环复用）", flush=True)
+    use_openai = use_openai_for_code
+    if use_openai and not os.environ.get("OPENAI_API_KEY"):
+        raise RuntimeError("--use_openai_for_code 需要 OPENAI_API_KEY")
+    print("🔧 loading policy once…", flush=True)
     
     # Get HF token from environment
     hf_token = os.getenv("HF_TOKEN")
@@ -548,34 +481,53 @@ def evaluate_model(
     if policy_tokenizer.pad_token is None:
         policy_tokenizer.pad_token = policy_tokenizer.eos_token
 
-    # Load base model - try 8-bit quantization first (like evaluate_v17)
-    # This may help avoid download issues
-    print(f"🔄 加载base model (尝试8-bit量化以节省内存)...", flush=True)
+    print("loading base model (8-bit if available)…", flush=True)
+    base_model_obj = None
     try:
         from transformers import BitsAndBytesConfig
+
         quantization_config = BitsAndBytesConfig(
             load_in_8bit=True,
             llm_int8_threshold=6.0,
         )
-        print("🔄 使用8-bit量化加载模型...", flush=True)
         base_model_obj = AutoModelForCausalLM.from_pretrained(
             base_model,
             quantization_config=quantization_config,
             device_map="auto",
             low_cpu_mem_usage=True,
             token=hf_token if hf_token else None,
+            local_files_only=use_local,
         )
+        print("base: 8-bit", flush=True)
     except Exception as e:
-        print(f"⚠️  8-bit量化失败 ({e}), 使用bfloat16", flush=True)
-    base_model_obj = AutoModelForCausalLM.from_pretrained(
-        base_model,
-        torch_dtype=torch.bfloat16,
-        device_map="auto",
-        low_cpu_mem_usage=True,
+        print(f"base: bf16 (8-bit failed: {e})", flush=True)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        base_model_obj = AutoModelForCausalLM.from_pretrained(
+            base_model,
+            torch_dtype=torch.bfloat16,
+            device_map="auto",
+            low_cpu_mem_usage=True,
             token=hf_token if hf_token else None,
-    )
-    if len(policy_tokenizer) != base_model_obj.get_input_embeddings().num_embeddings:
-        base_model_obj.resize_token_embeddings(len(policy_tokenizer))
+            local_files_only=use_local,
+        )
+
+    n_emb = base_model_obj.get_input_embeddings().num_embeddings
+    if len(policy_tokenizer) != n_emb:
+        print(f"resize embeddings {n_emb} -> {len(policy_tokenizer)}", flush=True)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        try:
+            base_model_obj.resize_token_embeddings(len(policy_tokenizer))
+        except RuntimeError as e:
+            if "out of memory" not in str(e).lower():
+                raise
+            device = next(base_model_obj.parameters()).device
+            base_model_obj = base_model_obj.cpu()
+            torch.cuda.empty_cache()
+            base_model_obj.resize_token_embeddings(len(policy_tokenizer))
+            base_model_obj = base_model_obj.to(device)
+            print("resize: done (via CPU)", flush=True)
 
     try:
         policy_model = PeftModel.from_pretrained(base_model_obj, model_dir)
@@ -585,13 +537,12 @@ def evaluate_model(
     
     for i, pref in enumerate(prefs):
         state = pref["state"]
+        if full_query:
+            state = dict(state)
+            state["query"] = state.get("original_instruct_prompt") or state.get("query", "")
         
-        # Scheme A: Separated Architecture
-        # Step 1: Predict action using policy model
         state_text = render_state(state)
         predicted_action = select_action_with_loaded_model(state_text, policy_tokenizer, policy_model)
-        
-        # Step 2: Generate code using separate code generation
         task_prompt = state.get("query", "")
         domain = state.get("domain", "coding")
         
@@ -601,7 +552,6 @@ def evaluate_model(
             from llm.provider import chat_complete
             response = chat_complete(template, f"[Task]\n{task_prompt}", model="gpt-4o-mini", max_tokens=400)
         else:
-            # If executing, optionally sample multiple code candidates and keep the best by tests.
             if state["domain"] == "coding" and predicted_action == "Execute" and code_samples > 1:
                 best = {"score": -1.0, "response": "", "code": None}
                 for _ in range(code_samples):
@@ -621,6 +571,8 @@ def evaluate_model(
                     else:
                         tests = state.get("convcodeworld_tests")
                         score = score_code_passfail(code_candidate, tests, debug=False) if tests else 0.0
+                    if score is None or score != score:
+                        score = 0.0
                     if score > best["score"]:
                         best = {"score": score, "response": resp, "code": code_candidate}
                 response = best["response"]
@@ -637,92 +589,46 @@ def evaluate_model(
                     do_sample=code_do_sample,
         )
         
-        # 提取代码（如果是coding任务）
-        if state["domain"] == "coding":
-            # If we already picked a best code candidate above, keep it.
-            if code is None:
-                code = extract_code_from_text(response)
-            # 调试信息：记录代码提取情况
-            if not code and (i < 3 or (i + 1) % 20 == 0):
-                # 根据predicted_action判断：Clarify action是问问题，这是正常的
-                if predicted_action == "Clarify":
-                    print(f"\n📋 样本 {i+1}: 预测Clarify action（问问题）")
-                    print(f"   响应类型: 澄清问题（正常行为）")
-                    print(f"   响应预览: {response[:300]}...")
-                else:
-                    # Execute action应该生成代码，如果没有代码才是问题
-                    print(f"\n⚠️  样本 {i+1}: Execute action但未提取到代码")
-                    print(f"   响应长度: {len(response)}")
-                    print(f"   响应预览: {response[:500]}...")
+        if state["domain"] == "coding" and code is None:
+            code = extract_code_from_text(response)
+        if verbose and state["domain"] == "coding":
+            periodic = i < 3 or (i + 1) % 20 == 0
+            if not code and periodic:
+                tag = "Clarify (no code expected)" if predicted_action == "Clarify" else "Execute (missing code)"
+                preview = response[:500] if predicted_action == "Execute" else response[:300]
+                print(f"\n[{i+1}] {tag}\n{preview}...")
             elif code and i < 3:
-                # 对前3个样本，显示完整响应以便调试
-                print(f"\n📝 样本 {i+1} 完整响应:")
-                print("="*80)
-                print(response)
-                print("="*80)
-                print(f"\n📦 提取的代码（清理后）:")
-                print("="*80)
-                print(code)
-                print("="*80)
-                # 检查代码中是否还有测试标记
-                test_markers = ["No syntax errors", "Compilation feedback", "Execution feedback"]
-                has_markers = any(marker in code for marker in test_markers)
-                if has_markers:
-                    print(f"⚠️  警告：提取的代码中仍然包含测试标记！")
-                    for marker in test_markers:
-                        if marker in code:
-                            print(f"   包含标记: {marker}")
-                else:
-                    print(f"✅ 代码已成功清理，不包含测试标记")
-                print("="*80)
-        
-        # 计算task score
+                print(f"\n[{i+1}] response + extracted code:\n{'='*60}\n{response}\n{'='*60}\n{code}\n{'='*60}")
+                for m in ("No syntax errors", "Compilation feedback", "Execution feedback"):
+                    if m in code:
+                        print(f"  warn: code contains marker {m!r}")
+
+        # task score
         task_score = 0.0
         if predicted_action == "Execute":
             execute_count += 1
-        if state["domain"] == "coding" and code:
-            tests = state.get("convcodeworld_tests")
-            if tests:
-                task_score = score_code_passfail(code, tests, debug=(i < 3))
-                if task_score is not None:
-                    test_pass_rates.append(task_score)
-                    if task_score > 0:
-                        task_success_count += 1
-                        if predicted_action == "Execute":
-                            execute_success_count += 1
-                    if task_score >= 0.5:
-                        soft_success_count += 1
-                elif i < 3 or (i + 1) % 20 == 0:
-                    print(f"\n⚠️  样本 {i+1}: 代码执行失败 (score=0)")
-                    print(f"   提取的代码长度: {len(code)}")
-                    print(f"   代码预览: {code[:300]}...")
-                    # 显示完整代码（前3个样本）
-                    if i < 3:
-                        print(f"   完整代码:\n{code}")
-                        print(f"   测试用例长度: {len(tests)}")
-                total_samples += 1
-        elif state["domain"] == "coding" and not code:
-            # 记录没有提取到代码的情况
-            if i < 3 or (i + 1) % 20 == 0:
-                # 根据predicted_action判断：Clarify action是问问题，这是正常的
-                if predicted_action == "Clarify":
-                    print(f"\n📋 样本 {i+1}: 预测Clarify action（问问题）")
-                    print(f"   响应类型: 澄清问题（正常行为，task_score=0）")
-                    print(f"   响应预览: {response[:300]}...")
-                else:
-                    # Execute action应该生成代码
-                    print(f"\n⚠️  样本 {i+1}: Execute action但未提取到代码")
-                    print(f"   响应长度: {len(response)}")
-                    print(f"   响应预览: {response[:300]}...")
-        
-        # 计算interrupt cost（使用新公式）
-        # C_Interrupt = Σ_{t=1}^{T} (δb_t r_t + λb_t - γb_t a_t)
+
+        tests = state.get("convcodeworld_tests") if state["domain"] == "coding" else None
+        run_unit_tests = bool(
+            state["domain"] == "coding" and code and tests
+        )
+        if strict_execute_task_score and predicted_action != "Execute":
+            run_unit_tests = False
+
+        if run_unit_tests:
+            task_score = score_code_passfail(code, tests, debug=(verbose and i < 3))
+            test_pass_rates.append(task_score)
+            if task_score >= 1.0:
+                task_success_count += 1
+                if predicted_action == "Execute":
+                    execute_success_count += 1
+            if task_score >= 0.5:
+                soft_success_count += 1
+            total_samples += 1
+
         n_questions = response.count("?")
-        # 评估时没有user_reaction，假设既没有answered也没有rejected
         meta = {"reject_signal": 0, "answered_clarification": 0}
         interrupt_cost = compute_interrupt_cost_v2(meta, n_questions, response)
-        
-        # 总reward（新公式：R = R_task - C_interrupt）
         total_r = total_reward(task_score, interrupt_cost)
         
         results.append({
@@ -737,12 +643,10 @@ def evaluate_model(
         })
         
         if (i + 1) % 10 == 0:
-            print(f"  处理进度: {i+1}/{len(prefs)}", flush=True)
+            print(f"progress {i+1}/{len(prefs)}", flush=True)
     
-    # 计算统计信息
     task_success_rate = (task_success_count / total_samples * 100) if total_samples > 0 else 0.0
     execute_success_rate = (execute_success_count / execute_count * 100) if execute_count > 0 else 0.0
-    # 过滤掉None值
     valid_rewards = [r["total_reward"] for r in results if r.get("total_reward") is not None]
     valid_task_scores = [r["task_score"] for r in results if r.get("task_score") is not None]
     avg_reward = sum(valid_rewards) / len(valid_rewards) if valid_rewards else 0.0
@@ -750,7 +654,6 @@ def evaluate_model(
     avg_test_pass_rate = sum(test_pass_rates) / len(test_pass_rates) if test_pass_rates else 0.0
     soft_task_success_rate = (soft_success_count / total_samples * 100) if total_samples > 0 else 0.0
     
-    # Action准确率
     action_matches = sum(1 for r in results if r["predicted_action"] == r["chosen_action"])
     action_accuracy = (action_matches / len(results) * 100) if results else 0.0
     
@@ -763,24 +666,25 @@ def evaluate_model(
         "avg_test_pass_rate": avg_test_pass_rate,
         "soft_task_success_rate": soft_task_success_rate,
         "action_accuracy": action_accuracy,
+        "num_prefs_rows": len(results),
+        "task_scored_samples": total_samples,
         "total_samples": len(results),
         "task_evaluated_samples": total_samples,
         "task_success_count": task_success_count,
         "execute_count": execute_count,
         "execute_success_count": execute_success_count,
+        "full_query_eval": full_query,
+        "strict_execute_task_score": strict_execute_task_score,
+        "verbose_eval": verbose,
     }
     
-    print("\n" + "="*50)
-    print("📊 评估结果:")
-    print(f"  Task Success Rate: {task_success_rate:.2f}%")
-    print(f"  Task Success (Execute Only): {execute_success_rate:.2f}%")
-    print(f"  Soft Task Success (>=50% tests): {soft_task_success_rate:.2f}%")
-    print(f"  Predicted Execute Rate: {summary['predicted_execute_rate']:.2f}%")
-    print(f"  Average Reward: {avg_reward:.4f}")
-    print(f"  Average Task Score: {avg_task_score:.4f}")
-    print(f"  Avg Test Pass Rate: {avg_test_pass_rate:.4f}")
-    print(f"  Action Accuracy: {action_accuracy:.2f}%")
-    print("="*50)
+    print(
+        f"\nTSR={task_success_rate:.2f}% (hits {task_success_count}/{total_samples}) | "
+        f"execute-only={execute_success_rate:.2f}% | soft>={soft_task_success_rate:.2f}% | "
+        f"p(Execute)={summary['predicted_execute_rate']:.1f}% | action_acc={action_accuracy:.1f}% | "
+        f"avg_score={avg_task_score:.4f}",
+        flush=True,
+    )
     
     # 保存结果
     if output_path:
@@ -791,7 +695,7 @@ def evaluate_model(
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(output, f, ensure_ascii=False, indent=2)
-        print(f"\n✅ 结果已保存到: {output_path}")
+        print(f"wrote {output_path}", flush=True)
     
     return summary
 
@@ -813,6 +717,26 @@ def main():
         default=True,
         help="是否使用采样生成代码（默认: True）",
     )
+    parser.add_argument(
+        "--use_openai_for_code",
+        action="store_true",
+        help="用 gpt-4o-mini 生成 Clarify/代码（默认：本地训练策略模型）",
+    )
+    parser.add_argument(
+        "--full_query",
+        action="store_true",
+        help="用 original_instruct_prompt 作为 state.query（full），用于 render_state 与代码生成；默认 masked query",
+    )
+    parser.add_argument(
+        "--strict_execute_task_score",
+        action="store_true",
+        help="仅当 predicted_action==Execute 时跑 unittest；TSR/soft TSR 分母只含这些样本（Clarify 仍生成但不计分）",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="打印前几条样本的响应/代码与 unittest stderr（默认安静）",
+    )
     
     args = parser.parse_args()
     
@@ -827,6 +751,10 @@ def main():
         code_temperature=args.code_temperature,
         code_top_p=args.code_top_p,
         code_do_sample=args.code_do_sample,
+        use_openai_for_code=args.use_openai_for_code,
+        full_query=args.full_query,
+        strict_execute_task_score=args.strict_execute_task_score,
+        verbose=args.verbose,
     )
 
 

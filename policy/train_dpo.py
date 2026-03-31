@@ -113,6 +113,7 @@ def train(
         use_fast=True,
         token=hf_token,
         trust_remote_code=False,
+        local_files_only=True,  # 强制使用本地缓存
     )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -149,6 +150,7 @@ def train(
                 torch_dtype=torch.bfloat16 if use_bf16 else torch.float16,
                 low_cpu_mem_usage=True,
                 token=hf_token,
+                local_files_only=True,  # 强制使用本地缓存
             )
             use_qlora = True
         except Exception as e:  # pragma: no cover - runtime safeguard
@@ -159,6 +161,7 @@ def train(
                 device_map=device_map,
                 low_cpu_mem_usage=True,
                 token=hf_token,
+                local_files_only=True,  # 强制使用本地缓存
             )
     else:
         print("⚠️  bitsandbytes not available, using FP16/FP32")
@@ -168,6 +171,7 @@ def train(
             device_map=device_map,
             low_cpu_mem_usage=True,
             token=hf_token,
+            local_files_only=True,  # 强制使用本地缓存
         )
 
     # Resize embeddings after adding special tokens

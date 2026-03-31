@@ -18,6 +18,36 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 
+def build_action_selection_chat_prompt(state_text: str, tokenizer) -> str:
+    """One user message + assistant header, matching policy/train_dpo.to_dpo_format."""
+    messages = [{"role": "user", "content": state_text}]
+    if hasattr(tokenizer, "apply_chat_template") and getattr(tokenizer, "chat_template", None):
+        return tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+    return state_text
+
+
+def pick_action_from_logits(tokenizer, next_token_logits: torch.Tensor) -> str:
+    """Argmax over single-token ids for Clarify / Execute."""
+    pairs = []
+    for tok in ("Clarify", "Execute"):
+        tid = tokenizer.convert_tokens_to_ids(tok)
+        if tid is not None:
+            pairs.append((tok, tid))
+    if not pairs:
+        return "Execute"
+    idx = torch.tensor(
+        [t for _, t in pairs],
+        device=next_token_logits.device,
+        dtype=torch.long,
+    )
+    best = torch.argmax(next_token_logits[idx]).item()
+    return pairs[best][0]
+
+
 def select_action(state_text: str, policy_model_dir: str, base_model: Optional[str] = None) -> str:
     """
     Use policy model to predict action (Clarify/Execute) based on state.
@@ -67,40 +97,14 @@ def select_action(state_text: str, policy_model_dir: str, base_model: Optional[s
     
     model.eval()
     
-    # Tokenize state text
-    inputs = tokenizer(state_text, return_tensors="pt")
+    prompt = build_action_selection_chat_prompt(state_text, tokenizer)
+    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
     inputs = {k: v.to(model.device) for k, v in inputs.items()}
     
-    # Use logits directly to select action token (instead of generating text)
     with torch.no_grad():
         logits = model(**inputs).logits
-        # Get logits for the last token position
         next_token_logits = logits[0, -1, :]
-        
-        # Get token IDs for action tokens
-        action_tokens = ["Clarify", "Execute"]
-        action_token_ids = [tokenizer.convert_tokens_to_ids(token) for token in action_tokens]
-        
-        # Filter out None values (in case token not found)
-        valid_actions = []
-        valid_ids = []
-        for token, token_id in zip(action_tokens, action_token_ids):
-            if token_id is not None:
-                valid_actions.append(token)
-                valid_ids.append(token_id)
-        
-        if not valid_ids:
-            # Fallback if no action tokens found in vocabulary
-            return "Execute"
-        
-        # Get logits for action tokens only
-        action_logits = next_token_logits[valid_ids]
-        
-        # Select action with highest logit
-        best_action_idx = torch.argmax(action_logits).item()
-        best_action = valid_actions[best_action_idx]
-        
-        return best_action
+    return pick_action_from_logits(tokenizer, next_token_logits)
 
 
 def get_template(action: str, domain: str) -> str:

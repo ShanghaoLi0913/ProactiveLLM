@@ -262,7 +262,7 @@ Random Persona                  79.5%            72.8%
 ### **Week 1: 数据生成**
 ```bash
 # 1. 生成100 states测试数据
-bash GENERATE_COLM_DATA_V2.sh  # N_STATES=100
+bash scripts/ops/GENERATE_COLM_DATA_V2.sh  # N_STATES=100
 # 预期: $0.35, 30分钟
 
 # 2. 验证persona差异
@@ -273,7 +273,7 @@ EOF
 
 # 3. 如果测试成功，生成完整数据
 # 修改 N_STATES=500
-bash GENERATE_COLM_DATA_V2.sh
+bash scripts/ops/GENERATE_COLM_DATA_V2.sh
 # 预期: $1.75, 2小时
 ```
 

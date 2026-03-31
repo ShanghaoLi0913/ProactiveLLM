@@ -1,4 +1,7 @@
 #!/bin/bash
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$REPO_ROOT" || exit 1
+
 # Train V19 Model: Persona-Aware Multi-turn DPO
 # 使用最新的ideal preference pairs，支持多轮学习和persona-aware行为
 

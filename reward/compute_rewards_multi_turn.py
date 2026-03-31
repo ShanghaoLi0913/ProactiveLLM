@@ -241,12 +241,18 @@ if __name__ == "__main__":
     parser.add_argument("--w_interrupt", type=float, default=0.3)
     parser.add_argument("--target_execute_ratio", type=float, default=None)
     parser.add_argument("--rebalance_seed", type=int, default=42)
+    parser.add_argument(
+        "--full_query_for_execute",
+        action="store_true",
+        help="Use code_versions['full_query'] for Execute in task_score and prefs when present.",
+    )
     
     args = parser.parse_args()
     
     cfg = RewardConfig(
         w_task=args.w_task,
         w_interrupt=args.w_interrupt,
+        full_query_for_execute=args.full_query_for_execute,
     )
     
     compute_preferences_multi_turn(

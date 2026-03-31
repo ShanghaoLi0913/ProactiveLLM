@@ -49,6 +49,7 @@ Design:
 import argparse
 import json
 import hashlib
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
@@ -77,6 +78,30 @@ class RewardConfig:
     # 提高w_interrupt以放大有效澄清（奖励）和无效澄清（惩罚）的差异
     # 这有助于解决MID塌陷问题：让有效澄清的MID/HIGH获得更高reward
     w_interrupt: float = 0.3  # 提高到0.3，放大interrupt_cost的影响以拉开分差
+    # When True: Execute uses code_versions["full_query"] for task_score + DPO prefs (if present).
+    full_query_for_execute: bool = False
+
+
+def resolve_execute_code_for_training_and_reward(turn: Dict, *, use_full_query: bool) -> str:
+    """Text used for Execute in task_score and preference training.
+
+    If use_full_query and trajectory has code_versions['full_query'], use it (full-spec code).
+    Otherwise assistant_msg. Clarify always uses assistant_msg.
+    """
+    if not use_full_query or turn.get("action") != "Execute":
+        return turn.get("assistant_msg", "") or ""
+    cv = turn.get("code_versions")
+    if not isinstance(cv, dict):
+        return turn.get("assistant_msg", "") or ""
+    fq = cv.get("full_query")
+    if isinstance(fq, str) and fq.strip():
+        return fq
+    return turn.get("assistant_msg", "") or ""
+
+
+def pref_assistant_text(turn: Dict) -> str:
+    """Assistant string for prefs/DPO; prefers assistant_msg_training when set."""
+    return (turn.get("assistant_msg_training") or turn.get("assistant_msg") or "").strip()
 
 
 def load_trajectories(path: Path) -> List[Dict]:
@@ -210,21 +235,34 @@ def compute_rewards_for_group(
             state_with_traj_info = state.copy()
             state_with_traj_info["action"] = t.get("action", "")
             state_with_traj_info["has_edge_cases_info"] = t.get("has_edge_cases_info", False)
-            task_score = compute_task_score(state_with_traj_info, domain, assistant_output=final_assistant_msg)
+            task_code = (
+                resolve_execute_code_for_training_and_reward(t, use_full_query=cfg.full_query_for_execute)
+                if t.get("action") == "Execute"
+                else final_assistant_msg
+            )
+            if not task_code.strip():
+                task_code = final_assistant_msg
+            task_score = compute_task_score(state_with_traj_info, domain, assistant_output=task_code)
             interrupt_cost = total_interrupt_cost
-            assistant_msg_for_pref = final_assistant_msg
+            assistant_msg_for_pref = (
+                resolve_execute_code_for_training_and_reward(t, use_full_query=cfg.full_query_for_execute)
+                if t.get("action") == "Execute"
+                else final_assistant_msg
+            )
             
         else:
             # Single-interaction mode (backward compatibility)
             assistant_msg = t.get("assistant_msg", "")
-            assistant_msg_for_pref = assistant_msg
+            assistant_msg_for_pref = resolve_execute_code_for_training_and_reward(
+                t, use_full_query=cfg.full_query_for_execute
+            )
             
             # Task score (0/1 for coding with tests)
             # 需要传递完整的trajectory信息（包括action和has_edge_cases_info）给compute_task_score
             state_with_traj_info = state.copy()
             state_with_traj_info["action"] = t.get("action", "")
             state_with_traj_info["has_edge_cases_info"] = t.get("has_edge_cases_info", False)
-            task_score = compute_task_score(state_with_traj_info, domain, assistant_output=assistant_msg)
+            task_score = compute_task_score(state_with_traj_info, domain, assistant_output=assistant_msg_for_pref)
             
             # Interrupt cost (Reward_version2: 新公式)
             # C_Interrupt = Σ_{t=1}^{T} (δb_t r_t + λb_t - γb_t a_t)
@@ -291,6 +329,7 @@ def compute_rewards_for_group(
                 "total_reward": total_r,
                 # Ensure preference text is available for multi-turn traces
                 "assistant_msg": assistant_msg_for_pref,
+                "assistant_msg_training": assistant_msg_for_pref,
             }
         )
     return scored
@@ -331,10 +370,12 @@ def compute_trajectory_level_rewards(
     
     for turn in reversed(trajectory_turns):
         action = turn.get("action", "")
-        assistant_msg = turn.get("assistant_msg", "")
+        code_for_score = resolve_execute_code_for_training_and_reward(
+            turn, use_full_query=cfg.full_query_for_execute
+        )
         
         # Only Execute actions can have task_score > 0
-        if action == "Execute" and assistant_msg:
+        if action == "Execute" and code_for_score:
             # Compute task score for this Execute
             # Need to pass state + action info
             state_with_action = turn["state"].copy()
@@ -344,7 +385,7 @@ def compute_trajectory_level_rewards(
             task_score = compute_task_score(
                 state_with_action,
                 domain,
-                assistant_msg
+                code_for_score,
             )
             
             # Use the first (last in reverse) Execute's score as final
@@ -489,6 +530,9 @@ def compute_trajectory_level_rewards(
             
             total_r = float(base_reward + persona_adjustment)
         
+        training_text = resolve_execute_code_for_training_and_reward(
+            turn, use_full_query=cfg.full_query_for_execute
+        )
         # Store results
         scored.append({
             **turn,
@@ -497,6 +541,7 @@ def compute_trajectory_level_rewards(
             "total_reward": total_r,
             "prev_action": prev_action,  # Store prev_action for multi-turn learning
             "dialogue_turn": dialogue_turn,  # Store dialogue_turn for multi-turn learning
+            "assistant_msg_training": training_text,
         })
     
     return scored
@@ -592,7 +637,7 @@ def build_prefs_from_group(scored_trajs: List[Dict], preferred_action: Optional[
             lo = scored_sorted[j]
             if hi.get("action") == lo.get("action"):
                 continue
-            if hi.get("assistant_msg", "").strip() == lo.get("assistant_msg", "").strip():
+            if pref_assistant_text(hi) == pref_assistant_text(lo):
                 continue
 
             # Decide preference by adjusted score (includes tie-break).
@@ -611,7 +656,7 @@ def build_prefs_from_group(scored_trajs: List[Dict], preferred_action: Optional[
             # Both hi and lo are from the same group, so they share the same prev_action and dialogue_turn
             prev_action = hi.get("prev_action")  # Can be None for Turn 0
             dialogue_turn = hi.get("dialogue_turn", hi.get("state", {}).get("dialogue_turn", 0))
-            
+
             prefs.append(
                 {
                     "state": hi["state"],
@@ -619,8 +664,8 @@ def build_prefs_from_group(scored_trajs: List[Dict], preferred_action: Optional[
                     "chosen_action": hi["action"],
                     "rejected_action": lo["action"],
                     # V16: 添加action前缀，让模型学会先决策再生成
-                    "chosen_assistant_msg": f"{hi['action']}\n{hi.get('assistant_msg', '')}",
-                    "rejected_assistant_msg": f"{lo['action']}\n{lo.get('assistant_msg', '')}",
+                    "chosen_assistant_msg": f"{hi['action']}\n{pref_assistant_text(hi)}",
+                    "rejected_assistant_msg": f"{lo['action']}\n{pref_assistant_text(lo)}",
                     "chosen_reward": hi["total_reward"],
                     "rejected_reward": lo["total_reward"],
                     "chosen_task_score": hi["task_score"],
@@ -716,57 +761,188 @@ def compute_preferences(
         
         # Compute trajectory-level rewards
         all_scored = []
-        for traj_id, turns in trajectory_groups.items():
+        total_trajectories = len(trajectory_groups)
+        for idx, (traj_id, turns) in enumerate(trajectory_groups.items(), 1):
             scored_turns = compute_trajectory_level_rewards(turns, cfg)
             all_scored.extend(scored_turns)
+            
+            # Print progress every 50 trajectories or at milestones
+            if idx % 50 == 0 or idx == total_trajectories:
+                progress_pct = (idx / total_trajectories) * 100
+                print(f"📊 Progress: {idx}/{total_trajectories} trajectories ({progress_pct:.1f}%) - Computed rewards for {len(all_scored)} turns", flush=True)
         
         print(f"📊 Computed rewards for {len(all_scored)} turns across all trajectories")
         
-        # Now group by (state_id, dialogue_turn, persona, prev_action) for preference pair generation
-        # This ensures we compare actions at the same turn within the SAME persona
-        # For Turn 1+, we also consider the previous action to enable multi-turn learning
-        # Different personas should have different preferences!
-        turn_groups = {}
+        # NEW: Trajectory-level comparison for preference pair generation
+        # Group by (state_id, persona) and compare final rewards of complete trajectories
+        # This ensures each persona has enough pairs for training
+        trajectory_info = {}  # trajectory_id -> {reward, turn0_turn, persona, state}
+        
+        # Group all_scored by trajectory_id to find Turn 0 and final reward
+        traj_turns_dict = defaultdict(list)
         for t in all_scored:
-            state_id = t["state"]["id"]
-            dialogue_turn = t["state"]["dialogue_turn"]
-            persona_name = t.get("persona", {}).get("name", "Unknown")
-            
-            # For Turn 1+, include prev_action in the key to enable multi-turn learning
-            # Use prev_action from scored turn (already computed in compute_trajectory_level_rewards)
-            # This ensures consistency and avoids duplicate logic
-            prev_action = t.get("prev_action")  # Can be None for Turn 0
-            
-            # For Turn 0: group by (state_id, dialogue_turn, persona, prev_action)
-            # For Turn 1+: group by (state_id, persona, prev_action) to allow more comparisons
-            # This is because Turn 1+ data is sparse, and we want to compare actions across different dialogue_turns
-            if dialogue_turn > 0:
-                # For Turn 1+, ignore dialogue_turn in grouping to allow more comparisons
-                key = (state_id, persona_name, prev_action)
-            else:
-                # For Turn 0, include dialogue_turn (which is always 0)
-                key = (state_id, dialogue_turn, persona_name, prev_action)
-            if key not in turn_groups:
-                turn_groups[key] = []
-            turn_groups[key].append(t)
+            traj_id = t.get("trajectory_id")
+            if traj_id is None:
+                continue
+            traj_turns_dict[traj_id].append(t)
         
-        print(f"📊 Regrouped into {len(turn_groups)} (state_id, dialogue_turn, persona, prev_action) groups for preference generation")
+        # For each trajectory, find Turn 0 and use Turn 0's reward for comparison
+        # This ensures we compare actions at the decision point (Turn 0), not final outcome
+        for traj_id, turns in traj_turns_dict.items():
+            # Sort by dialogue_turn
+            turns_sorted = sorted(turns, key=lambda x: x["state"].get("dialogue_turn", 0))
+            
+            # Find Turn 0 (for action/message and reward)
+            turn0 = None
+            for t in turns_sorted:
+                if t["state"].get("dialogue_turn", 0) == 0:
+                    turn0 = t
+                    break
+            
+            if turn0 is None:
+                continue  # Skip if no Turn 0
+            
+            # Use Turn 0's reward for comparison (not final reward)
+            # This makes sense because we want to compare the immediate reward of choosing
+            # Clarify vs Execute at Turn 0, not the final trajectory outcome
+            turn0_reward = turn0.get("total_reward", 0)
+            
+            trajectory_info[traj_id] = {
+                "reward": turn0_reward,  # Use Turn 0 reward for comparison
+                "turn0": turn0,  # Use Turn 0 for action/message
+                "persona": turn0.get("persona", {}),
+                "state": turn0["state"],
+            }
         
-        # Generate preference pairs with persona-aware multi-turn logic
-        for key, g in turn_groups.items():
-            # Handle different key formats for Turn 0 vs Turn 1+
-            if len(key) == 4:
-                state_id, dialogue_turn, persona_name, prev_action = key
-            else:
-                # Turn 1+ grouping: (state_id, persona_name, prev_action)
-                state_id, persona_name, prev_action = key
-                dialogue_turn = None  # Not used for Turn 1+ grouping
+        # Group trajectories by (state_id, persona) for comparison
+        state_persona_groups = defaultdict(list)
+        for traj_id, traj_info in trajectory_info.items():
+            state_id = traj_info["state"].get("id", "unknown")
+            persona = traj_info["persona"]
+            persona_name = persona.get("name", "Unknown") if isinstance(persona, dict) else "Unknown"
+            key = (state_id, persona_name)
+            state_persona_groups[key].append({
+                "trajectory_id": traj_id,
+                "reward": traj_info["reward"],
+                "turn0": traj_info["turn0"],  # Use Turn 0 for action/message
+            })
+        
+        print(f"📊 Grouped into {len(state_persona_groups)} (state_id, persona) groups for trajectory-level preference generation")
+        
+        # Generate preference pairs by comparing trajectories within each (state, persona) group
+        # FIXED: Group by Turn 0 action first, then compare across action groups
+        # This ensures we always compare different actions (Clarify vs Execute)
+        total_groups_processed = 0
+        total_pairs_generated = 0
+        skipped_reasons = defaultdict(int)
+        
+        for (state_id, persona_name), traj_list in state_persona_groups.items():
+            if len(traj_list) < 2:
+                skipped_reasons["less_than_2"] += 1
+                continue
             
-            # Use standard method for all cases
-            # Reward already considers prev_action in compute_trajectory_level_rewards
-            group_prefs = build_prefs_from_group(g)
+            total_groups_processed += 1
             
-            prefs.extend(group_prefs)
+            # Group by Turn 0 action
+            action_groups = defaultdict(list)
+            for traj in traj_list:
+                action = traj["turn0"].get("action", "unknown")
+                action_groups[action].append(traj)
+            
+            # Need at least 2 different actions to generate pairs
+            if len(action_groups) < 2:
+                skipped_reasons["only_one_action"] += 1
+                continue
+            
+            # For each action group, find the best trajectory (highest reward)
+            action_best = {}
+            for action, trajs in action_groups.items():
+                if trajs:
+                    best = max(trajs, key=lambda x: x["reward"])
+                    action_best[action] = best
+            
+            # Also find worst trajectories for comparison
+            action_worst = {}
+            for action, trajs in action_groups.items():
+                if trajs:
+                    worst = min(trajs, key=lambda x: x["reward"])
+                    action_worst[action] = worst
+            
+            # Generate pairs: compare best trajectories from different action groups
+            # Strategy: For each pair of actions, compare their best trajectories
+            max_pairs = min(3, len(action_groups) * (len(action_groups) - 1))
+            generated_pairs = 0
+            
+            actions_list = list(action_groups.keys())
+            for i, action1 in enumerate(actions_list):
+                if generated_pairs >= max_pairs:
+                    break
+                for action2 in actions_list[i+1:]:
+                    if generated_pairs >= max_pairs:
+                        break
+                    
+                    # Compare best of action1 vs best of action2
+                    best_traj1 = action_best[action1]
+                    best_traj2 = action_best[action2]
+                    best_turn0_1 = best_traj1["turn0"]
+                    best_turn0_2 = best_traj2["turn0"]
+                    
+                    # Check if messages are different
+                    if pref_assistant_text(best_turn0_1) == pref_assistant_text(best_turn0_2):
+                        skipped_reasons["same_message"] += 1
+                        continue
+                    
+                    # Determine which is chosen based on reward
+                    if best_traj1["reward"] > best_traj2["reward"]:
+                        chosen_traj = best_traj1
+                        rejected_traj = best_traj2
+                        chosen_turn0 = best_turn0_1
+                        rejected_turn0 = best_turn0_2
+                    elif best_traj2["reward"] > best_traj1["reward"]:
+                        chosen_traj = best_traj2
+                        rejected_traj = best_traj1
+                        chosen_turn0 = best_turn0_2
+                        rejected_turn0 = best_turn0_1
+                    else:
+                        # Reward相同，跳过
+                        skipped_reasons["reward_diff_too_small"] += 1
+                        continue
+                    
+                    # Check reward difference (use smaller threshold for trajectory-level)
+                    reward_diff = chosen_traj["reward"] - rejected_traj["reward"]
+                    if reward_diff < 0.0001:  # Very small threshold to allow more pairs
+                        skipped_reasons["reward_diff_too_small"] += 1
+                        continue
+                    
+                    # Extract dialogue_turn and prev_action from Turn 0
+                    dialogue_turn = chosen_turn0["state"].get("dialogue_turn", 0)
+                    prev_action = chosen_turn0.get("prev_action")  # Should be None for Turn 0
+                    
+                    prefs.append({
+                        "state": chosen_turn0["state"],
+                        "persona": chosen_turn0.get("persona", {}),
+                        "chosen_action": chosen_turn0["action"],
+                        "rejected_action": rejected_turn0["action"],
+                        "chosen_assistant_msg": f"{chosen_turn0['action']}\n{pref_assistant_text(chosen_turn0)}",
+                        "rejected_assistant_msg": f"{rejected_turn0['action']}\n{pref_assistant_text(rejected_turn0)}",
+                        "chosen_reward": chosen_traj["reward"],  # Final trajectory reward
+                        "rejected_reward": rejected_traj["reward"],  # Final trajectory reward
+                        "chosen_task_score": chosen_turn0.get("task_score", 0),
+                        "rejected_task_score": rejected_turn0.get("task_score", 0),
+                        "chosen_interrupt_cost": chosen_turn0.get("interrupt_cost", 0),
+                        "rejected_interrupt_cost": rejected_turn0.get("interrupt_cost", 0),
+                        "prev_action": prev_action,
+                        "dialogue_turn": dialogue_turn,
+                    })
+                    generated_pairs += 1
+                    total_pairs_generated += 1
+        
+        # Debug output
+        print(f"📊 Trajectory-level preference generation:")
+        print(f"   - Processed {total_groups_processed} groups with 2+ trajectories")
+        print(f"   - Generated {total_pairs_generated} pairs")
+        if skipped_reasons:
+            print(f"   - Skipped reasons: {dict(skipped_reasons)}")
     
     else:
         print("⚠️  Using STEP-LEVEL reward computation (legacy mode)")
@@ -847,6 +1023,14 @@ def parse_args():
         action="store_false",
         help="Use step-level reward computation (legacy mode)",
     )
+    parser.add_argument(
+        "--full_query_for_execute",
+        action="store_true",
+        help=(
+            "For Execute turns, use trajectory code_versions['full_query'] for task_score and "
+            "preference text when present (Clarify unchanged; falls back to assistant_msg)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -854,11 +1038,16 @@ def main():
     args = parse_args()
     traj_path = Path(args.trajectories)
     out_path = Path(args.out)
-    cfg = RewardConfig(w_task=args.w_task, w_interrupt=args.w_interrupt)
+    cfg = RewardConfig(
+        w_task=args.w_task,
+        w_interrupt=args.w_interrupt,
+        full_query_for_execute=args.full_query_for_execute,
+    )
 
     print("⚙️  Reward config:")
     print(f"  - w_task = {cfg.w_task}")
     print(f"  - w_interrupt = {cfg.w_interrupt}")
+    print(f"  - full_query_for_execute = {cfg.full_query_for_execute}")
 
     target_ratio = args.target_execute_ratio
     if not (0.0 < target_ratio < 1.0):

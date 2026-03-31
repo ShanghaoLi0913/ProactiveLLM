@@ -1,4 +1,7 @@
 #!/bin/bash
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$REPO_ROOT" || exit 1
+
 # 检查修复脚本的进度
 
 TRAJ_FILE="data/logs/traj_colm_3turn_persona_150states_20260212_052612_20260212_052615.jsonl"

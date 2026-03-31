@@ -1,4 +1,7 @@
 #!/bin/bash
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$REPO_ROOT" || exit 1
+
 # 监控数据生成进度
 
 echo "=" * 80

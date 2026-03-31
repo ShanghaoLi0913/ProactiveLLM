@@ -1,4 +1,7 @@
 #!/bin/bash
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$REPO_ROOT" || exit 1
+
 # COLM 2026数据生成 - 体现Persona轮次差异
 # 基于改进的select_mainline_action_from_persona逻辑
 

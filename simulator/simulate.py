@@ -71,15 +71,15 @@ def generate_specific_answer_dummy(assistant_msg: str, user_query: str, domain: 
     
     if expertise == "low":
         # Novice: vague or incomplete answer
-        return "可能是这样的吧，我也不太确定。"
+        return "Maybe that's the case, I'm not quite sure."
     elif expertise == "high":
         # Expert: very clear, detailed answer
-        return "需要处理空字符串的情况，使用递归实现，时间复杂度O(n)。"
+        return "You need to handle empty strings, use recursion, time complexity O(n)."
     else:  # mid
         # Intermediate: clear, specific answer
-        return "需要处理空字符串。"
+        return "You need to handle empty strings."
     
-    return "好的。"  # fallback
+    return "Okay."  # fallback
 
 
 def generate_specific_answer_llm(assistant_msg: str, user_query: str, domain: str, 
@@ -260,6 +260,9 @@ def react(user_msg: str, assistant_msg: str, persona: Persona,
                 if len(edge_cases) > 1:
                     should_give_vague_answer = True
             
+            # 初始化disclosed_items（在所有路径中都需要）
+            disclosed_items = {}
+            
             if should_give_vague_answer:
                 # 给模糊回复，迫使Assistant再次Clarify
                 if persona.domain == "coding":
@@ -272,31 +275,31 @@ def react(user_msg: str, assistant_msg: str, persona: Persona,
                 answer_clarity = 0.2  # 低清晰度，表示回答模糊
             else:
                 # 正常生成答案
-            # Generate answer with clarity based on expertise
-            if llm_model:
-                # Use LLM to generate realistic answer
+                # Generate answer with clarity based on expertise
+                if llm_model:
+                    # Use LLM to generate realistic answer
                     base_answer = generate_specific_answer_llm(
                         assistant_msg,
                         user_msg,
                         persona.domain,
                         llm_model=llm_model,
                         expertise=persona.expertise,
-                )
-            else:
-                # Use dummy answer for synthetic mode (testing)
+                    )
+                else:
+                    # Use dummy answer for synthetic mode (testing)
                     base_answer = generate_specific_answer_dummy(
                         assistant_msg,
                         user_msg,
                         persona.domain,
                         expertise=persona.expertise,
-                )
+                    )
 
                 # Apply disclosure rule if available (Step 3: disclosure rule)
                 # 状况三：分级Disclosure - 将隐藏信息拆分为2部分
                 # Pass dialogue_turn to enable step-wise disclosure based on K = ⌈Expertise × 3⌉
                 if disclosure_rule:
                     from simulator.disclosure import generate_answer_with_disclosure
-                    user_reply = generate_answer_with_disclosure(
+                    user_reply, disclosed_items = generate_answer_with_disclosure(
                         assistant_msg,
                         user_msg,
                         disclosure_rule,
@@ -324,15 +327,17 @@ def react(user_msg: str, assistant_msg: str, persona: Persona,
                     else "Stop asking, just give me the code."
                 )
 
-        answered = 0
+            answered = 0
             reject_signal = 1
             answer_clarity = 0.0  # No answer when rejected
+            disclosed_items = {}  # 用户拒绝时，没有披露信息
     else:
         # No question asked, default response
         user_reply = "Continue."
         answered = 0
         reject_signal = 0
         answer_clarity = 0.0
+        disclosed_items = {}  # 没有问题，没有披露信息
     
     # Silence check (if message is too long and patience is low)
     silence = 1 if (length_tokens > 200 and patience_value < 0.3) else 0
@@ -366,5 +371,6 @@ def react(user_msg: str, assistant_msg: str, persona: Persona,
             "silence": int(silence),
             "off_topic_flag": int(off_topic_flag),
             "satisfaction": float(satisfaction),
+            "disclosed_items": disclosed_items,  # 本次披露的信息项，用于更新disclosure_rule.disclosed_info
         },
     }

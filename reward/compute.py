@@ -50,9 +50,9 @@ def compute_task_score(sample: Dict, domain: str, assistant_output: Optional[str
                 if not code:
                     return 0.0
 
-                # Use shorter timeout (5s) to avoid long-running tests
+                # Use shorter timeout (3s) to avoid long-running tests
                 # If timeout, catch exception and return 0 (skip this test)
-                pass_rate = float(score_code_passfail(code, tests, timeout=5))
+                pass_rate = float(score_code_passfail(code, tests, timeout=3))
                 if pass_rate <= 0.5:
                     return 0.0
 

@@ -1,4 +1,7 @@
 #!/bin/bash
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$REPO_ROOT" || exit 1
+
 # 检查验证数据的修复效果
 
 echo "=" * 80

@@ -254,17 +254,36 @@ def load_states_from_dataset(dataset_path: Path, domain: str, limit: Optional[in
         # Support both "test" (BigCodeBench) and "convcodeworld_tests" field names
         tests = row.get("convcodeworld_tests") or row.get("test")
         
-        result.append(
-            {
-                "id": state_id,
-                "domain": domain,
-                "query": query,
-                "dialogue_turn": int(row.get("dialogue_turn", 0)),  # Start from 0
-                "prev_reject": int(row.get("prev_reject", 0)),
-                "task_uncertainty": task_uncertainty,
-                "convcodeworld_tests": tests,  # Support both "test" and "convcodeworld_tests"
-            }
-        )
+        # Build state dict, preserving important fields
+        state_dict = {
+            "id": state_id,
+            "domain": domain,
+            "query": query,
+            "dialogue_turn": int(row.get("dialogue_turn", 0)),  # Start from 0
+            "prev_reject": int(row.get("prev_reject", 0)),
+            "task_uncertainty": task_uncertainty,
+            "convcodeworld_tests": tests,  # Support both "test" and "convcodeworld_tests"
+        }
+        
+        # Preserve additional fields that may be needed
+        for key in ["original_instruct_prompt", "canonical_solution", "test", "entry_point"]:
+            if key in row:
+                state_dict[key] = row[key]
+        
+        # Preserve disclosure_rule (critical for disclosure mechanism)
+        if "disclosure_rule" in row:
+            disclosure_rule = row["disclosure_rule"].copy()
+            # Ensure disclosed_info is initialized if not present
+            if "disclosed_info" not in disclosure_rule:
+                disclosure_rule["disclosed_info"] = {
+                    "edge_cases": [],
+                    "input_constraints": [],
+                    "output_format": [],
+                    "validation_rules": [],
+                }
+            state_dict["disclosure_rule"] = disclosure_rule
+        
+        result.append(state_dict)
     return result
 
 
@@ -418,7 +437,14 @@ def select_mainline_action_from_persona(persona, state: Optional[Dict] = None) -
 
 
 def check_task_completion(state: Dict, assistant_msg: str, domain: str) -> bool:
-    """Check if task is completed based on assistant output and tests."""
+    """Check if task is completed based on assistant output and tests.
+    
+    For coding tasks, task is completed ONLY if:
+    1. Code is present in assistant message
+    2. All test cases pass (score == 1.0)
+    
+    If tests are available but execution fails or times out, task is NOT completed.
+    """
     if domain == "coding":
         # Check if code is present
         has_code = (
@@ -429,20 +455,27 @@ def check_task_completion(state: Dict, assistant_msg: str, domain: str) -> bool:
         if not has_code:
             return False
         
-        # If tests are available, try to execute them
-        tests = state.get("convcodeworld_tests")
+        # Check for tests in multiple possible field names
+        # Some datasets use "convcodeworld_tests", others use "test"
+        tests = state.get("convcodeworld_tests") or state.get("test")
         if tests:
             try:
                 from eval.evaluate_dpo_model import extract_code_from_text, score_code_passfail
                 code = extract_code_from_text(assistant_msg)
                 if code:
                     score = score_code_passfail(code, tests, timeout=30)
-                    return score > 0.5  # Task completed if tests pass
+                    # Task completed ONLY if ALL test cases pass (score == 1.0)
+                    return score == 1.0
+                else:
+                    # Code extraction failed
+                    return False
             except Exception:
-                pass
+                # Test execution failed or timed out - task NOT completed
+                return False
         
-        # If no tests or execution failed, assume task completed if code is present
-        return has_code
+        # If no tests available, cannot verify completion - return False
+        # (Previously returned has_code, but this is too lenient)
+        return False
     
     # For planning domain, assume task completed if response is long enough
     return len(assistant_msg.split()) > 50
@@ -491,6 +524,33 @@ def update_state_for_next_turn(current_state: Dict, user_reaction: Dict, assista
     # Check if user answered clarification (has answer_clarity > 0)
     answer_clarity = meta.get("answer_clarity", 0.0)
     answered_clarification = meta.get("answered_clarification", 0)
+    
+    # Update disclosure_rule.disclosed_info to track what has been disclosed
+    disclosed_items = meta.get("disclosed_items", {})
+    if disclosed_items and current_state.get("disclosure_rule"):
+        # 深拷贝disclosure_rule，避免修改原始state
+        import copy
+        disclosure_rule = copy.deepcopy(current_state["disclosure_rule"])
+        
+        # 确保disclosure_rule存在disclosed_info字段
+        if "disclosed_info" not in disclosure_rule:
+            disclosure_rule["disclosed_info"] = {
+                "edge_cases": [],
+                "input_constraints": [],
+                "output_format": [],
+                "validation_rules": [],
+            }
+        
+        # 更新disclosed_info，添加本次披露的信息（去重）
+        disclosed_info = disclosure_rule["disclosed_info"]
+        for category in ["edge_cases", "input_constraints", "output_format", "validation_rules"]:
+            if category in disclosed_items:
+                existing = set(disclosed_info.get(category, []))
+                new_items = set(disclosed_items[category])
+                disclosed_info[category] = list(existing | new_items)  # 并集，去重
+        
+        # 更新state中的disclosure_rule
+        new_state["disclosure_rule"] = disclosure_rule
     
     if answered_clarification > 0 and answer_clarity > 0:
         # User answered clarification: update task_uncertainty using Equation 9
@@ -564,6 +624,37 @@ def generate_multi_turn_conversation(initial_state: Dict, domain: str,
             action = "Execute"
         action_prompt = prompts[action]
         
+        # Enhance Clarify prompt with disclosure_rule information (混合方案)
+        if action == "Clarify":
+            disclosure_rule = current_state.get("disclosure_rule")
+            if disclosure_rule:
+                # Extract key information from disclosure_rule to guide question generation
+                disclosure_info = disclosure_rule.get("disclosure_info", {})
+                masked_fields = disclosure_rule.get("masked_fields", {})
+                
+                # Build guidance text for the model
+                guidance_parts = []
+                
+                # Check what information is available but masked
+                if masked_fields.get("input_constraints"):
+                    guidance_parts.append("- Input constraints or default values")
+                if masked_fields.get("output_format"):
+                    guidance_parts.append("- Output format or return type")
+                if masked_fields.get("edge_cases"):
+                    guidance_parts.append("- Edge cases to handle")
+                if masked_fields.get("validation_rules"):
+                    guidance_parts.append("- Validation rules or error handling")
+                
+                if guidance_parts:
+                    guidance_text = "\n".join(guidance_parts)
+                    # Enhance prompt with disclosure guidance
+                    action_prompt = f"""{action_prompt}
+
+IMPORTANT: The task description may be missing some information. Consider asking about:
+{guidance_text}
+
+Generate 1-2 specific questions that would help clarify these missing aspects."""
+        
         # Generate assistant message
         if local_generator is not None:
             assistant_msg = local_generator.chat_complete(action_prompt, f"[Task]\n{current_state['query']}")
@@ -633,6 +724,48 @@ def generate_multi_turn_conversation(initial_state: Dict, domain: str,
         # Check if task is completed (only for Execute action)
         # Use enhanced task completion check that considers persona and edge_cases info
         if action == "Execute":
+            # Generate 3 versions of code for comparison
+            code_versions = {}
+            
+            # Version 1: masked query + 用户澄清得到的信息 (current version)
+            code_versions["masked_with_clarification"] = assistant_msg
+            
+            # Version 2: full query生成的代码
+            original_query = current_state.get("original_instruct_prompt", "")
+            if original_query:
+                # Create a temporary state with full query
+                full_query_state = current_state.copy()
+                full_query_state["query"] = original_query
+                if local_generator is not None:
+                    full_query_code = local_generator.chat_complete(action_prompt, f"[Task]\n{original_query}")
+                elif llm_model:
+                    full_query_code = llm_output(full_query_state, action_prompt, llm_model, temperature=temperature, top_p=top_p)
+                else:
+                    full_query_code = dummy_llm_output(full_query_state, action_prompt)
+                code_versions["full_query"] = full_query_code
+            else:
+                code_versions["full_query"] = None
+            
+            # Version 3: masked query本身生成的代码 (初始masked query，无澄清信息)
+            initial_masked_query = initial_state.get("query", "")
+            if initial_masked_query and initial_masked_query != current_state.get("query", ""):
+                # Create a temporary state with initial masked query
+                masked_query_state = initial_state.copy()
+                masked_query_state["query"] = initial_masked_query
+                if local_generator is not None:
+                    masked_query_code = local_generator.chat_complete(action_prompt, f"[Task]\n{initial_masked_query}")
+                elif llm_model:
+                    masked_query_code = llm_output(masked_query_state, action_prompt, llm_model, temperature=temperature, top_p=top_p)
+                else:
+                    masked_query_code = dummy_llm_output(masked_query_state, action_prompt)
+                code_versions["masked_only"] = masked_query_code
+            else:
+                # If no clarification happened, masked_only is same as masked_with_clarification
+                code_versions["masked_only"] = assistant_msg
+            
+            # Add code_versions to trajectory
+            traj["code_versions"] = code_versions
+            
             task_completed = check_task_completion(current_state, assistant_msg, domain)
             traj["task_completed"] = task_completed
             traj["is_terminal"] = True  # Mark as terminal state
@@ -653,12 +786,96 @@ def generate_multi_turn_conversation(initial_state: Dict, domain: str,
         # Update has_edge_cases_info in state for next turn
         current_state["has_edge_cases_info"] = has_edge_cases_info
     
-    # If loop ended without break (reached max_turns), mark last trajectory as terminal
-    if trajectories and not trajectories[-1].get("is_terminal", False):
-        trajectories[-1]["is_terminal"] = True
-        # If task wasn't completed and user didn't stop, this is a timeout scenario
-        if not trajectories[-1].get("task_completed", False) and not trajectories[-1].get("user_stopped", False):
-            trajectories[-1]["task_completed"] = False  # Explicitly mark as not completed
+    # If loop ended without break (reached max_turns or user stopped), check if we need to force Execute
+    has_executed = any(t.get("action") == "Execute" for t in trajectories)
+    
+    # If we haven't executed yet (regardless of reason: max_turns or user_stopped), force Execute
+    # This ensures every trajectory ends with code generation using masked query + clarification answers
+    if not has_executed:
+        # Force Execute with current query (masked query + clarification answers)
+        action = "Execute"
+        action_prompt = prompts[action]
+        
+        # Generate assistant message (code) using current state's query
+        if local_generator is not None:
+            assistant_msg = local_generator.chat_complete(action_prompt, f"[Task]\n{current_state['query']}")
+        elif llm_model:
+            assistant_msg = llm_output(current_state, action_prompt, llm_model, temperature=temperature, top_p=top_p)
+        else:
+            assistant_msg = dummy_llm_output(current_state, action_prompt)
+        
+        # Generate 3 versions of code for comparison
+        code_versions = {}
+        
+        # Version 1: masked query + 用户澄清得到的信息 (current version)
+        code_versions["masked_with_clarification"] = assistant_msg
+        
+        # Version 2: full query生成的代码
+        original_query = current_state.get("original_instruct_prompt", "")
+        if original_query:
+            # Create a temporary state with full query
+            full_query_state = current_state.copy()
+            full_query_state["query"] = original_query
+            if local_generator is not None:
+                full_query_code = local_generator.chat_complete(action_prompt, f"[Task]\n{original_query}")
+            elif llm_model:
+                full_query_code = llm_output(full_query_state, action_prompt, llm_model, temperature=temperature, top_p=top_p)
+            else:
+                full_query_code = dummy_llm_output(full_query_state, action_prompt)
+            code_versions["full_query"] = full_query_code
+        else:
+            code_versions["full_query"] = None
+        
+        # Version 3: masked query本身生成的代码 (初始masked query，无澄清信息)
+        initial_masked_query = initial_state.get("query", "")
+        if initial_masked_query and initial_masked_query != current_state.get("query", ""):
+            # Create a temporary state with initial masked query
+            masked_query_state = initial_state.copy()
+            masked_query_state["query"] = initial_masked_query
+            if local_generator is not None:
+                masked_query_code = local_generator.chat_complete(action_prompt, f"[Task]\n{initial_masked_query}")
+            elif llm_model:
+                masked_query_code = llm_output(masked_query_state, action_prompt, llm_model, temperature=temperature, top_p=top_p)
+            else:
+                masked_query_code = dummy_llm_output(masked_query_state, action_prompt)
+            code_versions["masked_only"] = masked_query_code
+        else:
+            # If no clarification happened, masked_only is same as masked_with_clarification
+            code_versions["masked_only"] = assistant_msg
+        
+        # Check task completion
+        task_completed = check_task_completion(current_state, assistant_msg, domain)
+        
+        # Create final Execute trajectory
+        final_traj = {
+            "trajectory_id": trajectory_id,
+            "state": current_state.copy(),
+            "action": action,
+            "action_prompt": action_prompt,
+            "assistant_msg": assistant_msg,
+            "persona": {
+                "name": persona.name,
+                "domain": persona.domain,
+                "expertise": persona.expertise,
+                "patience": persona.patience,
+            },
+            "user_reaction": {},  # No user reaction for forced Execute
+            "turn": len(trajectories) + 1,
+            "is_mainline": True,
+            "is_terminal": True,
+            "has_edge_cases_info": current_state.get("has_edge_cases_info", False),
+            "code_versions": code_versions,
+            "task_completed": task_completed,
+            "forced_execute": True,  # Mark as forced Execute (due to max_turns or user_stopped)
+        }
+        trajectories.append(final_traj)
+    else:
+        # If loop ended without forced Execute, mark last trajectory as terminal
+        if trajectories and not trajectories[-1].get("is_terminal", False):
+            trajectories[-1]["is_terminal"] = True
+            # If task wasn't completed and user didn't stop, this is a timeout scenario
+            if not trajectories[-1].get("task_completed", False) and not trajectories[-1].get("user_stopped", False):
+                trajectories[-1]["task_completed"] = False  # Explicitly mark as not completed
     
     return trajectories
 

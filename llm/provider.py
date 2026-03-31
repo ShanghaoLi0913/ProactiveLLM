@@ -1,10 +1,11 @@
 import os
+import sys
 import time
 from pathlib import Path
 from typing import List, Dict
 
 from openai import OpenAI
-from openai import APIConnectionError, APITimeoutError, RateLimitError, InternalServerError
+from openai import APIConnectionError, APITimeoutError, RateLimitError, InternalServerError, BadRequestError
 
 # 普通的 from import 导入模块语句（from dotenv import load_dotenv）。
 # 这里用 try...except 包裹，是为了兼容调试环境防止没有安装 python-dotenv 时报错影响主程序流程。
@@ -56,13 +57,32 @@ def chat_complete(
     temperature: float = 0.7,
     top_p: float | None = None,
     timeout_s: float = 60.0,
-    max_retries: int = 8,
+    max_retries: int = 12,  # Increased from 8 to 12 for better resilience
 ) -> str:
     client = get_client()
     kwargs = {}
     # OpenAI Chat Completions supports both temperature and top_p; keep optional for backward compatibility
     if top_p is not None:
+        # Validate top_p range [0, 1]
+        if not (0.0 <= top_p <= 1.0):
+            print(f"⚠️  Invalid top_p={top_p}, clamping to [0, 1]", file=sys.stderr, flush=True)
+            top_p = max(0.0, min(1.0, top_p))
         kwargs["top_p"] = top_p
+    
+    # Validate temperature range [0, 2]
+    if not (0.0 <= temperature <= 2.0):
+        print(f"⚠️  Invalid temperature={temperature}, clamping to [0, 2]", file=sys.stderr, flush=True)
+        temperature = max(0.0, min(2.0, temperature))
+    
+    # Validate and sanitize prompts (remove None, ensure strings)
+    if system_prompt is None:
+        system_prompt = ""
+    if user_prompt is None:
+        user_prompt = ""
+    
+    # Ensure prompts are strings and not too long
+    system_prompt = str(system_prompt)[:100000]  # Limit to 100k chars
+    user_prompt = str(user_prompt)[:100000]  # Limit to 100k chars
 
     # Retry transient network/429/5xx issues (keeps long-running data-gen jobs alive).
     last_err: Exception | None = None
@@ -80,14 +100,30 @@ def chat_complete(
                 **kwargs,
             )
             return resp.choices[0].message.content or ""
-        except (APIConnectionError, APITimeoutError, RateLimitError, InternalServerError) as e:
+        except (APIConnectionError, APITimeoutError, RateLimitError, InternalServerError, BadRequestError) as e:
             last_err = e
-            # Exponential backoff with cap
-            sleep_s = min(30.0, 1.5 ** attempt)
+            # Exponential backoff with cap: longer wait for connection errors
+            if isinstance(e, APIConnectionError):
+                # For connection errors, wait longer (up to 60 seconds)
+                sleep_s = min(60.0, 2.0 ** attempt)
+            elif isinstance(e, BadRequestError):
+                # For bad requests, don't retry too many times (likely a permanent issue)
+                if attempt >= 3:  # Only retry 3 times for bad requests
+                    print(f"❌ BadRequestError after {attempt} attempts, likely a permanent issue (invalid prompt/parameters)", file=sys.stderr, flush=True)
+                    raise e
+                sleep_s = min(10.0, 2.0 ** attempt)  # Shorter wait for bad requests
+            else:
+                # For other errors, use shorter backoff
+                sleep_s = min(30.0, 1.5 ** attempt)
+            
+            if attempt < max_retries:
+                error_msg = str(e)[:200] if str(e) else type(e).__name__
+                print(f"⚠️  API调用失败 (尝试 {attempt}/{max_retries}): {type(e).__name__}: {error_msg}, 等待 {sleep_s:.1f}秒后重试...", file=sys.stderr, flush=True)
             time.sleep(sleep_s)
 
     # Non-transient or exceeded retries
     if last_err is not None:
+        print(f"❌ API调用失败，已重试 {max_retries} 次: {type(last_err).__name__}: {last_err}", file=sys.stderr, flush=True)
         raise last_err
     return ""
 # OpenAI 的聊天接口每次请求默认会返回一个或多个回复（choices），这里一般只取第一个（resp.choices[0]），因为通常只需要一条回复。
