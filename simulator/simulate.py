@@ -276,16 +276,11 @@ def react(user_msg: str, assistant_msg: str, persona: Persona,
         else:
             # User rejects (with probability = 1 - effective_patience)
             # Enhanced reject messages for different personas
-            if persona.expertise == "high" and is_obvious_question:
-                # Experienced-Engineer: More specific reject message for obvious questions
-                user_reply = "This information is already in the prompt. Please proceed with the implementation."
-            else:
-                # Default reject message
-                user_reply = (
-                    "Stop asking, just give me the plan."
-                    if persona.domain == "planning"
-                    else "Stop asking, just give me the code."
-                )
+            user_reply = (
+                "Stop asking, just give me the plan."
+                if persona.domain == "planning"
+                else "Stop asking, just give me the code."
+            )
 
             answered = 0
             reject_signal = 1
