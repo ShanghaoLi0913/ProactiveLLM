@@ -569,7 +569,7 @@ def evaluate_model(
                     if not code_candidate:
                         score = 0.0
                     else:
-                        tests = state.get("convcodeworld_tests")
+                        tests = state.get("convcodeworld_tests") or state.get("test")
                         score = score_code_passfail(code_candidate, tests, debug=False) if tests else 0.0
                     if score is None or score != score:
                         score = 0.0
@@ -608,7 +608,7 @@ def evaluate_model(
         if predicted_action == "Execute":
             execute_count += 1
 
-        tests = state.get("convcodeworld_tests") if state["domain"] == "coding" else None
+        tests = (state.get("convcodeworld_tests") or state.get("test")) if state["domain"] == "coding" else None
         run_unit_tests = bool(
             state["domain"] == "coding" and code and tests
         )

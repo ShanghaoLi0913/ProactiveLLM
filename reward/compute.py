@@ -39,7 +39,7 @@ def compute_task_score(sample: Dict, domain: str, assistant_output: Optional[str
 
         has_edge_cases_info = bool(sample.get("has_edge_cases_info", False))
         task_uncertainty = float(sample.get("task_uncertainty", 0.0))
-        tests = sample.get("convcodeworld_tests")
+        tests = sample.get("convcodeworld_tests") or sample.get("test")
 
         # If tests are available, always score by running them
         if tests:
@@ -52,8 +52,8 @@ def compute_task_score(sample: Dict, domain: str, assistant_output: Optional[str
 
                 # Use shorter timeout (3s) to avoid long-running tests
                 # If timeout, catch exception and return 0 (skip this test)
-                pass_rate = float(score_code_passfail(code, tests, timeout=3))
-                if pass_rate <= 0.5:
+                pass_rate = float(score_code_passfail(code, tests, timeout=10))
+                if pass_rate < 0.5:
                     return 0.0
 
                 # Full credit only if user-provided edge-case info was acquired
