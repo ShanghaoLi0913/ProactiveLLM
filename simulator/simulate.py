@@ -248,31 +248,13 @@ def react(user_msg: str, assistant_msg: str, persona: Persona,
         
         if random.random() < effective_patience:
             # User answers (with probability = patience)
-            # 状况三：强制追问采样 - 用户第一次回复模糊，迫使再次Clarify
-            # 策略：Turn 0 的第一次 Clarify，对复杂任务有更高概率给模糊回复
-            is_first_clarify = dialogue_turn == 0
-            should_give_vague_answer = False
-            if is_first_clarify and disclosure_rule and random.random() < 0.65:
-                disclosure_info = disclosure_rule.get("disclosure_info", {})
-                input_constraints = disclosure_info.get("input_constraints", {})
-                edge_cases = input_constraints.get("edge_cases", [])
-                # 如果有多个edge_cases（信息需要分步披露），第一次可以给模糊回复
-                if len(edge_cases) > 1:
-                    should_give_vague_answer = True
+            # 正常路径：不强制给废话，让 disclosure 逻辑决定给多少信息
             
             # 初始化disclosed_items（在所有路径中都需要）
             disclosed_items = {}
-            
-            if should_give_vague_answer:
-                # 给模糊回复，迫使Assistant再次Clarify
-                if persona.domain == "coding":
-                    user_reply = "I want a general solution that works. Just do it the standard way."
-                else:
-                    user_reply = "Just a general plan is fine. You decide."
-                # 标记为回答了，但清晰度很低
-                answered = 1
-                reject_signal = 0
-                answer_clarity = 0.2  # 低清晰度，表示回答模糊
+
+            if False:  # 移除强制模糊回复逻辑：65%概率给废话只会污染训练数据
+                pass
             else:
                 # 正常生成答案
                 # Generate answer with clarity based on expertise
