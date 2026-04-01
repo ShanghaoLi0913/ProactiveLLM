@@ -70,13 +70,16 @@ def get_disclosure_info(
         "validation_rules": [],
     }
     
-    # 披露数量上限：Novice 最多1个，Busy 最多3个，Experienced 最多全部
+    # 披露数量上限：expertise 越高给越多，体现 persona 差异
+    # Novice(low):      1条/轮 -- 认知负担高，分步消化
+    # Busy(mid):        3条/轮 -- 时间有限，给够用的
+    # Experienced(high):6条/轮 -- 能处理完整技术细节
     if expertise == "low":
         max_points = 1
     elif expertise == "mid":
         max_points = 3
-    else:  # high
-        max_points = 8  # 实际上取所有相关项
+    else:
+        max_points = 6
 
     question_lower = assistant_question.lower()
     available_info_points = []

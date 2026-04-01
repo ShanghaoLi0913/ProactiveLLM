@@ -101,10 +101,10 @@ def build_new_clarification_context(turns: list) -> str:
 
     expertise = turns[0].get("persona", {}).get("expertise", "mid")
 
-    # Novice（expertise=low）：多轮 Q&A 格式对 Llama 产生噪音
-    # 原因：ideal_disclosed（同内容干净列表）有效，而分散的 Q&A 对话格式会干扰代码生成
-    # 修法：收集所有轮次的披露信息，合并成一条干净的 "Key requirements:" 列表，对齐 ideal_disclosed 格式
-    if expertise == "low":
+    def _collect_and_consolidate(exp: str) -> str:
+        """收集所有轮次的披露信息，合并为单条 'Key requirements: ...' 列表。
+        适用于 Novice（减少多轮噪音）和 Experienced（信息量大但格式干净）。
+        """
         all_items = []
         for t in turns:
             if t["action"] != "Clarify":
@@ -115,7 +115,7 @@ def build_new_clarification_context(turns: list) -> str:
             disclosure_text, new_disclosed = get_disclosure_info(
                 assistant_question=question,
                 disclosure_rule=dr,
-                expertise=expertise,
+                expertise=exp,
             )
             for key, items in new_disclosed.items():
                 dr["disclosed_info"].setdefault(key, [])
@@ -125,14 +125,18 @@ def build_new_clarification_context(turns: list) -> str:
 
         if not all_items:
             return ""
-        # 格式对齐 ideal_disclosed："Key requirements: item1; item2; ..."
         combined = "; ".join(all_items)
         first_question = next(
             (t.get("assistant_msg", "").strip() for t in turns if t["action"] == "Clarify"), ""
         )
         return f"Assistant asked: {first_question}\nUser replied: Key requirements: {combined}"
 
-    # Busy / Experienced：保留多轮 Q&A 格式（每轮信息量足够，格式噪音影响小）
+    # Novice: 多轮 Q&A 噪音大，合并成干净列表
+    # Experienced: 信息量多（6条），也用干净列表，对齐 ideal_disclosed 格式
+    if expertise in ("low", "high"):
+        return _collect_and_consolidate(expertise)
+
+    # Busy: 单轮 Q&A 信息量适中（3条），保留对话格式，已验证有效
     qa_parts = []
     for t in turns:
         if t["action"] != "Clarify":
