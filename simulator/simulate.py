@@ -216,9 +216,9 @@ def react(user_msg: str, assistant_msg: str, persona: Persona,
         # Determine if user answers or rejects based on patience
         effective_patience = patience_value
         
-        # Busy-Developer: make rejection much more likely for clarify (target >80% reject rate)
+        # Busy-Developer: make rejection much more likely for clarify (target ~80% reject rate)
         if persona.patience == "low":
-            effective_patience = min(effective_patience, 0.1)
+            effective_patience = min(effective_patience, 0.2)
         
         # After multiple questions, mildly reduce patience for non-busy users (keep Turn 3+ alive)
         if total_questions_asked >= 2 and persona.patience != "low":
