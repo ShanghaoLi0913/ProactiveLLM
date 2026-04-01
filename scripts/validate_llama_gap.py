@@ -99,6 +99,40 @@ def build_new_clarification_context(turns: list) -> str:
         "edge_cases": [], "input_constraints": [], "output_format": [], "validation_rules": []
     })
 
+    expertise = turns[0].get("persona", {}).get("expertise", "mid")
+
+    # Novice（expertise=low）：多轮 Q&A 格式对 Llama 产生噪音
+    # 原因：ideal_disclosed（同内容干净列表）有效，而分散的 Q&A 对话格式会干扰代码生成
+    # 修法：收集所有轮次的披露信息，合并成一条干净的 "Key requirements:" 列表，对齐 ideal_disclosed 格式
+    if expertise == "low":
+        all_items = []
+        for t in turns:
+            if t["action"] != "Clarify":
+                continue
+            question = t.get("assistant_msg", "").strip()
+            if not question:
+                continue
+            disclosure_text, new_disclosed = get_disclosure_info(
+                assistant_question=question,
+                disclosure_rule=dr,
+                expertise=expertise,
+            )
+            for key, items in new_disclosed.items():
+                dr["disclosed_info"].setdefault(key, [])
+                dr["disclosed_info"][key].extend(items)
+            if disclosure_text:
+                all_items.append(disclosure_text)
+
+        if not all_items:
+            return ""
+        # 格式对齐 ideal_disclosed："Key requirements: item1; item2; ..."
+        combined = "; ".join(all_items)
+        first_question = next(
+            (t.get("assistant_msg", "").strip() for t in turns if t["action"] == "Clarify"), ""
+        )
+        return f"Assistant asked: {first_question}\nUser replied: Key requirements: {combined}"
+
+    # Busy / Experienced：保留多轮 Q&A 格式（每轮信息量足够，格式噪音影响小）
     qa_parts = []
     for t in turns:
         if t["action"] != "Clarify":
@@ -106,20 +140,16 @@ def build_new_clarification_context(turns: list) -> str:
         question = t.get("assistant_msg", "").strip()
         if not question:
             continue
-        expertise = t.get("persona", {}).get("expertise", "mid")
 
         disclosure_text, new_disclosed = get_disclosure_info(
             assistant_question=question,
             disclosure_rule=dr,
             expertise=expertise,
         )
-
-        # 更新 disclosed_info（避免下一轮重复披露）
         for key, items in new_disclosed.items():
             dr["disclosed_info"].setdefault(key, [])
             dr["disclosed_info"][key].extend(items)
 
-        # 没有新信息时跳过这个 Q&A pair，避免加入噪音回复
         if not disclosure_text:
             continue
         qa_parts.append(f"Assistant asked: {question}\nUser replied: {disclosure_text}")
