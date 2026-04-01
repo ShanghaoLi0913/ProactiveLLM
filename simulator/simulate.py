@@ -213,30 +213,8 @@ def react(user_msg: str, assistant_msg: str, persona: Persona,
         # - Busy-Developer: Already has low patience, will reject frequently
         # - Novice-Learner: High patience, rarely rejects
         
-        # Check if question is "obvious" or "redundant" (for Experienced-Engineer)
-        is_obvious_question = False
-        if persona.expertise == "high" and persona.patience == "mid":  # Experienced-Engineer
-            # Check if question asks about information already in original prompt
-            question_lower = assistant_msg.lower()
-            user_query_lower = user_msg.lower()
-            
-            # Simple heuristic: if question keywords appear in original prompt, it's obvious
-            obvious_keywords = ["what", "how", "which", "when", "where", "why"]
-            question_words = [w for w in question_lower.split() if w in obvious_keywords]
-            
-            # If question is very short or asks about something already mentioned, it's obvious
-            if len(assistant_msg.split()) < 10:  # Very short question
-                is_obvious_question = True
-            elif any(word in user_query_lower for word in question_words):
-                # Question asks about something already in prompt
-                is_obvious_question = True
-        
         # Determine if user answers or rejects based on patience
-        # For Experienced-Engineer with obvious questions, increase reject probability
         effective_patience = patience_value
-        if is_obvious_question and persona.expertise == "high":
-            # Experienced-Engineer rejects obvious questions more often
-            effective_patience = patience_value * 0.5  # Reduce patience by 50% for obvious questions
         
         # Busy-Developer: make rejection much more likely for clarify (target >80% reject rate)
         if persona.patience == "low":
