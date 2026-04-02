@@ -93,7 +93,7 @@ def resolve_execute_code_for_training_and_reward(turn: Dict, *, use_full_query: 
     cv = turn.get("code_versions")
     if not isinstance(cv, dict):
         return turn.get("assistant_msg", "") or ""
-    fq = cv.get("full_query")
+    fq = cv.get("oracle")
     if isinstance(fq, str) and fq.strip():
         return fq
     return turn.get("assistant_msg", "") or ""
@@ -728,6 +728,56 @@ def rebalance_prefs_by_action(
         return execute + kept_clarify
 
 
+def rebalance_prefs_by_persona(
+    prefs: List[Dict],
+    seed: int,
+) -> List[Dict]:
+    """Downsample over-represented personas so each persona has equal pair count.
+
+    Groups by persona name (pref["persona"]["name"] or pref["persona"] string).
+    Keeps min_count pairs per persona, chosen deterministically by stable hash.
+    """
+    if not prefs:
+        return prefs
+
+    def _get_persona(p: Dict) -> str:
+        persona = p.get("persona")
+        if isinstance(persona, dict):
+            return persona.get("name", "Unknown")
+        return str(persona) if persona else "Unknown"
+
+    from collections import defaultdict
+    by_persona: Dict[str, List[Dict]] = defaultdict(list)
+    for p in prefs:
+        by_persona[_get_persona(p)].append(p)
+
+    if len(by_persona) <= 1:
+        return prefs
+
+    min_count = min(len(v) for v in by_persona.values())
+    if min_count == 0:
+        return prefs
+
+    result = []
+    for persona_name, persona_prefs in by_persona.items():
+        if len(persona_prefs) <= min_count:
+            result.extend(persona_prefs)
+        else:
+            # Deterministically keep min_count pairs via stable hash
+            sorted_prefs = sorted(
+                persona_prefs,
+                key=lambda p: _stable_hash_to_unit_interval(p["state"].get("id", str(p["state"])), seed),
+            )
+            result.extend(sorted_prefs[:min_count])
+
+    print(f"🔧 Per-persona rebalance: {len(prefs)} -> {len(result)} "
+          f"({min_count} pairs × {len(by_persona)} personas)")
+    for persona_name, persona_prefs in sorted(by_persona.items()):
+        kept = min(len(persona_prefs), min_count)
+        print(f"   {persona_name}: {len(persona_prefs)} -> {kept}")
+    return result
+
+
 def compute_preferences(
     traj_path: Path,
     out_path: Path,
@@ -925,8 +975,8 @@ def compute_preferences(
                         "rejected_action": rejected_turn0["action"],
                         "chosen_assistant_msg": f"{chosen_turn0['action']}\n{pref_assistant_text(chosen_turn0)}",
                         "rejected_assistant_msg": f"{rejected_turn0['action']}\n{pref_assistant_text(rejected_turn0)}",
-                        "chosen_reward": chosen_traj["reward"],  # Final trajectory reward
-                        "rejected_reward": rejected_traj["reward"],  # Final trajectory reward
+                        "chosen_reward": chosen_traj["reward"],
+                        "rejected_reward": rejected_traj["reward"],
                         "chosen_task_score": chosen_turn0.get("task_score", 0),
                         "rejected_task_score": rejected_turn0.get("task_score", 0),
                         "chosen_interrupt_cost": chosen_turn0.get("interrupt_cost", 0),
@@ -936,7 +986,55 @@ def compute_preferences(
                     })
                     generated_pairs += 1
                     total_pairs_generated += 1
-        
+
+                    # --- Method B: multi-turn pairs for Turn 1+ Clarify turns ---
+                    # For the chosen Clarify trajectory, generate additional pairs at each
+                    # subsequent Clarify turn using the rejected Execute trajectory's Turn 0
+                    # response as the counterfactual "what if we executed right now".
+                    if chosen_turn0["action"] == "Clarify":
+                        clarify_traj_id = chosen_traj["trajectory_id"]
+                        execute_turn0 = rejected_turn0  # the Execute-at-T0 response
+
+                        full_clarify_turns = sorted(
+                            traj_turns_dict.get(clarify_traj_id, []),
+                            key=lambda x: x["state"].get("dialogue_turn", 0),
+                        )
+                        for ct in full_clarify_turns:
+                            ct_turn = ct["state"].get("dialogue_turn", 0)
+                            if ct_turn == 0:
+                                continue  # already handled above
+                            if ct.get("action") != "Clarify":
+                                continue  # only Clarify turns get multi-turn pairs
+
+                            ct_reward = ct.get("total_reward", chosen_traj["reward"])
+                            exe_reward = rejected_traj["reward"]
+                            if ct_reward - exe_reward < 0.0001:
+                                continue  # no useful signal
+
+                            ct_msg = pref_assistant_text(ct)
+                            exe_msg = pref_assistant_text(execute_turn0)
+                            if not ct_msg or not exe_msg or ct_msg == exe_msg:
+                                continue
+
+                            prefs.append({
+                                "state": ct["state"],
+                                "persona": ct.get("persona", chosen_turn0.get("persona", {})),
+                                "chosen_action": "Clarify",
+                                "rejected_action": "Execute",
+                                "chosen_assistant_msg": f"Clarify\n{ct_msg}",
+                                "rejected_assistant_msg": f"Execute\n{exe_msg}",
+                                "chosen_reward": ct_reward,
+                                "rejected_reward": exe_reward,
+                                "chosen_task_score": ct.get("task_score", 0),
+                                "rejected_task_score": rejected_turn0.get("task_score", 0),
+                                "chosen_interrupt_cost": ct.get("interrupt_cost", 0),
+                                "rejected_interrupt_cost": rejected_turn0.get("interrupt_cost", 0),
+                                "prev_action": "Clarify",
+                                "dialogue_turn": ct_turn,
+                                "multi_turn_pair": True,
+                            })
+                            total_pairs_generated += 1
+
         # Debug output
         print(f"📊 Trajectory-level preference generation:")
         print(f"   - Processed {total_groups_processed} groups with 2+ trajectories")
@@ -956,12 +1054,15 @@ def compute_preferences(
 
     print(f"📊 Generated {len(prefs)} preference pairs")
 
-    # Optional global rebalancing to avoid action collapse
+    # Step 1: per-persona rebalance (equal pairs per persona, prevents one persona dominating)
+    prefs = rebalance_prefs_by_persona(prefs, rebalance_seed)
+
+    # Step 2: optional global action rebalance (Execute vs Clarify ratio within the balanced set)
     if target_execute_ratio is not None:
         before = len(prefs)
         prefs = rebalance_prefs_by_action(prefs, target_execute_ratio, rebalance_seed)
         after = len(prefs)
-        print(f"🔧 Rebalanced prefs: {before} -> {after} (target Execute ratio={target_execute_ratio})")
+        print(f"🔧 Action rebalanced: {before} -> {after} (target Execute ratio={target_execute_ratio})")
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8") as f:

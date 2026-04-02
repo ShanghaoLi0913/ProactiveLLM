@@ -20,7 +20,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from reward.compute import compute_task_score
 
-TRAJ_PATH = PROJECT_ROOT / "data/logs/traj_colm_n4_150states_20260317_100056.jsonl"
+TRAJ_PATH = PROJECT_ROOT / "data/logs/traj_colm_3turn_persona_150states_20260402_053113_20260402_053116.jsonl"
 EXECUTE_PROMPT = (PROJECT_ROOT / "prompts/coding_execute.txt").read_text().strip()
 
 

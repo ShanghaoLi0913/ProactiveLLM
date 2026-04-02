@@ -230,7 +230,7 @@ def train(
         bf16=use_bf16,
         dataloader_pin_memory=False,
         dataloader_num_workers=0,
-        reference_free=True,
+        reference_free=False,
         max_grad_norm=1.0,
         optim="adamw_torch",
     )

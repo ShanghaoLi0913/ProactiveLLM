@@ -388,14 +388,16 @@ def select_mainline_action_from_persona(persona, state: Optional[Dict] = None) -
     if dialogue_turn == 0:
         # Different personas have different Clarify thresholds
         if persona.patience == "low":  # Busy-Developer
-            # High threshold: only Clarify if very uncertain
-            clarify_threshold = 0.7
+            # Very high threshold: almost never Clarify (only on extremely uncertain tasks)
+            # Raised from 0.7 to 0.9 to create clear gap vs Experienced (73% tasks have uncertainty>0.7)
+            clarify_threshold = 0.9
         elif persona.patience == "high":  # Novice-Learner
             # Low threshold: Clarify even if moderately uncertain
             clarify_threshold = 0.3
         else:  # Experienced-Engineer (mid patience)
             # Medium threshold: Clarify if reasonably uncertain
-            clarify_threshold = 0.5
+            # Raised from 0.5 to 0.6 for slightly more separation from Novice
+            clarify_threshold = 0.6
         
         # Decision: Clarify if uncertainty exceeds threshold
         if task_uncertainty > clarify_threshold:
@@ -728,7 +730,7 @@ Generate 1-2 specific questions that would help clarify these missing aspects.""
             code_versions = {}
             
             # Version 1: masked query + 用户澄清得到的信息 (current version)
-            code_versions["masked_with_clarification"] = assistant_msg
+            code_versions["clarified"] = assistant_msg
             
             # Version 2: full query生成的代码
             original_query = current_state.get("original_instruct_prompt", "")
@@ -742,9 +744,9 @@ Generate 1-2 specific questions that would help clarify these missing aspects.""
                     full_query_code = llm_output(full_query_state, action_prompt, llm_model, temperature=temperature, top_p=top_p)
                 else:
                     full_query_code = dummy_llm_output(full_query_state, action_prompt)
-                code_versions["full_query"] = full_query_code
+                code_versions["oracle"] = full_query_code
             else:
-                code_versions["full_query"] = None
+                code_versions["oracle"] = None
             
             # Version 3: masked query本身生成的代码 (初始masked query，无澄清信息)
             initial_masked_query = initial_state.get("query", "")
@@ -758,11 +760,34 @@ Generate 1-2 specific questions that would help clarify these missing aspects.""
                     masked_query_code = llm_output(masked_query_state, action_prompt, llm_model, temperature=temperature, top_p=top_p)
                 else:
                     masked_query_code = dummy_llm_output(masked_query_state, action_prompt)
-                code_versions["masked_only"] = masked_query_code
+                code_versions["direct"] = masked_query_code
             else:
                 # If no clarification happened, masked_only is same as masked_with_clarification
-                code_versions["masked_only"] = assistant_msg
-            
+                code_versions["direct"] = assistant_msg
+
+            # Version 4: ideal_disclosed — masked query + all masked_fields directly revealed
+            disclosure_rule = initial_state.get("disclosure_rule", {})
+            masked_fields = disclosure_rule.get("masked_fields", {}) if disclosure_rule else {}
+            ideal_parts = []
+            for field_items in masked_fields.values():
+                for item in (field_items if isinstance(field_items, list) else [field_items]):
+                    if str(item).strip():
+                        ideal_parts.append(str(item).strip())
+            if ideal_parts:
+                ideal_ctx = "Key requirements: " + "; ".join(ideal_parts)
+                ideal_query = f"{initial_masked_query}\n\nAdditional information from clarification:\n{ideal_ctx}"
+                ideal_state = initial_state.copy()
+                ideal_state["query"] = ideal_query
+                if local_generator is not None:
+                    ideal_code = local_generator.chat_complete(action_prompt, f"[Task]\n{ideal_query}")
+                elif llm_model:
+                    ideal_code = llm_output(ideal_state, action_prompt, llm_model, temperature=temperature, top_p=top_p)
+                else:
+                    ideal_code = dummy_llm_output(ideal_state, action_prompt)
+                code_versions["ideal_disclosed"] = ideal_code
+            else:
+                code_versions["ideal_disclosed"] = code_versions["direct"]
+
             # Add code_versions to trajectory
             traj["code_versions"] = code_versions
             
@@ -808,7 +833,7 @@ Generate 1-2 specific questions that would help clarify these missing aspects.""
         code_versions = {}
         
         # Version 1: masked query + 用户澄清得到的信息 (current version)
-        code_versions["masked_with_clarification"] = assistant_msg
+        code_versions["clarified"] = assistant_msg
         
         # Version 2: full query生成的代码
         original_query = current_state.get("original_instruct_prompt", "")
@@ -822,9 +847,9 @@ Generate 1-2 specific questions that would help clarify these missing aspects.""
                 full_query_code = llm_output(full_query_state, action_prompt, llm_model, temperature=temperature, top_p=top_p)
             else:
                 full_query_code = dummy_llm_output(full_query_state, action_prompt)
-            code_versions["full_query"] = full_query_code
+            code_versions["oracle"] = full_query_code
         else:
-            code_versions["full_query"] = None
+            code_versions["oracle"] = None
         
         # Version 3: masked query本身生成的代码 (初始masked query，无澄清信息)
         initial_masked_query = initial_state.get("query", "")
@@ -838,11 +863,34 @@ Generate 1-2 specific questions that would help clarify these missing aspects.""
                 masked_query_code = llm_output(masked_query_state, action_prompt, llm_model, temperature=temperature, top_p=top_p)
             else:
                 masked_query_code = dummy_llm_output(masked_query_state, action_prompt)
-            code_versions["masked_only"] = masked_query_code
+            code_versions["direct"] = masked_query_code
         else:
             # If no clarification happened, masked_only is same as masked_with_clarification
-            code_versions["masked_only"] = assistant_msg
-        
+            code_versions["direct"] = assistant_msg
+
+        # Version 4: ideal_disclosed — masked query + all masked_fields directly revealed
+        disclosure_rule = initial_state.get("disclosure_rule", {})
+        masked_fields = disclosure_rule.get("masked_fields", {}) if disclosure_rule else {}
+        ideal_parts = []
+        for field_items in masked_fields.values():
+            for item in (field_items if isinstance(field_items, list) else [field_items]):
+                if str(item).strip():
+                    ideal_parts.append(str(item).strip())
+        if ideal_parts:
+            ideal_ctx = "Key requirements: " + "; ".join(ideal_parts)
+            ideal_query = f"{initial_masked_query}\n\nAdditional information from clarification:\n{ideal_ctx}"
+            ideal_state = initial_state.copy()
+            ideal_state["query"] = ideal_query
+            if local_generator is not None:
+                ideal_code = local_generator.chat_complete(action_prompt, f"[Task]\n{ideal_query}")
+            elif llm_model:
+                ideal_code = llm_output(ideal_state, action_prompt, llm_model, temperature=temperature, top_p=top_p)
+            else:
+                ideal_code = dummy_llm_output(ideal_state, action_prompt)
+            code_versions["ideal_disclosed"] = ideal_code
+        else:
+            code_versions["ideal_disclosed"] = code_versions["direct"]
+
         # Check task completion
         task_completed = check_task_completion(current_state, assistant_msg, domain)
         

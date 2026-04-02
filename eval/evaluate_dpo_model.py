@@ -631,6 +631,7 @@ def evaluate_model(
         interrupt_cost = compute_interrupt_cost_v2(meta, n_questions, response)
         total_r = total_reward(task_score, interrupt_cost)
         
+        persona_name = pref.get("persona", {}).get("name", "Unknown") if isinstance(pref.get("persona"), dict) else str(pref.get("persona", "Unknown"))
         results.append({
             "state_id": state.get("id", f"sample_{i}"),
             "predicted_action": predicted_action,
@@ -640,12 +641,14 @@ def evaluate_model(
             "total_reward": total_r,
             "response_length": len(response),
             "n_questions": n_questions,
+            "persona": persona_name,
         })
-        
+
         if (i + 1) % 10 == 0:
             print(f"progress {i+1}/{len(prefs)}", flush=True)
-    
-    task_success_rate = (task_success_count / total_samples * 100) if total_samples > 0 else 0.0
+
+    # --- Code Pass Rate (BigCodeBench-style: all tests pass) ---
+    code_pass_rate = (task_success_count / total_samples * 100) if total_samples > 0 else 0.0
     execute_success_rate = (execute_success_count / execute_count * 100) if execute_count > 0 else 0.0
     valid_rewards = [r["total_reward"] for r in results if r.get("total_reward") is not None]
     valid_task_scores = [r["task_score"] for r in results if r.get("task_score") is not None]
@@ -653,38 +656,72 @@ def evaluate_model(
     avg_task_score = sum(valid_task_scores) / len(valid_task_scores) if valid_task_scores else 0.0
     avg_test_pass_rate = sum(test_pass_rates) / len(test_pass_rates) if test_pass_rates else 0.0
     soft_task_success_rate = (soft_success_count / total_samples * 100) if total_samples > 0 else 0.0
-    
+
+    # --- Action Accuracy ---
     action_matches = sum(1 for r in results if r["predicted_action"] == r["chosen_action"])
     action_accuracy = (action_matches / len(results) * 100) if results else 0.0
-    
+
+    # --- Proactivity Score: Clarify F1 (precision & recall vs chosen_action ground truth) ---
+    true_clarify = [r for r in results if r["chosen_action"] == "Clarify"]
+    pred_clarify = [r for r in results if r["predicted_action"] == "Clarify"]
+    true_pos = sum(1 for r in results if r["chosen_action"] == "Clarify" and r["predicted_action"] == "Clarify")
+    clarify_precision = (true_pos / len(pred_clarify) * 100) if pred_clarify else 0.0
+    clarify_recall = (true_pos / len(true_clarify) * 100) if true_clarify else 0.0
+    if clarify_precision + clarify_recall > 0:
+        clarify_f1 = 2 * clarify_precision * clarify_recall / (clarify_precision + clarify_recall)
+    else:
+        clarify_f1 = 0.0
+
+    # Proactivity score per persona
+    from collections import defaultdict
+    persona_stats = defaultdict(lambda: {"total": 0, "execute": 0, "clarify": 0, "correct": 0})
+    for r in results:
+        p = r["persona"]
+        persona_stats[p]["total"] += 1
+        if r["predicted_action"] == "Execute":
+            persona_stats[p]["execute"] += 1
+        else:
+            persona_stats[p]["clarify"] += 1
+        if r["predicted_action"] == r["chosen_action"]:
+            persona_stats[p]["correct"] += 1
+
     summary = {
-        "task_success_rate": task_success_rate,
-        "task_success_rate_execute_only": execute_success_rate,
+        # Code quality (BigCodeBench-style)
+        "code_pass_rate": code_pass_rate,
+        "code_pass_rate_execute_only": execute_success_rate,
+        "avg_test_pass_rate": avg_test_pass_rate,
+        "soft_code_pass_rate": soft_task_success_rate,
+        # Proactivity
+        "proactivity_clarify_precision": clarify_precision,
+        "proactivity_clarify_recall": clarify_recall,
+        "proactivity_clarify_f1": clarify_f1,
+        "proactivity_persona_breakdown": {p: dict(v) for p, v in persona_stats.items()},
+        # Action
+        "action_accuracy": action_accuracy,
         "predicted_execute_rate": (execute_count / len(results) * 100) if results else 0.0,
+        # Misc
         "avg_reward": avg_reward,
         "avg_task_score": avg_task_score,
-        "avg_test_pass_rate": avg_test_pass_rate,
-        "soft_task_success_rate": soft_task_success_rate,
-        "action_accuracy": action_accuracy,
         "num_prefs_rows": len(results),
-        "task_scored_samples": total_samples,
         "total_samples": len(results),
         "task_evaluated_samples": total_samples,
-        "task_success_count": task_success_count,
+        "code_pass_count": task_success_count,
         "execute_count": execute_count,
-        "execute_success_count": execute_success_count,
         "full_query_eval": full_query,
         "strict_execute_task_score": strict_execute_task_score,
-        "verbose_eval": verbose,
     }
-    
+
     print(
-        f"\nTSR={task_success_rate:.2f}% (hits {task_success_count}/{total_samples}) | "
-        f"execute-only={execute_success_rate:.2f}% | soft>={soft_task_success_rate:.2f}% | "
-        f"p(Execute)={summary['predicted_execute_rate']:.1f}% | action_acc={action_accuracy:.1f}% | "
-        f"avg_score={avg_task_score:.4f}",
+        f"\nCode Pass Rate={code_pass_rate:.2f}% ({task_success_count}/{total_samples}) | "
+        f"avg_test_pass={avg_test_pass_rate:.3f} | "
+        f"Clarify F1={clarify_f1:.1f}% (P={clarify_precision:.1f}% R={clarify_recall:.1f}%) | "
+        f"p(Execute)={summary['predicted_execute_rate']:.1f}% | action_acc={action_accuracy:.1f}%",
         flush=True,
     )
+    for p, v in sorted(persona_stats.items()):
+        acc = v["correct"] / v["total"] * 100 if v["total"] else 0
+        exe_rate = v["execute"] / v["total"] * 100 if v["total"] else 0
+        print(f"  [{p}] n={v['total']} acc={acc:.1f}% p(Exe)={exe_rate:.1f}%", flush=True)
     
     # 保存结果
     if output_path:
