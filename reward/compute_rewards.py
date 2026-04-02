@@ -77,7 +77,7 @@ class RewardConfig:
     w_task: float = 1.0
     # 提高w_interrupt以放大有效澄清（奖励）和无效澄清（惩罚）的差异
     # 这有助于解决MID塌陷问题：让有效澄清的MID/HIGH获得更高reward
-    w_interrupt: float = 0.3  # 提高到0.3，放大interrupt_cost的影响以拉开分差
+    w_interrupt: float = 0.2  # 0.2: interrupt_cost有区分力但不过激翻转正确pair
     # When True: Execute uses code_versions["full_query"] for task_score + DPO prefs (if present).
     full_query_for_execute: bool = False
 
@@ -1153,8 +1153,8 @@ def parse_args():
     parser.add_argument(
         "--w_interrupt",
         type=float,
-        default=0.1,
-        help="Weight for interrupt cost penalty (default: 0.1)",
+        default=0.2,
+        help="Weight for interrupt cost penalty (default: 0.2)",
     )
     parser.add_argument(
         "--target_execute_ratio",
