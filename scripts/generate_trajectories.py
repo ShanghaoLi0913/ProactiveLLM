@@ -1020,7 +1020,7 @@ def generate_trajectories(states: List[Dict], domain: str,
                     top_p=top_p,
                 )
                 trajectories.extend(multi_turn_trajs)
-            
+
                 # Stream write if out_file is provided
                 if out_file is not None:
                     for traj in multi_turn_trajs:
@@ -1032,6 +1032,46 @@ def generate_trajectories(states: List[Dict], domain: str,
                         f"  ✓ Generated {len(multi_turn_trajs)} turn trajectories for state {st.get('id', 'unknown')} with {persona_name}{action_str}",
                         flush=True,
                     )
+
+                # ── Method A: fork Execute at each intermediate Clarify turn ──────
+                # For Clarify mainlines with 2+ Clarify turns, generate an "Execute now"
+                # branch at each Clarify decision point after T0.  This creates pairs:
+                #   Clarify-again (mainline) vs Execute-now (fork) at the SAME state,
+                # giving direct per-turn proactivity signal for DPO training.
+                # T0 Execute branch is already handled by heuristic sampling (n_samples=2).
+                if first_action == "Clarify" and len(multi_turn_trajs) > 1:
+                    mainline_id = multi_turn_trajs[0]["trajectory_id"]
+                    for t_idx, turn_data in enumerate(multi_turn_trajs):
+                        if t_idx == 0:
+                            continue  # T0 Execute branch already covered by heuristic sampling
+                        if turn_data.get("action") != "Clarify":
+                            continue  # only fork at Clarify decisions
+                        fork_turn_num = turn_data["turn"]   # 1-based turn index in mainline
+                        fork_state = turn_data["state"].copy()
+                        fork_traj_id = f"{mainline_id}_fork_t{fork_turn_num}"
+                        fork_trajs = generate_multi_turn_conversation(
+                            fork_state, domain, llm_model, pid, max_turns=1,
+                            force_first_action="Execute",
+                            local_generator=local_generator,
+                            temperature=temperature,
+                            top_p=top_p,
+                            trajectory_id=fork_traj_id,
+                        )
+                        for ft in fork_trajs:
+                            ft["is_fork"] = True
+                            ft["fork_at_turn"] = fork_turn_num
+                            ft["parent_trajectory_id"] = mainline_id
+                            ft["turn"] = fork_turn_num  # align with mainline turn number
+                        trajectories.extend(fork_trajs)
+                        if out_file is not None:
+                            for ft in fork_trajs:
+                                out_file.write(json.dumps(ft, ensure_ascii=False) + "\n")
+                            out_file.flush()
+                            print(
+                                f"  ✓ [Method A] Fork Execute@turn{fork_turn_num} "
+                                f"for {PERSONAS[pid].name} (parent={mainline_id[:24]}...)",
+                                flush=True,
+                            )
 
         # Coarse progress update per state (works well in redirected logs; avoids tqdm carriage-return issues)
         if progress_every_states > 0 and (si % progress_every_states == 0 or si == total_states):

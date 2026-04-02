@@ -489,8 +489,9 @@ def compute_trajectory_level_rewards(
                     persona_adjustment += 0.15  # Strong bonus for Execute after Clarify
             
             elif persona_name == "Experienced-Engineer":
-                # Experienced-Engineer: Clarify at Turn 0, then Execute at Turn 1
-                # Should Clarify for high/medium uncertainty, Execute for low uncertainty
+                # Experienced-Engineer: Clarify ONCE at Turn 0, then Execute immediately.
+                # Turn 0: Clarify is correct (ask the key question once).
+                # Turn 1+: Execute is always correct (stop over-clarifying).
                 if dialogue_turn == 0:
                     # Turn 0: Strong preference for Clarify (especially for high uncertainty)
                     if action == "Clarify":
@@ -508,25 +509,21 @@ def compute_trajectory_level_rewards(
                         elif task_uncertainty < 0.4:
                             persona_adjustment = 0.05  # Small bonus for Execute on low uncertainty at Turn 0
                 else:
-                    # Turn 1+: Use original logic
-                    if action == "Clarify":
+                    # Turn 1+: Experienced should EXECUTE now, not keep clarifying.
+                    # Flip direction vs Turn 0: Execute is rewarded, Clarify is penalized.
+                    if action == "Execute":
+                        if prev_action == "Clarify":
+                            persona_adjustment = 0.20  # Strong bonus: execute right after clarifying once
+                        else:
+                            persona_adjustment = 0.10  # Bonus for execute at turn 1+
+                    elif action == "Clarify":
+                        # Over-clarifying: always penalize for Experienced at Turn 1+
                         if task_uncertainty >= 0.7:
-                            persona_adjustment = 0.15  # Bonus for Clarify on high uncertainty
+                            persona_adjustment = -0.15  # Strong penalty for over-clarifying
                         elif task_uncertainty >= 0.5:
-                            persona_adjustment = 0.10  # Bonus for Clarify on medium-high uncertainty
-                        elif task_uncertainty >= 0.4:
-                            persona_adjustment = 0.05  # Small bonus for medium uncertainty
-                    elif action == "Execute":
-                        if task_uncertainty >= 0.7:
-                            persona_adjustment = -0.10  # Penalty for Execute on high uncertainty
-                        elif task_uncertainty >= 0.5:
-                            persona_adjustment = -0.05  # Penalty for Execute on medium-high uncertainty
-                        elif task_uncertainty < 0.4:
-                            persona_adjustment = 0.05  # Bonus for Execute on low uncertainty
-                    
-                    # Multi-turn bonus: If prev_action was Clarify, Execute is preferred
-                    if prev_action == "Clarify":
-                        persona_adjustment += 0.10  # Bonus for Execute after Clarify
+                            persona_adjustment = -0.10  # Penalty for over-clarifying
+                        else:
+                            persona_adjustment = -0.05  # Small penalty even on low uncertainty
             
             total_r = float(base_reward + persona_adjustment)
         
@@ -1034,6 +1031,65 @@ def compute_preferences(
                                 "multi_turn_pair": True,
                             })
                             total_pairs_generated += 1
+
+        # --- Method A: pairs from fork Execute trajectories ---
+        # Fork trajectories are forked from a Clarify mainline at each intermediate
+        # Clarify turn.  For each fork, create a pair:
+        #   Clarify-again (mainline) vs Execute-now (fork) at the SAME dialogue state.
+        method_a_pairs = 0
+        for _traj_id, turns in traj_turns_dict.items():
+            for fork_turn in turns:
+                if not fork_turn.get("is_fork"):
+                    continue
+                parent_id = fork_turn.get("parent_trajectory_id")
+                fork_at = fork_turn.get("fork_at_turn")
+                if parent_id is None or fork_at is None:
+                    continue
+                # Find mainline Clarify turn at the fork position
+                parent_turns = traj_turns_dict.get(parent_id, [])
+                mainline_clarify = None
+                for pt in parent_turns:
+                    if pt.get("turn", 0) == fork_at and pt.get("action") == "Clarify":
+                        mainline_clarify = pt
+                        break
+                if mainline_clarify is None:
+                    continue
+                clarify_reward = mainline_clarify.get("total_reward", 0)
+                execute_reward = fork_turn.get("total_reward", 0)
+                if abs(clarify_reward - execute_reward) < 0.0001:
+                    continue  # no useful signal
+                clarify_msg = pref_assistant_text(mainline_clarify)
+                execute_msg = pref_assistant_text(fork_turn)
+                if not clarify_msg or not execute_msg or clarify_msg == execute_msg:
+                    continue
+                if clarify_reward > execute_reward:
+                    chosen_t, rejected_t = mainline_clarify, fork_turn
+                    chosen_a, rejected_a = "Clarify", "Execute"
+                else:
+                    chosen_t, rejected_t = fork_turn, mainline_clarify
+                    chosen_a, rejected_a = "Execute", "Clarify"
+                prefs.append({
+                    "state": mainline_clarify["state"],
+                    "persona": mainline_clarify.get("persona", {}),
+                    "chosen_action": chosen_a,
+                    "rejected_action": rejected_a,
+                    "chosen_assistant_msg": f"{chosen_a}\n{pref_assistant_text(chosen_t)}",
+                    "rejected_assistant_msg": f"{rejected_a}\n{pref_assistant_text(rejected_t)}",
+                    "chosen_reward": chosen_t.get("total_reward", 0),
+                    "rejected_reward": rejected_t.get("total_reward", 0),
+                    "chosen_task_score": chosen_t.get("task_score", 0),
+                    "rejected_task_score": rejected_t.get("task_score", 0),
+                    "chosen_interrupt_cost": chosen_t.get("interrupt_cost", 0),
+                    "rejected_interrupt_cost": rejected_t.get("interrupt_cost", 0),
+                    "prev_action": "Clarify",
+                    "dialogue_turn": fork_at - 1,
+                    "multi_turn_pair": True,
+                    "method_a_pair": True,
+                })
+                total_pairs_generated += 1
+                method_a_pairs += 1
+        if method_a_pairs > 0:
+            print(f"   - Method A (fork) pairs: {method_a_pairs}")
 
         # Debug output
         print(f"📊 Trajectory-level preference generation:")
