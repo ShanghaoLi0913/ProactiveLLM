@@ -41,7 +41,7 @@ def compute_task_score(sample: Dict, domain: str, assistant_output: Optional[str
         task_uncertainty = float(sample.get("task_uncertainty", 0.0))
         tests = sample.get("convcodeworld_tests") or sample.get("test")
 
-        # If tests are available, always score by running them
+        # If tests are available, run them and return pass_rate directly
         if tests:
             try:
                 from eval.evaluate_dpo_model import extract_code_from_text, score_code_passfail
@@ -50,28 +50,13 @@ def compute_task_score(sample: Dict, domain: str, assistant_output: Optional[str
                 if not code:
                     return 0.0
 
-                # Use shorter timeout (3s) to avoid long-running tests
-                # If timeout, catch exception and return 0 (skip this test)
                 pass_rate = float(score_code_passfail(code, tests, timeout=10))
-                if pass_rate < 0.5:
-                    return 0.0
-
-                # Full credit only if user-provided edge-case info was acquired
-                if has_edge_cases_info:
-                    return 1.0
-
-                # Otherwise cap reward based on task uncertainty (high uncertainty → stronger penalty)
-                if task_uncertainty >= 0.7:
-                    return 0.1
-                if task_uncertainty >= 0.4:
-                    return 0.4
-                return 0.7
+                return pass_rate
             except Exception as e:
-                # Timeout or other errors: skip this test and return 0
-                # print(f"Warning: Test execution failed or timed out: {e}")
+                # Timeout or other errors: return 0
                 return 0.0
 
-        # No tests available: use heuristic scoring
+        # No tests available: use heuristic scoring based on has_edge_cases_info
         if has_edge_cases_info:
             return 0.9
         if task_uncertainty >= 0.7:
