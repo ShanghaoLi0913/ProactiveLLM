@@ -1073,6 +1073,47 @@ def generate_trajectories(states: List[Dict], domain: str,
                                 flush=True,
                             )
 
+                # ── Method C: fork Clarify at each intermediate Execute turn (Experienced only) ──
+                # For Experienced-Engineer Clarify mainlines: when the mainline Executes at T1+
+                # (after having Clarified at T0), generate a "Clarify-again" fork at that state.
+                # This creates pairs:
+                #   Execute-now (mainline) vs Clarify-again (fork) at the SAME state,
+                # teaching the model that Experienced should Execute after already Clarifying once.
+                if first_action == "Clarify" and PERSONAS[pid].name == "Experienced-Engineer" and len(multi_turn_trajs) > 1:
+                    mainline_id = multi_turn_trajs[0]["trajectory_id"]
+                    for t_idx, turn_data in enumerate(multi_turn_trajs):
+                        if t_idx == 0:
+                            continue
+                        if turn_data.get("action") != "Execute":
+                            continue  # only fork at Execute decisions
+                        fork_turn_num = turn_data["turn"]
+                        fork_state = turn_data["state"].copy()
+                        fork_traj_id = f"{mainline_id}_mc_t{fork_turn_num}"
+                        fork_trajs = generate_multi_turn_conversation(
+                            fork_state, domain, llm_model, pid, max_turns=1,
+                            force_first_action="Clarify",
+                            local_generator=local_generator,
+                            temperature=temperature,
+                            top_p=top_p,
+                            trajectory_id=fork_traj_id,
+                        )
+                        for ft in fork_trajs:
+                            ft["is_fork"] = True
+                            ft["fork_at_turn"] = fork_turn_num
+                            ft["parent_trajectory_id"] = mainline_id
+                            ft["turn"] = fork_turn_num
+                            ft["method_c"] = True
+                        trajectories.extend(fork_trajs)
+                        if out_file is not None:
+                            for ft in fork_trajs:
+                                out_file.write(json.dumps(ft, ensure_ascii=False) + "\n")
+                            out_file.flush()
+                            print(
+                                f"  ✓ [Method C] Fork Clarify@turn{fork_turn_num} "
+                                f"for {PERSONAS[pid].name} (parent={mainline_id[:24]}...)",
+                                flush=True,
+                            )
+
         # Coarse progress update per state (works well in redirected logs; avoids tqdm carriage-return issues)
         if progress_every_states > 0 and (si % progress_every_states == 0 or si == total_states):
             elapsed = time.time() - t0

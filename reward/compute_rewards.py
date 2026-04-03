@@ -1091,6 +1091,63 @@ def compute_preferences(
         if method_a_pairs > 0:
             print(f"   - Method A (fork) pairs: {method_a_pairs}")
 
+        # --- Method C: pairs from fork Clarify trajectories (Experienced-Engineer T1+) ---
+        # Fork trajectories are forked from an Execute mainline turn at T1+.
+        # Creates pairs: Execute-now (mainline, chosen) vs Clarify-again (fork, rejected).
+        method_c_pairs = 0
+        for _traj_id, turns in traj_turns_dict.items():
+            for fork_turn in turns:
+                if not fork_turn.get("is_fork") or not fork_turn.get("method_c"):
+                    continue
+                parent_id = fork_turn.get("parent_trajectory_id")
+                fork_at = fork_turn.get("fork_at_turn")
+                if parent_id is None or fork_at is None:
+                    continue
+                parent_turns = traj_turns_dict.get(parent_id, [])
+                mainline_execute = None
+                for pt in parent_turns:
+                    if pt.get("turn", 0) == fork_at and pt.get("action") == "Execute":
+                        mainline_execute = pt
+                        break
+                if mainline_execute is None:
+                    continue
+                execute_reward = mainline_execute.get("total_reward", 0)
+                clarify_reward = fork_turn.get("total_reward", 0)
+                if abs(execute_reward - clarify_reward) < 0.0001:
+                    continue
+                execute_msg = pref_assistant_text(mainline_execute)
+                clarify_msg = pref_assistant_text(fork_turn)
+                if not execute_msg or not clarify_msg or execute_msg == clarify_msg:
+                    continue
+                if execute_reward > clarify_reward:
+                    chosen_t, rejected_t = mainline_execute, fork_turn
+                    chosen_a, rejected_a = "Execute", "Clarify"
+                else:
+                    chosen_t, rejected_t = fork_turn, mainline_execute
+                    chosen_a, rejected_a = "Clarify", "Execute"
+                prefs.append({
+                    "state": mainline_execute["state"],
+                    "persona": mainline_execute.get("persona", {}),
+                    "chosen_action": chosen_a,
+                    "rejected_action": rejected_a,
+                    "chosen_assistant_msg": f"{chosen_a}\n{pref_assistant_text(chosen_t)}",
+                    "rejected_assistant_msg": f"{rejected_a}\n{pref_assistant_text(rejected_t)}",
+                    "chosen_reward": chosen_t.get("total_reward", 0),
+                    "rejected_reward": rejected_t.get("total_reward", 0),
+                    "chosen_task_score": chosen_t.get("task_score", 0),
+                    "rejected_task_score": rejected_t.get("task_score", 0),
+                    "chosen_interrupt_cost": chosen_t.get("interrupt_cost", 0),
+                    "rejected_interrupt_cost": rejected_t.get("interrupt_cost", 0),
+                    "prev_action": "Clarify",
+                    "dialogue_turn": fork_at - 1,
+                    "multi_turn_pair": True,
+                    "method_c_pair": True,
+                })
+                total_pairs_generated += 1
+                method_c_pairs += 1
+        if method_c_pairs > 0:
+            print(f"   - Method C (fork) pairs: {method_c_pairs}")
+
         # Debug output
         print(f"📊 Trajectory-level preference generation:")
         print(f"   - Processed {total_groups_processed} groups with 2+ trajectories")
