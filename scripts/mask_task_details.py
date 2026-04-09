@@ -114,34 +114,42 @@ def mask_prompt(instruct_prompt: str, maskable_info: Dict, mask_level: str = "mo
     # Light masking: 只mask部分细节
     # Moderate masking: mask输入约束和edge cases
     # Heavy masking: mask大部分约束和格式要求
-    
+
+    # ── 阶段 1：先 mask output_format（必须在 input_constraints 之前）──
+    # 原因：input_constraints 的 regex 含 `$`，会跨行吞掉 output_format 内容
     if mask_level in ["moderate", "heavy"]:
-        # Mask输入约束相关的描述
-        # 移除关于输入范围、类型的详细描述
-        patterns_to_remove = [
-            r'\b(?:handle|process|support).*?(?:empty|negative|zero|null|none).*?(?:\.|$)',
-            r'\b(?:if|when).*?(?:empty|negative|zero).*?(?:\.|$)',
-            r'default.*?(?:is|are).*?(?:\.|$)',
-        ]
-        
-        for pattern in patterns_to_remove:
-            matches = list(re.finditer(pattern, masked_prompt, re.IGNORECASE | re.DOTALL))
-            for match in reversed(matches):  # Reverse to maintain indices
-                masked_prompt = masked_prompt[:match.start()] + masked_prompt[match.end():]
-                masked_fields["input_constraints"].append(match.group(0).strip())
-    
-    if mask_level in ["moderate", "heavy"]:
-        # Mask输出格式的详细说明
-        # 保留基本的输出类型，但移除详细格式要求
         output_patterns = [
             r'should output with:\s*\n.*?(?=\n\s*You should|$)',
         ]
-        
+
         for pattern in output_patterns:
             matches = list(re.finditer(pattern, masked_prompt, re.IGNORECASE | re.DOTALL))
             for match in reversed(matches):
-                masked_prompt = masked_prompt[:match.start()] + masked_prompt[match.end():]
                 masked_fields["output_format"].append(match.group(0).strip())
+                # 清理 match 前面的残留不完整句子（如 "The function "）
+                before = masked_prompt[:match.start()]
+                trailing_fragment = re.search(r'(?:^|\n)(\s*\w[\w\s]{0,30})\s*$', before)
+                if trailing_fragment:
+                    fragment = trailing_fragment.group(1).strip()
+                    # 如果残留片段不是完整句子（不以句号结尾且很短），一起删掉
+                    if not fragment.endswith('.') and len(fragment.split()) <= 5:
+                        before = before[:trailing_fragment.start(1)]
+                masked_prompt = before + masked_prompt[match.end():]
+
+    # ── 阶段 2：mask input_constraints ──
+    if mask_level in ["moderate", "heavy"]:
+        # 使用 [^\n] 代替 .，防止跨行匹配吞掉后续内容
+        patterns_to_remove = [
+            r'\b(?:handle|process|support)[^\n]*?(?:empty|negative|zero|null|none)[^\n]*?(?:\.|\n|$)',
+            r'\b(?:if|when)[^\n]*?(?:empty|negative|zero)[^\n]*?(?:\.|\n|$)',
+            r'default[^\n]*?(?:is|are)[^\n]*?(?:\.|\n|$)',
+        ]
+
+        for pattern in patterns_to_remove:
+            matches = list(re.finditer(pattern, masked_prompt, re.IGNORECASE))
+            for match in reversed(matches):  # Reverse to maintain indices
+                masked_prompt = masked_prompt[:match.start()] + masked_prompt[match.end():]
+                masked_fields["input_constraints"].append(match.group(0).strip())
     
     if mask_level == "heavy":
         # Heavy masking: 移除更多细节
@@ -190,10 +198,10 @@ def create_mask_rule(masked_fields: Dict, task: Dict) -> Dict:
             "hints": extract_constraint_hints(test, instruct_prompt)
         }
     
-    # 输出格式的disclosure信息
+    # 输出格式的disclosure信息 — 直接使用 masked_fields 中的完整内容
     if masked_fields.get("output_format"):
         disclosure_rule["disclosure_info"]["output_format"] = {
-            "specification": extract_output_spec(task)
+            "specification": masked_fields["output_format"]
         }
     
     # 验证规则的disclosure信息

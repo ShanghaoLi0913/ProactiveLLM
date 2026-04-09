@@ -6,6 +6,153 @@
 
 ## 2026-04-09
 
+### 37. v29 计划：基于结构化 masking 重新生成数据
+
+详见下方 #35、#36 分析。核心改动：用 BigCodeBench 官方 `instruct_prompt` 的固定结构边界重写 masking 逻辑，彻底解决断句残留和 regex 跨行吞内容问题。
+
+v29 步骤：
+1. 重写 `mask_task_details.py`：按 `"The function should output with:\n"` → `"You should write self-contained"` 边界精确切割
+2. 用 `instruct_prompt`（而非自建 query 字段）作为 masked prompt 基础，保证结构一致
+3. 重新生成 `bigcodebench_masked_states.jsonl`（470 states）
+4. 重新生成轨迹 → compute_rewards → 训练 v29 DPO → 评估
+
+### 36. Masking 根因：应直接按结构边界切割
+
+BigCodeBench 全部 1140 个 task 的 `instruct_prompt` 都有固定结构：
+
+```
+[函数描述]
+The function should raise the exception for: [异常]（可选）
+The function should output with:
+    [返回值类型和描述]
+You should write self-contained code starting with:
+```[代码模板]```
+```
+
+output_format 就是 `"The function should output with:\n"` 到 `"You should write self-contained"` 之间的内容，边界 100% 固定，不需要任何复杂 regex。
+
+正确的 mask 方式：
+```python
+masked = re.sub(
+    r'The function should output with:\n.*?(?=You should write self-contained)',
+    '',
+    instruct_prompt,
+    flags=re.DOTALL
+)
+```
+
+mask 后效果（以 BigCodeBench/1 为例）：
+- 原始：`"...ValueError if ...\nThe function should output with:\n    dict: A dictionary...\nYou should write..."`
+- masked：`"...ValueError if ...\nYou should write..."` ← 零残留，干净
+
+现有 masking（regex 猜边界）的问题：
+1. 断句残留 `"The function \n"`：470/470（100%）受影响
+2. input_constraints regex 跨行吞掉 output_format（Bug #2）：14/470
+3. disclosure_info 只存截断内容（Bug #1）：456/470
+
+### 35. Task success rate 低的根本原因确认
+
+**实验**：Base Llama-3.1-8B-Instruct 在这 20 个 v28 评估 task 上：
+
+| 条件 | Pass@1 |
+|------|--------|
+| Unmasked（完整 instruct_prompt） | **30% (6/20)** |
+| Masked（现有 masking） | **0% (0/20)** |
+| v28 DPO + Masked（Busy，直接 Execute） | **5% (1/20)** |
+
+与官方 leaderboard 对齐：Llama-3.1-8B-Instruct 在 BigCodeBench Full Set 的官方 solve rate = 32.8%，我们的 30% 完全一致。
+
+**结论**：
+- 模型能力上限 ~30%，这批 task 本身不算特别难
+- Masking 把 pass rate 从 30% 打到 0%，是主要原因
+- v28 Experienced persona 多轮 Clarify 只恢复到 5%，说明 Clarify 几乎没有有效恢复 output_format 信息
+- 根本原因是 masking 方式有问题（断句残留 + regex 不精确），导致 masked query 质量差，即使 Clarify 也难以弥补
+
+### 34. v28 task success 低的根因澄清
+
+#### 之前的结论（#33）需要修正
+
+#33 认为 `disclosure_info.output_format` 为空是 v28 task success 低的关键原因。经过对轨迹数据和代码的深入排查，发现这个结论**不准确**。
+
+#### 实际情况
+
+**轨迹生成没有问题**：用户模拟器（`simulator/disclosure.py:94`）读取的是 `disclosure_rule.masked_fields.output_format`，而非 `disclosure_rule.disclosure_info.output_format`。`masked_fields` 存有完整的被 mask 文本，所以轨迹生成时 Clarify 能正确披露返回值信息。
+
+验证数据：
+- `trajectories_145states_combined.jsonl` 中 1417 条 Clarify 轨迹
+- 其中 466 条的 `user_reaction.meta.disclosed_items.output_format` 包含完整内容（如 `"should output with:\n    float: The average of..."`)
+- `disclosure_info.output_format.specification` 确实只有 `"should output with:"`（截断），但**不影响轨迹生成**
+
+**评估脚本是真正的根因**：#23 Bug #2——`react()` 未传 `disclosure_rule` 参数，导致评估时用户模拟器拿不到任何 masked_fields 信息，Clarify 完全无效。这解释了为什么：
+- Novice（5 轮 Clarify）pass rate 反而不如 Busy（直接 Execute）
+- Experienced Clarify 轮数多但 task success 无提升
+
+#### 修正后的根因归因
+
+| 因素 | 影响程度 | 说明 |
+|------|---------|------|
+| 评估脚本 `react()` 缺 `disclosure_rule`（#23 Bug #2） | **关键** | Clarify 无效，多轮对话白问 |
+| 8B 模型编码能力 | **根本瓶颈** | unmasked task 也只有 43.3% |
+| `disclosure_info` 截断 bug | **不影响轨迹生成** | 仅影响 disclosure_info 字段，用户模拟器用的是 masked_fields |
+
+#### 结论
+
+- `disclosure_info` 的 bug 仍应修复（保持数据一致性），但不是 v28 低 pass rate 的原因
+- 评估脚本已在 #23 中修复（两处 `react()` 加上 `disclosure_rule`），需要**用修复后的评估脚本重跑 v28 评估**验证
+- 轨迹生成和训练数据质量没有问题，不需要重新训练
+
+### 33. Masking 代码深入审计与修复
+
+#### 发现的 3 个 Bug
+
+**Bug 1（HIGH）：`disclosure_info.output_format` 未存完整内容**
+
+`create_mask_rule` 调用 `extract_output_spec(task)` 提取 output_format，但该函数用 `r'should output.*?(?:\n|$)'` 只匹配到第一个换行，结果 456/470 个 state 的 `disclosure_info.output_format.specification` 都是 `"should output with:"`（无实际内容）。
+
+修复：`disclosure_info.output_format.specification` 直接使用 `masked_fields["output_format"]`（mask_prompt 实际删掉的完整文本），不再调用 `extract_output_spec`。
+
+**Bug 2（HIGH）：`mask_prompt` 执行顺序导致 14 个 state output_format 丢失**
+
+input_constraints regex（含 `$`）先于 output_format 执行，`r'\b(?:if|when).*?(?:empty|negative|zero).*?(?:\.|$)'` 会跨行吞掉后续的 `"should output with:..."` 内容。14/470 个 state 的 output_format 被错误地存入 `masked_fields.input_constraints`。
+
+修复：
+1. output_format masking 先于 input_constraints 执行
+2. input_constraints regex 用 `[^\n]` 替代 `.`，禁止跨行匹配
+
+**Bug 3（MEDIUM）：断句残留 `"The function \n"`**
+
+mask_prompt 删除 `"should output with:..."` 后，前面的 `"The function "` 残留在 query 中，456/470 个 state 受影响。
+
+修复：删除 output_format 时同时清理前面的不完整句子片段。
+
+#### 修复验证
+
+| 指标 | 修复前 | 修复后 |
+|------|--------|--------|
+| output_format 正确 mask | 456/470 | **470/470** |
+| 断句残留 `"The function \n"` | 456/470 | **0/470** |
+| disclosure_info 有完整内容 | 0/470 | **470/470** |
+
+#### v28 task success 低的根因分析
+
+v28 pass@1 = 3.3%（2/60），逐层归因：
+
+| 因素 | 影响程度 | 分析 |
+|------|---------|------|
+| 断句残留 `"The function \n"` | **低** | cosmetic noise，模型基本能忽略 |
+| output_format 被 mask（对 Busy） | **有限** | 77% 的返回类型可从上下文推断（描述+import+函数签名）；Busy 不 Clarify，信息缺失是设计意图 |
+| disclosure_info 为空（对 Experienced/Novice） | **关键** | Clarify 完全无效，用户模拟器无法披露返回值信息。Novice 5 轮 Clarify pass@1=0%，反而不如 Busy（5%） |
+| 8B 模型编码能力 | **根本瓶颈** | validate_llama_gap_v20 在 90 个 unmasked task 上也只有 43.3%；gpt-4o-mini 在这些 masked task 上同样 0% |
+
+**output_format 复杂度分布**：
+- 简单（1-2 行，类型基本可猜）：288/456（63%）
+- 复杂（3+ 行，tuple 结构/dict key-value 规范）：168/456（37%），测试 assert 严格匹配这些细节
+
+**结论**：disclosure_info 为空是必须修的（否则无法验证"Clarify 能提升 task success"这一核心论点），但不应期望 pass rate 从 3% 跳到 40%。修复后的预期：
+- Busy 基本不变（不依赖 Clarify）
+- Experienced/Novice 应有明显提升（Clarify 能恢复返回值信息）
+- 复杂 output_format（37%）的 task 提升最大
+
 ### 23. 多轮评估脚本系统性 Bug 修复
 
 审计 `eval/evaluate_multi_turn_persona.py`，发现并修复 7 个 Bug：
