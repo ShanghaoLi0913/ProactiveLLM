@@ -2,88 +2,142 @@
 
 本文档描述了 `bigcodebench_masked_states.jsonl` 文件中 masked fields 的统计信息。
 
+> **v29（2026-04-10）**：masking 全部重写。固定结构锚点替代 regex，零断句残留。新增 validation_rules / note_that masking，移除不准确的 edge_cases。总任务数从 470 → 1140（全量）。
+
+---
+
+## BigCodeBench instruct_prompt 格式
+
+每个 task 的 `instruct_prompt` 固定结构如下：
+
+```
+[函数描述]                                               ← 100%，不 mask（核心功能说明）
+Note that: [特殊说明]                                    ← 18.9%，已 mask ✅
+The function should raise the exception for: [异常]      ← 26.0%，已 mask ✅
+The function should output with:
+    [返回值类型和描述]                                    ← 100%，已 mask ✅
+You should write self-contained code starting with:
+```[import + 函数签名]```                                ← 100%，不 mask（任务框架）
+```
+
+### 各部分 mask 决策
+
+| 部分 | mask？ | 频率 | 理由 |
+|------|--------|------|------|
+| 函数描述 | ❌ | 100% | 核心功能说明，mask 则模型不知做什么 |
+| `Note that:` | ✅ | 18.9% | 含命名规则/阈值等，测试会 assert 具体值 |
+| `raise exception for:` | ✅ | 26.0% | 异常处理要求，测试会 assert 异常类型 |
+| `output with:` | ✅ | 100% | 返回值类型，测试严格 assert |
+| 代码模板（import + 函数签名） | ❌ | 100% | 模型写代码的必要框架，mask 则任务无法完成 |
+
+---
+
+## Masking 示例
+
+**原始 instruct_prompt：**
+```
+Zips all files in the specified directory and returns the path to the created zip file.
+Note that: The zip name is always 'files.zip'
+The function should raise the exception for: FileNotFoundError: if the directory does not exist
+The function should output with:
+    str: The path to the generated zip file. Returns None if no files found.
+You should write self-contained code starting with:
+```
+import os, glob, zipfile
+def task_func(directory):
+```
+```
+
+**模型实际看到的（mask 后）：**
+```
+Zips all files in the specified directory and returns the path to the created zip file.
+You should write self-contained code starting with:
+```
+import os, glob, zipfile
+def task_func(directory):
+```
+```
+
+三个字段全部删除，模型需要通过 Clarify 逐步恢复。
+
+---
+
 ## 数据概览
 
-- **总任务数**: 470
+- **总任务数**: 1140（BigCodeBench Full Set v0.1.4）
+- **断句残留**: 0/1140
+- **output_format masked**: 1140/1140（100%）
+- **validation_rules masked**: 296/1140（26.0%）
+- **note_that masked**: 216/1140（18.9%）
+- **disclosure_info 内容完整**: 1140/1140（100%，与 masked_fields 完全一致）
 
-## Masked Fields 结构
-
-每条数据的 `disclosure_rule.masked_fields` 都包含以下 4 个字段：
-- `input_constraints`: 被 mask 的输入约束信息（列表）
-- `output_format`: 被 mask 的输出格式信息（列表）
-- `edge_cases`: 从测试用例中提取的边界情况（列表）
-- `validation_rules`: 被 mask 的验证规则（列表）
-
-**注意**: 这些字段总是存在，但可能是空列表 `[]`。
-
-## 各字段填充情况统计
+## 各字段填充情况
 
 | 字段 | 有内容的数量 | 占比 |
 |------|------------|------|
-| `edge_cases` | 470 / 470 | **100.0%** |
-| `output_format` | 456 / 470 | **97.0%** |
-| `validation_rules` | 130 / 470 | **27.7%** |
-| `input_constraints` | 60 / 470 | **12.8%** |
-
-### 说明
-
-- **`edge_cases` (100%)**: 所有任务都有边界情况，这些信息从测试用例中自动提取
-- **`output_format` (97%)**: 绝大多数任务都有输出格式说明被 mask
-- **`validation_rules` (27.7%)**: 约四分之一的任务包含验证规则（如异常处理要求）
-- **`input_constraints` (12.8%)**: 少数任务有输入约束被 mask（如默认值、输入范围等）
+| `output_format` | 1140 / 1140 | **100.0%** |
+| `validation_rules` | 296 / 1140 | **26.0%** |
+| `note_that` | 216 / 1140 | **18.9%** |
+| `edge_cases` | — | 已移除（从 test 代码关键词提取，不准确） |
 
 ## 字段组合统计
 
-最常见的字段组合（缩写：IC=input_constraints, OF=output_format, EC=edge_cases, VR=validation_rules）：
+| 组合 | 数量 | 占比 |
+|------|------|------|
+| **OF 仅输出格式** | ~648 | ~57% |
+| **OF + VR** | ~236 | ~21% |
+| **OF + NT** | ~156 | ~14% |
+| **OF + VR + NT** | ~60 | ~5% |
 
-| 组合 | 数量 | 占比 | 说明 |
-|------|------|------|------|
-| **OF+EC** | 311 / 470 | **66.2%** | 最常见：只有输出格式和边界情况 |
-| **OF+EC+VR** | 99 / 470 | **21.1%** | 包含验证规则 |
-| **IC+OF+EC+VR** | 25 / 470 | **5.3%** | 所有字段都有内容 |
-| **IC+OF+EC** | 21 / 470 | **4.5%** | 包含输入约束但无验证规则 |
-| **IC+EC** | 8 / 470 | **1.7%** | 只有输入约束和边界情况 |
-| **IC+EC+VR** | 6 / 470 | **1.3%** | 有输入约束和验证规则但无输出格式 |
+（OF = output_format，VR = validation_rules，NT = note_that）
 
-## 字段数量分布
+## Output Format 内容复杂度
 
-| 恰好有 N 个字段有内容 | 数量 | 占比 |
-|---------------------|------|------|
-| 2 个字段 | 319 / 470 | **67.9%** |
-| 3 个字段 | 126 / 470 | **26.8%** |
-| 4 个字段 | 25 / 470 | **5.3%** |
+| 复杂度 | 标准 | 数量 | 占比 |
+|--------|------|------|------|
+| 简单 | < 50 chars（单类型，易推断） | 138 | **12.1%** |
+| 中等 | 50–150 chars | 682 | **59.8%** |
+| 复杂 | > 150 chars（tuple/dict 结构，严格 assert） | 320 | **28.1%** |
 
-**说明**: 所有任务至少都有 2 个字段有内容（`edge_cases` 和 `output_format`），因为 `edge_cases` 是 100% 填充的。
+长度：min=4, median=98, mean=119, max=561 chars
 
-## Mask 策略
+## Task Uncertainty 分布
 
-Mask 操作由 `scripts/mask_task_details.py` 执行，使用 `mask_level="moderate"`（默认）：
+- min=0.50, mean=0.79, max=1.00
+- 1138/1140（99.8%）> 0.5，足够触发轨迹生成的 Clarify 探索
 
-1. **输入约束 (input_constraints)**: 
-   - 移除包含 "default", "handle empty/negative/zero" 等描述的文本
-   - 只有 12.8% 的任务匹配到这些模式
+## Masking 实现
 
-2. **输出格式 (output_format)**:
-   - 移除 "should output with: ..." 后的详细说明
-   - 97% 的任务都有输出格式说明被 mask
+全部基于固定结构锚点，不使用 regex：
 
-3. **边界情况 (edge_cases)**:
-   - 从测试用例中自动提取（通过关键词匹配：empty, negative, zero, single, duplicate 等）
-   - 100% 的任务都能提取到边界情况
+| 字段 | 锚点 start | 锚点 end |
+|------|-----------|---------|
+| `output_format` | `"The function should output with:\n"` | `"You should write self-contained code"` |
+| `validation_rules` | `"The function should raise the exception for:"` | 下一个 section 锚点 |
+| `note_that` | `"Note that:"` | 下一个 section 锚点 |
 
-4. **验证规则 (validation_rules)**:
-   - 提取 "raise ... if/when ..." 等异常处理要求
-   - 27.7% 的任务包含验证规则
+## Disclosure 机制
 
-## 使用说明
+`disclosure_rule` 对 Policy 模型不可见，仅在轨迹生成阶段的 simulator 使用：
 
-`disclosure_rule` 中的信息用于：
-- **`masked_fields`**: 记录被 mask 的具体文本内容，用于追溯和分析
-- **`disclosure_info`**: 结构化信息，供 `simulator/simulate.py` 在回答澄清问题时使用
+| 字段 | 触发关键词（示例） | 优先级 |
+|------|----------------|--------|
+| `output_format` | output, return, format, type, result, what | 1（最高） |
+| `validation_rules` | error, exception, raise, handle, fail | 2 |
+| `note_that` | note, special, specific, always, fixed, name | 3 |
 
-注意：`disclosure_rule` **对 Policy 模型不可见**，只在轨迹生成阶段的 simulator 中使用。
+- Novice (low)：每轮最多披露 1 条
+- Busy (mid)：每轮最多披露 3 条
+- Experienced (high)：每轮最多披露 6 条
 
+## 与 v28 对比
 
-
-
-
+| 指标 | v28 (470 tasks) | v29 (1140 tasks) |
+|------|----------------|-----------------|
+| 断句残留 | 470/470 (100%) | **0/1140 (0%)** |
+| output_format masked | 456/470 (97%) | **1140/1140 (100%)** |
+| validation_rules masked | regex，不稳定 | **296/1140，固定锚点** |
+| note_that masked | ❌ | **216/1140，固定锚点** |
+| disclosure_info 完整 | 0/470 (0%) | **1140/1140 (100%)** |
+| Base Llama unmasked pass@1 | ~30% | ~30%（模型相同） |
+| Base Llama masked pass@1 | 0% | 待测 |
