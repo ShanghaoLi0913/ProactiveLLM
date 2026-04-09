@@ -28,103 +28,49 @@ The reward function is designed to capture the trade-off between task completion
 
 \subsubsection{Task Success Reward}
 
-The task success reward $R_{\text{task}}$ is a sparse reward that measures whether the generated solution successfully completes the user's task. This reward is only assigned when the assistant selects \textbf{Execute} and generates a solution; if $a_t = \text{Clarify}$, then $R_{\text{task}} = 0.0$ since the task is not completed in that turn.
+The task success reward $R_{\text{task}}$ measures the functional correctness of the generated solution. This reward is computed only when the assistant selects \textbf{Execute} and generates a solution; for Clarify actions, $R_{\text{task}} = 0.0$ since no solution is produced.
 
-For coding tasks, we evaluate solutions by executing test cases when available. The reward depends on both test pass rate and whether critical information (e.g., edge cases) was acquired through previous clarification:
+For coding tasks, $R_{\text{task}}$ is measured by executing the generated code against test cases:
 
 \begin{equation}
 R_{\text{task}} = \begin{cases}
-1.0 & \text{if pass rate } > 0.5 \text{ and } h_{\text{edge}} = 1 \\
-0.7 & \text{if pass rate } > 0.5 \text{ and } U < 0.4 \\
-0.4 & \text{if pass rate } > 0.5 \text{ and } 0.4 \leq U < 0.7 \\
-0.1 & \text{if pass rate } > 0.5 \text{ and } U \geq 0.7 \\
-0.0 & \text{if pass rate } \leq 0.5 \text{ or no code generated}
+1.0 & \text{if all tests pass} \\
+\frac{n_{\text{passed}}}{n_{\text{total}}} & \text{otherwise}
 \end{cases}
 \end{equation}
 
-where:
-\begin{itemize}
-    \item $h_{\text{edge}} \in \{0, 1\}$ indicates whether edge case information was acquired through previous Clarify actions.
-    \item $U \in [0, 1]$ is the task uncertainty at the time of execution.
-    \item Pass rate is computed by executing the extracted code against available test cases.
-\end{itemize}
-
-This design creates a causal relationship: acquiring important information through clarification (especially edge cases) before execution leads to higher task success rewards. When task uncertainty is high ($U \geq 0.7$) and no edge case information was acquired, the reward is capped at $0.1$, encouraging the model to clarify first.
-
-When test cases are not available, we use heuristic scoring based on code presence and edge case information, with similar uncertainty-based penalties.
+where $n_{\text{passed}}$ and $n_{\text{total}}$ denote the number of passed and total test cases, respectively. Crucially, $R_{\text{task}}$ is a terminal reward computed only at the final execution step and is propagated back to all preceding turns in the trajectory (see Section~\ref{sec:traj-reward}).
 
 \subsubsection{Interruption Cost}
 
-The interruption cost $C_{\text{interrupt}}$ captures the cumulative cost of interrupting the user with clarification questions. This cost is designed to penalize ineffective or excessive clarification while rewarding effective clarification that helps complete the task.
-
-We model the interruption cost per turn as:
+Clarification may introduce interaction overhead and disrupt users who prefer efficient communication. We therefore define an interruption cost that accumulates across dialogue turns:
 
 \begin{equation}
-C_{\text{interrupt}}(a_t, o_t) = \begin{cases}
-n_t \cdot (\delta \cdot b_t \cdot r_t + \lambda \cdot b_t - \gamma \cdot b_t \cdot \alpha_t) & \text{if } a_t = \text{Clarify} \\
-0 & \text{if } a_t = \text{Execute}
-\end{cases}
+C_{\text{interrupt}} = \sum_{j=1}^{K} c(a_j, r_j)
 \end{equation}
 
-where:
-\begin{itemize}
-    \item $n_t$ is the number of clarification questions asked in turn $t$.
-    \item $b_t \in \{0, 1\}$ indicates whether clarification questions were asked ($b_t = 1$ if $n_t > 0$, otherwise $b_t = 0$).
-    \item $\alpha_t \in \{0, 1\}$ indicates whether the user answered the clarification ($\alpha_t = 1$) or not ($\alpha_t = 0$).
-    \item $r_t \in \{0, 1\}$ indicates whether the user rejected the clarification ($r_t = 1$) or not ($r_t = 0$).
-    \item $\delta = 0.8$ is the penalty coefficient for rejected clarifications.
-    \item $\lambda = 0.12$ is the base cost per question, preventing excessive clarification.
-    \item $\gamma = 0.08$ is the reward coefficient for effective clarifications (reduces cost when $\alpha_t = 1$).
-\end{itemize}
+The per-turn cost function is defined as:
 
-This formulation yields three distinct cases based on user response:
-\begin{itemize}
-    \item \textbf{Effective clarification} ($\alpha_t = 1, r_t = 0$): 
-    \begin{equation}
-    C_{\text{interrupt}} = n_t \cdot (\lambda - \gamma) = n_t \cdot 0.04
-    \end{equation}
-    The cost is minimal (near reward), encouraging the model to ask questions when they lead to useful information.
-    
-    \item \textbf{Rejected clarification} ($r_t = 1$): 
-    \begin{equation}
-    C_{\text{interrupt}} = n_t \cdot (\delta + \lambda) = n_t \cdot 0.92
-    \end{equation}
-    The cost is high, strongly penalizing clarifications that frustrate the user.
-    
-    \item \textbf{Unanswered clarification} ($\alpha_t = 0, r_t = 0$): 
-    \begin{equation}
-    C_{\text{interrupt}} = n_t \cdot \lambda = n_t \cdot 0.12
-    \end{equation}
-    The cost is moderate, penalizing questions that do not receive responses.
-\end{itemize}
+\begin{equation}
+c(a_j, r_j) = \lambda - \gamma \cdot \alpha_j + \delta \cdot r_j
+\end{equation}
 
-If $a_t = \text{Execute}$, then $C_{\text{interrupt}} = 0$ since no interruption occurs.
+where $\alpha_j \in \{0, 1\}$ indicates whether the user answered the clarification question and $r_j \in \{0, 1\}$ indicates whether the user rejected it. Answering a clarification question reduces the cost (encouraging informative clarification), while rejection increases the cost (penalizing unnecessary interruptions). If $a_j = \text{Execute}$, no interruption occurs and $c = 0$.
 
 \subsubsection{Total Reward}
 
-The total reward for a single turn combines task success reward and interruption cost:
+The reward for an interaction trajectory $\tau$ is defined as:
 
 \begin{equation}
-R(s_t, a_t, s_{t+1}) = w_{\text{task}} \cdot R_{\text{task}}(s_{t+1}) - w_{\text{interrupt}} \cdot C_{\text{interrupt}}(a_t, o_t)
+R(\tau) = w_{\text{task}} \cdot R_{\text{task}} - w_{\text{interrupt}} \cdot C_{\text{interrupt}}
 \end{equation}
 
-where $w_{\text{task}} = 1.0$ and $w_{\text{interrupt}} = 0.3$ are weighting parameters that balance the importance of task completion against user interruption. The weight $w_{\text{interrupt}} = 0.3$ is chosen to amplify the difference between effective and ineffective clarifications while maintaining task success as the primary objective.
+where $R_{\text{task}}$ measures the success of the final task execution and $C_{\text{interrupt}}$ captures the cumulative cost introduced by clarification. The weights $w_{\text{task}} = 1.0$ and $w_{\text{interrupt}} = 0.2$ balance task completion against interaction efficiency.
 
-\textbf{Special case}: If the user stops the interaction (indicated by $r_t = 1$ and conversation termination), the reward is set to $R = 0.0$ regardless of task success. This reflects that user termination represents a fundamental failure of the interaction, regardless of any partial progress made.
+\subsubsection{Multi-turn Credit Assignment}
+\label{sec:traj-reward}
 
-\subsubsection{Trajectory-Level Reward}
-
-For multi-turn conversations, we compute trajectory-level rewards to properly attribute the value of early clarification actions to the final task outcome. The key insight is that all turns in a trajectory share the final task outcome, but each turn has its own interruption cost.
-
-For each turn $t$ in a trajectory, we compute the reward as:
-
-\begin{equation}
-R_t = w_{\text{task}} \cdot R_{\text{task}}^{\text{final}} - w_{\text{interrupt}} \cdot C_{\text{interrupt}}(a_t, o_t)
-\end{equation}
-
-where $R_{\text{task}}^{\text{final}}$ is the task success reward from the final Execute action in the trajectory (or $0.0$ if no Execute action succeeded). This value is shared across all turns in the same trajectory, ensuring that early Clarify actions receive credit if they contribute to the final task success.
-
-This design allows early Clarify actions to be evaluated based on their contribution to the final task outcome. For example, a Clarify action in turn 1 that leads to acquiring edge case information will receive credit through $R_{\text{task}}^{\text{final}} = 1.0$ if the final Execute action succeeds with $h_{\text{edge}} = 1$, even though the Clarify action itself has $R_{\text{task}} = 0.0$ in that turn. Each turn's reward $R_t$ is then used independently for constructing preference pairs in DPO training.
+For multi-turn trajectories, all turns share the final task outcome $R_{\text{task}}$ computed from the final Execute action, while interruption costs accumulate across turns. This design enables early clarification actions to receive credit if they ultimately contribute to successful task completion, while still penalizing excessive or ineffective clarification.
 
 \subsection{Trajectory Generation with Simulated Users}
 
@@ -227,8 +173,133 @@ For each initial state $s_1$, we generate a multi-turn conversation trajectory a
     \end{itemize}
 \end{enumerate}
 
-\subsubsection{Preference Pair Generation}
+\subsubsection{Persona-Specific Target Behaviors}
 
-After generating trajectories, we compute rewards for each turn and construct preference pairs for DPO training. For each state-persona combination, we rank trajectories by their total reward and create pairs $(s, a^+, a^-)$ where $a^+$ is the chosen action (higher reward) and $a^-$ is the rejected action (lower reward).
+A central challenge is constructing preference pairs that teach the model \emph{distinct} behaviors for different personas. Each persona has a target interaction pattern that the model should learn:
 
-The preference pairs are constructed at the trajectory level, ensuring that the model learns to prefer action sequences that lead to better final outcomes while minimizing interruption cost.
+\begin{itemize}
+    \item \textbf{Busy-Developer}: Execute immediately at turn 0. Clarification is almost always unwelcome regardless of task uncertainty, because the user prioritizes speed over completeness.
+    \item \textbf{Experienced-Engineer}: Clarify at turn 0 to acquire key missing information, then switch to Execute at turn 1. One round of targeted clarification is valuable, but prolonged interaction is not.
+    \item \textbf{Novice-Learner}: Clarify for multiple rounds (turns 0, 1, 2, \ldots) to progressively recover missing requirements, then Execute once sufficient information has been gathered. The user's high patience makes extended clarification worthwhile.
+\end{itemize}
+
+These target behaviors yield the following ideal preference pairs at each dialogue turn:
+
+\begin{center}
+\small
+\begin{tabular}{llcc}
+\toprule
+\textbf{Persona} & \textbf{Turn} & \textbf{Chosen} & \textbf{Rejected} \\
+\midrule
+Busy-Developer & $t = 0$ & Execute & Clarify \\
+\midrule
+Experienced-Engineer & $t = 0$ & Clarify & Execute \\
+Experienced-Engineer & $t \geq 1$ & Execute & Clarify \\
+\midrule
+Novice-Learner & $t = 0, 1, \ldots, T{-}1$ & Clarify & Execute \\
+Novice-Learner & $t = T$ & Execute & Clarify \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+where $T$ denotes the turn at which the Novice transitions to execution (determined by remaining task uncertainty). This table defines the \emph{direction} of each preference pair: at each (persona, turn), we know which action should be preferred.
+
+\subsubsection{Behavior-First Pair Construction}
+
+Naively constructing preference pairs by comparing trajectory rewards leads to a fundamental conflict: since Execute trajectories directly produce task solutions, they tend to achieve higher $R_{\text{task}}$ than Clarify trajectories (where $R_{\text{task}} = 0$ for the Clarify turn itself). Under a unified reward, a purely reward-ranked approach would assign Execute as the chosen action for \emph{all} personas at turn 0, making the training signal persona-blind.
+
+To resolve this, we adopt a \textbf{behavior-first} construction strategy. The preference direction is determined by the persona's target behavior (the table above), not by reward magnitude. Concretely, for a given (state, persona, turn), we define a target action function:
+\begin{equation}
+a^*(p, t) = \begin{cases}
+\text{Execute} & \text{if } p = \text{Busy}, \text{ or } (p = \text{Experienced} \wedge t \geq 1) \\
+\text{Clarify} & \text{otherwise}
+\end{cases}
+\end{equation}
+
+The chosen trajectory $\tau^+$ is selected as the highest-reward trajectory whose action matches $a^*(p, t)$, and the rejected trajectory $\tau^-$ is the highest-reward trajectory with the opposite action. The reward is used only to rank trajectories \emph{within} each action group, not to determine the preference direction between actions:
+
+\begin{equation}
+\tau^+ = \argmax_{\tau : a_t(\tau) = a^*} R(\tau), \quad
+\tau^- = \argmax_{\tau : a_t(\tau) \neq a^*} R(\tau)
+\end{equation}
+
+This design ensures that the DPO training signal directly encodes persona-aware behavioral differences. Without it, we observed that trained models exhibit identical behavior across all personas (Section~\ref{sec:experiments}).
+
+\subsubsection{Pair Generation Pipeline}
+
+We generate preference pairs through three complementary methods. Each method targets a different part of the persona--turn space, and together they ensure coverage of all target behaviors.
+
+\paragraph{Method B: Turn-0 pairs and Novice multi-turn extension.}
+For each (state, persona) group, we partition trajectories by their turn-0 action into a Clarify pool and an Execute pool. From each pool, we select the trajectory with the highest reward as the pool's representative. The target action $a^*(p, 0)$ then determines which representative becomes chosen and which becomes rejected, producing one pair at turn~0.
+
+For Novice-Learner, where the chosen action at turn~0 is Clarify, we additionally trace the chosen Clarify trajectory forward through subsequent turns. At each turn $t > 0$ where the trajectory continues to Clarify, we generate an additional pair:
+\begin{center}
+\small
+chosen = Clarify response at turn $t$, \quad rejected = Execute response from turn-0 Execute pool
+\end{center}
+This provides the model with multi-turn Clarify preference signals at turns $t = 1, 2, \ldots$
+
+\paragraph{Method A: Fork-Execute pairs for Novice high turns.}
+Method~B reuses the same turn-0 Execute response as the rejected example for all turns, but the dialogue state evolves across turns. To provide more accurate contrastive pairs, we fork the Novice Clarify mainline at intermediate turns: at each fork point, we branch off an Execute trajectory from the \emph{same dialogue state} as the Clarify turn. This produces pairs where both chosen (Clarify) and rejected (Execute) observe identical conversation context, making the comparison more precise.
+
+\paragraph{Method C: Fork-Clarify pairs for Experienced turn~$\geq 1$.}
+The Experienced-Engineer's target behavior requires a transition from Clarify at turn~0 to Execute at turn~1. To generate pairs for this transition, we fork the Experienced mainline at the Execute point (turn~1), generating an alternative trajectory that continues Clarifying. The resulting pair has the mainline Execute as chosen and the forked Clarify as rejected, directly encoding the turn-dependent behavioral switch.
+
+\paragraph{Filtering rejected clarifications.}
+When selecting the best Clarify trajectory as a chosen example, we exclude trajectories where the user rejected the clarification (indicated by a high interruption cost from the rejection penalty $\delta$). A rejected Clarify represents a failed interaction---the user did not engage, and the resulting reward reflects this failure. Including such trajectories as chosen examples would teach the model to prefer clarification even when it leads to user frustration. If all available Clarify trajectories for a given (state, persona, turn) were rejected, we skip that pair entirely, as there is no positive evidence that Clarify is beneficial at that point.
+
+\paragraph{State-aligned rebalancing.}
+To ensure the model sees contrastive persona signals for the same task, we retain only states where all three personas have valid preference pairs. Within each (state, persona, turn) group, we keep the pair with the highest chosen reward. This produces a balanced training set where the model can learn persona-specific behaviors from direct comparisons on shared tasks.
+
+\paragraph{Summary.}
+Table~\ref{tab:pair-example} illustrates the pairs generated for a single task. For the same underspecified coding request, the three personas receive opposite preference signals: Busy is trained to execute immediately, Experienced to clarify once then execute, and Novice to clarify extensively before executing.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{llccl}
+\toprule
+\textbf{Persona} & \textbf{Turn} & \textbf{Chosen} & \textbf{Rejected} & \textbf{Source} \\
+\midrule
+Busy & 0 & Execute & Clarify & Method B \\
+\midrule
+Experienced & 0 & Clarify & Execute & Method B \\
+Experienced & 1 & Execute & Clarify & Method C \\
+\midrule
+Novice & 0 & Clarify & Execute & Method B \\
+Novice & 1 & Clarify & Execute & Method B / A \\
+Novice & 2 & Clarify & Execute & Method A \\
+Novice & $T$ & Execute & Clarify & Method B \\
+\bottomrule
+\end{tabular}
+\caption{Example preference pairs for a single task across three personas. The same task yields opposite preference directions depending on the persona and dialogue turn.}
+\label{tab:pair-example}
+\end{table}
+
+\subsection{Evaluation Metrics}
+
+We evaluate the trained policy along two axes: \textbf{proactive behavior quality} (does the model adapt its clarification strategy to different personas?) and \textbf{task success} (does the generated code actually solve the problem?).
+
+\subsubsection{Task Success Rate}
+
+We adopt the \textbf{pass@k} metric from BigCodeBench~\cite{zhuo2024bigcodebench} as the primary measure of task success. For each task, the model generates $k$ candidate solutions. A task is considered \emph{solved} if at least one candidate passes \textbf{all} test cases associated with that task:
+
+\begin{equation}
+\text{pass@}k = \frac{1}{|T|} \sum_{i=1}^{|T|} \mathbf{1}\!\left[\exists\, j \in \{1,\dots,k\} : \texttt{score}(c_{i,j}, \mathcal{T}_i) = 1.0\right]
+\end{equation}
+
+where $T$ is the set of evaluation tasks, $c_{i,j}$ is the $j$-th candidate solution for task $i$, $\mathcal{T}_i$ is the test suite for task $i$, and $\texttt{score}(c, \mathcal{T}) = 1.0$ iff the code $c$ passes every test case in $\mathcal{T}$. This is an all-or-nothing criterion: partial test passage does not count as success. We primarily report \textbf{pass@1} as the standard task success rate.
+
+In multi-turn evaluation, the model interacts with a simulated user across multiple dialogue turns before producing the final solution. The task success rate thus reflects the \emph{end-to-end} quality of the interaction: whether the clarification strategy (or lack thereof) ultimately led to a correct solution.
+
+\subsubsection{Proactive Behavior Metrics}
+
+To assess whether the model learns persona-specific clarification strategies, we measure:
+
+\begin{itemize}
+    \item \textbf{Action accuracy}: Whether the model's action (Clarify or Execute) matches the target action $a^*(p, t)$ for the given persona and dialogue turn.
+    \item \textbf{Average dialogue turns}: The mean number of interaction turns before the model selects Execute. This should vary across personas (e.g., $\approx 1$ for Busy, $\approx 2$ for Experienced, $\geq 3$ for Novice).
+    \item \textbf{Clarify rate}: The fraction of turns where the model selects Clarify, reflecting the overall proactivity level per persona.
+\end{itemize}
+
+The ideal outcome is a model that simultaneously achieves high task success and exhibits distinct per-persona interaction patterns, balancing task completion quality against user preference for interaction efficiency.

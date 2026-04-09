@@ -502,7 +502,7 @@ def update_state_for_next_turn(current_state: Dict, user_reaction: Dict, assista
     
     # Update dialogue turn (only if moving to next turn, not within same turn)
     if not is_same_turn:
-        new_state["dialogue_turn"] = current_state.get("dialogue_turn", 1) + 1
+        new_state["dialogue_turn"] = current_state.get("dialogue_turn", 0) + 1
     # If is_same_turn=True, keep the same dialogue_turn (same turn, multiple interactions)
     
     # Update prev_reject if user rejected
@@ -570,6 +570,35 @@ def update_state_for_next_turn(current_state: Dict, user_reaction: Dict, assista
         # task_uncertainty保持不变
     
     return new_state
+
+
+def build_clean_execute_query(initial_state: Dict, current_state: Dict) -> str:
+    """Build a clean query for Execute by combining initial masked query with disclosed info.
+
+    Instead of using raw dialogue history (which confuses code generation),
+    extract structurally tracked disclosed_info and present it cleanly,
+    similar to the ideal_disclosed format.
+    """
+    initial_query = initial_state.get("query", "")
+
+    # Extract disclosed_info from current state's disclosure_rule
+    disclosure_rule = current_state.get("disclosure_rule", {})
+    disclosed_info = disclosure_rule.get("disclosed_info", {})
+
+    # Collect all disclosed items
+    disclosed_parts = []
+    for category, items in disclosed_info.items():
+        if items:
+            for item in items:
+                if str(item).strip():
+                    disclosed_parts.append(str(item).strip())
+
+    if disclosed_parts:
+        disclosed_ctx = "Key requirements: " + "; ".join(disclosed_parts)
+        return f"{initial_query}\n\nAdditional information from clarification:\n{disclosed_ctx}"
+    else:
+        # No disclosed info yet (e.g., user rejected all clarifications)
+        return initial_query
 
 
 def generate_multi_turn_conversation(initial_state: Dict, domain: str,
@@ -658,13 +687,23 @@ IMPORTANT: The task description may be missing some information. Consider asking
 Generate 1-2 specific questions that would help clarify these missing aspects."""
         
         # Generate assistant message
-        if local_generator is not None:
-            assistant_msg = local_generator.chat_complete(action_prompt, f"[Task]\n{current_state['query']}")
-        elif llm_model:
-            assistant_msg = llm_output(current_state, action_prompt, llm_model, temperature=temperature, top_p=top_p)
+        # For Execute: use clean query (initial_query + disclosed_info) to avoid dialogue noise
+        # For Clarify: use current_state['query'] which includes dialogue history for context
+        if action == "Execute":
+            execute_query = build_clean_execute_query(initial_state, current_state)
+            execute_state = current_state.copy()
+            execute_state["query"] = execute_query
         else:
-            assistant_msg = dummy_llm_output(current_state, action_prompt)
-        
+            execute_query = current_state['query']
+            execute_state = current_state
+
+        if local_generator is not None:
+            assistant_msg = local_generator.chat_complete(action_prompt, f"[Task]\n{execute_query}")
+        elif llm_model:
+            assistant_msg = llm_output(execute_state, action_prompt, llm_model, temperature=temperature, top_p=top_p)
+        else:
+            assistant_msg = dummy_llm_output(execute_state, action_prompt)
+
         # Enforce action/message consistency: Clarify should not include code
         if action == "Clarify":
             assistant_msg = sanitize_clarify_message(assistant_msg)
@@ -817,17 +856,21 @@ Generate 1-2 specific questions that would help clarify these missing aspects.""
     # If we haven't executed yet (regardless of reason: max_turns or user_stopped), force Execute
     # This ensures every trajectory ends with code generation using masked query + clarification answers
     if not has_executed:
-        # Force Execute with current query (masked query + clarification answers)
+        # Force Execute with clean query (initial_query + disclosed_info)
         action = "Execute"
         action_prompt = prompts[action]
-        
-        # Generate assistant message (code) using current state's query
+
+        # Use clean query to avoid dialogue history noise
+        execute_query = build_clean_execute_query(initial_state, current_state)
+        execute_state = current_state.copy()
+        execute_state["query"] = execute_query
+
         if local_generator is not None:
-            assistant_msg = local_generator.chat_complete(action_prompt, f"[Task]\n{current_state['query']}")
+            assistant_msg = local_generator.chat_complete(action_prompt, f"[Task]\n{execute_query}")
         elif llm_model:
-            assistant_msg = llm_output(current_state, action_prompt, llm_model, temperature=temperature, top_p=top_p)
+            assistant_msg = llm_output(execute_state, action_prompt, llm_model, temperature=temperature, top_p=top_p)
         else:
-            assistant_msg = dummy_llm_output(current_state, action_prompt)
+            assistant_msg = dummy_llm_output(execute_state, action_prompt)
         
         # Generate 3 versions of code for comparison
         code_versions = {}
@@ -1139,6 +1182,7 @@ def main():
                        help="synthetic: quick test without dataset; dataset: load from JSONL")
     parser.add_argument("--domain", choices=["coding", "planning"], default="coding")
     parser.add_argument("--n_states", type=int, default=50, help="Number of states to process")
+    parser.add_argument("--skip_states", type=int, default=0, help="Skip first N states (for resuming generation)")
     parser.add_argument("--dataset_path", type=str, default="", help="Path to states JSONL (required for dataset mode)")
     parser.add_argument("--out", type=str, default="logs/trajectories.jsonl",
                        help="Output path relative to data/ directory")
@@ -1174,7 +1218,10 @@ def main():
     if args.mode == "dataset":
         if not args.dataset_path:
             raise SystemExit("--dataset_path is required in dataset mode")
-        states = load_states_from_dataset(Path(args.dataset_path), domain=args.domain, limit=args.n_states)
+        states = load_states_from_dataset(Path(args.dataset_path), domain=args.domain, limit=args.n_states + args.skip_states)
+        if args.skip_states > 0:
+            states = states[args.skip_states:]
+            print(f"  Skipped first {args.skip_states} states, processing {len(states)} states")
     else:
         states = synth_states(args.domain, args.n_states)
     

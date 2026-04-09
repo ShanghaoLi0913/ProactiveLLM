@@ -31,7 +31,15 @@ def build_action_selection_chat_prompt(state_text: str, tokenizer) -> str:
 
 
 def pick_action_from_logits(tokenizer, next_token_logits: torch.Tensor) -> str:
-    """Argmax over single-token ids for Clarify / Execute."""
+    """Argmax over single-token ids for Clarify / Execute.
+
+    NOTE: This function is kept for backward compatibility but is no longer used
+    by the main evaluation path. Use pick_action_from_generation() instead,
+    which generates a short response and parses the first word. The single-token
+    argmax approach fails when 'Clarify' is a new special token (id=128256) with
+    weak lm_head weights (~0.5 logit) vs 'Execute' (id=17617) with strong
+    pretrained weights (~6.3 logit) — LoRA cannot close this gap.
+    """
     pairs = []
     for tok in ("Clarify", "Execute"):
         tid = tokenizer.convert_tokens_to_ids(tok)
@@ -46,6 +54,33 @@ def pick_action_from_logits(tokenizer, next_token_logits: torch.Tensor) -> str:
     )
     best = torch.argmax(next_token_logits[idx]).item()
     return pairs[best][0]
+
+
+def pick_action_from_generation(model, tokenizer, prompt: str, max_new_tokens: int = 30) -> str:
+    """Generate a short response and detect Clarify vs Execute from content style.
+
+    After stripping "Clarify\\n"/"Execute\\n" prefixes from training data, the model
+    learns to prefer natural responses: clarification questions (natural language) vs
+    code (starts with ```python / def / import). We detect the action from the style
+    of the generated text rather than looking for artificial keyword prefixes.
+    """
+    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
+    inputs = {k: v.to(model.device) for k, v in inputs.items()}
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
+        )
+    new_tokens = outputs[0][inputs["input_ids"].shape[1]:]
+    generated = tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+    # Code indicators → Execute
+    code_starters = ("```", "def ", "import ", "from ", "class ", "#!", "#!/")
+    if any(generated.startswith(s) for s in code_starters):
+        return "Execute"
+    # Natural language → Clarify (questions, clarifications, acknowledgements)
+    return "Clarify"
 
 
 def select_action(state_text: str, policy_model_dir: str, base_model: Optional[str] = None) -> str:

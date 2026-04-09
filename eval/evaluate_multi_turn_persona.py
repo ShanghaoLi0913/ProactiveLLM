@@ -21,6 +21,7 @@ User 模拟（react）默认与轨迹生成一致：`--llm_model gpt-4o-mini`（
 """
 
 import argparse
+import copy
 import json
 import os
 import sys
@@ -38,8 +39,9 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.generate_trajectories import (
-    PERSONAS, 
+    PERSONAS,
     build_action_prompts,
+    build_clean_execute_query,
     select_mainline_action_from_persona,
     update_state_for_next_turn,
     sanitize_clarify_message,
@@ -80,9 +82,10 @@ def generate_with_template_local(
             top_p=top_p,
             pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
         )
-    generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-    if "Assistant:" in generated_text:
-        generated_text = generated_text.split("Assistant:")[-1].strip()
+    # Only decode newly generated tokens (exclude the input prompt)
+    input_len = inputs["input_ids"].shape[1]
+    generated_tokens = outputs[0][input_len:]
+    generated_text = tokenizer.decode(generated_tokens, skip_special_tokens=True).strip()
     return generated_text
 
 
@@ -92,33 +95,19 @@ def load_jsonl(path: Path) -> List[Dict]:
     with open(path, 'r') as f:
         for line in f:
             if line.strip():
-                data.append(json.loads(line))
+                item = json.loads(line)
+                # Ensure disclosure_rule has disclosed_info field
+                # (aligned with generate_trajectories state initialization)
+                dr = item.get("disclosure_rule")
+                if dr and "disclosed_info" not in dr:
+                    dr["disclosed_info"] = {
+                        "edge_cases": [],
+                        "input_constraints": [],
+                        "output_format": [],
+                        "validation_rules": [],
+                    }
+                data.append(item)
     return data
-
-
-def render_state(state: Dict) -> str:
-    """Render state to text for model input."""
-    query = state.get("query", "")
-    dialogue_turn = state.get("dialogue_turn", 0)
-    prev_reject = state.get("prev_reject", False)
-    task_uncertainty = state.get("task_uncertainty", 0.5)
-    
-    persona = state.get("persona", {})
-    persona_name = persona.get("name", "Unknown")
-    
-    text = f"""Task: {query}
-
-Dialogue Turn: {dialogue_turn}
-Previous Reject: {prev_reject}
-Task Uncertainty: {task_uncertainty:.2f}
-Persona: {persona_name}
-"""
-    
-    # Add user's previous answer if available
-    if "[User]:" in query:
-        text += "\nUser has answered your previous clarification question.\n"
-    
-    return text
 
 
 def select_action_with_model(
@@ -127,51 +116,17 @@ def select_action_with_model(
     model: torch.nn.Module,
     persona: Dict,
 ) -> str:
-    """Use trained model to select action."""
-    # Render state to text
-    state_text = render_state(state)
-    
-    # Add persona info to prompt
-    persona_name = persona.get("name", "Unknown")
-    full_prompt = f"""{state_text}
+    """Use trained model to select action via natural generation.
 
-Based on the persona ({persona_name}), should you Clarify or Execute?
-
-Action:"""
-    
-    messages = [{"role": "user", "content": full_prompt}]
-    prompt = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True
-    )
-    
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-    
-    with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=50,
-            temperature=0.1,
-            do_sample=False,
-            pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
-        )
-    
-    response = tokenizer.decode(
-        outputs[0][inputs.input_ids.shape[1]:], 
-        skip_special_tokens=True
-    )
-    
-    # Extract action
-    response_lower = response.lower()
-    if "clarify" in response_lower:
-        return "Clarify"
-    elif "execute" in response_lower:
-        return "Execute"
-    else:
-        # Default: use persona-based selection
-        persona_obj = next((p for p in PERSONAS if p.name == persona_name), PERSONAS[0])
-        return select_mainline_action_from_persona(persona_obj, state)
+    Uses the same prompt format as training (render_state → chat template → generate),
+    then detects Clarify vs Execute from the style of the generated text:
+    code starters (```, def, import...) → Execute; natural language → Clarify.
+    """
+    from policy.infer import build_action_selection_chat_prompt, pick_action_from_generation
+    from policy.render_state import render_state as render_state_with_persona
+    state_text = render_state_with_persona(state, persona=persona)
+    prompt = build_action_selection_chat_prompt(state_text, tokenizer)
+    return pick_action_from_generation(model, tokenizer, prompt, max_new_tokens=30)
 
 
 def generate_assistant_message(
@@ -183,11 +138,40 @@ def generate_assistant_message(
     use_openai: bool = False,
     base_model: Optional[str] = None,
     temperature: float = 0.7,
+    initial_state: Optional[Dict] = None,
 ) -> str:
     """Generate assistant message for the given action (Clarify or Execute-style text)."""
     prompts = build_action_prompts(domain)
     action_prompt = prompts.get(action, prompts["Execute"])
-    task_prompt = state.get("query", "")
+    # For Execute, use clean query (initial query + structured disclosed info)
+    # to avoid polluting code generation with conversation history.
+    if action == "Execute" and initial_state is not None:
+        task_prompt = build_clean_execute_query(initial_state, state)
+    else:
+        task_prompt = state.get("query", "")
+
+    # Enhance Clarify prompt with disclosure_rule guidance (aligned with training pipeline)
+    if action == "Clarify":
+        disclosure_rule = state.get("disclosure_rule")
+        if disclosure_rule:
+            masked_fields = disclosure_rule.get("masked_fields", {})
+            guidance_parts = []
+            if masked_fields.get("input_constraints"):
+                guidance_parts.append("- Input constraints or default values")
+            if masked_fields.get("output_format"):
+                guidance_parts.append("- Output format or return type")
+            if masked_fields.get("edge_cases"):
+                guidance_parts.append("- Edge cases to handle")
+            if masked_fields.get("validation_rules"):
+                guidance_parts.append("- Validation rules or error handling")
+            if guidance_parts:
+                guidance_text = "\n".join(guidance_parts)
+                action_prompt = f"""{action_prompt}
+
+IMPORTANT: The task description may be missing some information. Consider asking about:
+{guidance_text}
+
+Generate 1-2 specific questions that would help clarify these missing aspects."""
     
     if use_openai:
         response = chat_complete(
@@ -225,12 +209,18 @@ def generate_multiple_code_candidates(
     tokenizer=None,
     use_openai: bool = False,
     base_model: Optional[str] = None,
+    initial_state: Optional[Dict] = None,
 ) -> List[str]:
     """Generate k different code candidates for pass@k (local policy model or OpenAI)."""
     candidates = []
     prompts = build_action_prompts(domain)
     action_prompt = prompts.get("Execute", "")
-    task_prompt = state.get("query", "")
+    # Use clean query (initial query + structured disclosed info) to avoid
+    # polluting code generation with conversation history noise.
+    if initial_state is not None:
+        task_prompt = build_clean_execute_query(initial_state, state)
+    else:
+        task_prompt = state.get("query", "")
     
     for i in range(k):
         temperature = 0.7 + (i * 0.1)
@@ -274,6 +264,7 @@ def _build_execute_turn_data(
     tokenizer=None,
     total_questions_asked: int = 0,
     forced_final_execute: bool = False,
+    initial_state: Optional[Dict] = None,
 ) -> Dict:
     """Run one Execute turn: code candidates, tests, pass@k, user reaction stub, turn record."""
     max_k = max(pass_at_k) if pass_at_k else 1
@@ -285,6 +276,7 @@ def _build_execute_turn_data(
         tokenizer=tokenizer,
         use_openai=use_openai,
         base_model=base_model,
+        initial_state=initial_state,
     )
     assistant_msg = code_candidates[0] if code_candidates else ""
     candidate_results = []
@@ -311,6 +303,7 @@ def _build_execute_turn_data(
         persona_obj,
         llm_model=llm_model,
         total_questions_asked=total_questions_asked,
+        disclosure_rule=current_state.get("disclosure_rule"),
         dialogue_turn=current_state.get("dialogue_turn", 0),
     )
     turn_data = {
@@ -479,17 +472,19 @@ def evaluate_multi_turn_conversation(
             persona_name = persona_obj.name
             print(f"\n  Persona: {persona_name}", flush=True)
             
-            # Initialize state with persona
-            current_state = initial_state.copy()
+            # Initialize state with persona; keep a clean snapshot for Execute query
+            initial_state_snapshot = copy.deepcopy(initial_state)
+            current_state = copy.deepcopy(initial_state)
             current_state["persona"] = {
                 "name": persona_name,
                 "patience": persona_obj.patience,
                 "expertise": persona_obj.expertise,
             }
-            
+
             conversation = []
             actions_taken = []
-            
+            total_questions_asked = 0
+
             for turn in range(max_turns):
                 # Select action using trained model
                 action = select_action_with_model(
@@ -511,8 +506,9 @@ def evaluate_multi_turn_conversation(
                         llm_model,
                         model=model,
                         tokenizer=tokenizer,
-                        total_questions_asked=sum(1 for a in actions_taken if a == "Clarify"),
+                        total_questions_asked=total_questions_asked,
                         forced_final_execute=False,
+                        initial_state=initial_state_snapshot,
                     )
                     conversation.append(turn_data)
                     actions_taken.append(action)
@@ -529,12 +525,15 @@ def evaluate_multi_turn_conversation(
                         use_openai=use_openai,
                         base_model=base_model,
                     )
+                    # Track total questions asked (count '?' like training pipeline)
+                    total_questions_asked += assistant_msg.count("?")
                     user_reaction = react(
                         current_state["query"],
                         assistant_msg,
                         persona_obj,
                         llm_model=llm_model,
-                        total_questions_asked=sum(1 for a in actions_taken if a == "Clarify"),
+                        total_questions_asked=total_questions_asked,
+                        disclosure_rule=current_state.get("disclosure_rule"),
                         dialogue_turn=current_state.get("dialogue_turn", 0),
                     )
                     turn_data = {
@@ -558,7 +557,6 @@ def evaluate_multi_turn_conversation(
             # If the policy never chose Execute within max_turns, force one final Execute
             # on the latest state so every conversation is scored on code.
             if not any(a == "Execute" for a in actions_taken):
-                total_q = sum(1 for a in actions_taken if a == "Clarify")
                 turn_data = _build_execute_turn_data(
                     len(conversation),
                     current_state,
@@ -569,8 +567,9 @@ def evaluate_multi_turn_conversation(
                     llm_model,
                     model=model,
                     tokenizer=tokenizer,
-                    total_questions_asked=total_q,
+                    total_questions_asked=total_questions_asked,
                     forced_final_execute=True,
+                    initial_state=initial_state_snapshot,
                 )
                 conversation.append(turn_data)
                 actions_taken.append("Execute")

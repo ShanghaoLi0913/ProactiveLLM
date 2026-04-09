@@ -1,0 +1,694 @@
+# 工作记录
+
+> 最新记录在前
+
+---
+
+## 2026-04-09
+
+### 23. 多轮评估脚本系统性 Bug 修复
+
+审计 `eval/evaluate_multi_turn_persona.py`，发现并修复 7 个 Bug：
+
+| # | 严重度 | 问题 | 修复 |
+|---|--------|------|------|
+| 1 | **HIGH** | Execute 时用膨胀的对话历史 query 生成代码（未用 `build_clean_execute_query`） | 导入并使用 `build_clean_execute_query`，传入 `initial_state_snapshot` |
+| 2 | **HIGH** | `react()` 未传 `disclosure_rule`，用户模拟器无法披露结构化信息，Clarify 完全无效 | 两处 `react()` 调用加上 `disclosure_rule=current_state.get("disclosure_rule")` |
+| 3 | **MEDIUM** | `total_questions_asked` 训练时数问号、评估时数 Clarify 轮数 | 改为 `assistant_msg.count("?")` 累计 |
+| 4 | **MEDIUM** | Clarify prompt 缺少 `disclosure_rule` 的 masked_fields 引导 | `generate_assistant_message` 中加 disclosure_rule 引导（与训练一致） |
+| 5 | **LOW→HIGH** | 测试数据缺 `disclosed_info` 字段，修 Bug2 后会 KeyError | `load_jsonl` 初始化 `disclosed_info` |
+| 6 | **LOW** | `initial_state.copy()` 浅拷贝导致跨 persona 状态污染 | 改为 `copy.deepcopy` |
+| 7 | **INFO** | 死代码：本地 `render_state` 与训练用的格式不同 | 删除 |
+
+额外修复 `scripts/generate_trajectories.py`：`update_state_for_next_turn` 中 `dialogue_turn` 默认值 1→0（latent bug，实际数据都有该字段不触发）。
+
+### 24. 修复 `generate_with_template_local` prompt 回显 Bug
+
+**问题**：纯 Llama 评估（不加 `--use_openai_for_generation`）时 pass@1 = 0%，所有代码都是 system prompt 回显。
+
+**根因**：`generate_with_template_local` (line 85-87) 用 `skip_special_tokens=True` decode 整个序列后按 `"Assistant:"` split，但 Llama-3.1 chat template 用特殊 token 标记 assistant turn，不含 `"Assistant:"` 文本，split 没生效，返回完整 prompt + 生成内容。
+
+**修复**：只 decode 新生成的 tokens：
+```python
+input_len = inputs["input_ids"].shape[1]
+generated_tokens = outputs[0][input_len:]
+generated_text = tokenizer.decode(generated_tokens, skip_special_tokens=True).strip()
+```
+
+### 25. v28 多轮评估结果（修复后）
+
+**配置 A：`--use_openai_for_generation`**（Llama 选 action，gpt-4o-mini 生成内容）
+
+| Persona | Avg turns | Clarify rate | pass@1 |
+|---------|-----------|-------------|--------|
+| Busy | 1.0 | 0% | 0% (0/5) |
+| Experienced | 4.6 | 78.3% | 0% (0/5) |
+| Novice | 6.0 | 83.3% | 20% (1/5) |
+
+行为模式：
+- Busy：5/5 Turn 0 Execute ✓
+- Experienced：2/5 早期切 Execute（Turn 1-2），3/5 和 Novice 一样多轮 Clarify
+- Novice：5/5 多轮 Clarify → forced Execute
+- 唯一 pass 的 case：BigCodeBench/678 Novice（多轮 Clarify 获取信息后通过）
+
+**配置 B：纯 Llama**（修复 prompt 回显前）— 全 0%，无效结果。修复后重跑中。
+
+### 26. v28 训练数据分析
+
+训练数据：`prefs_v28_145states.jsonl`，727 pairs
+
+**Pair 分布：**
+
+| Persona | Turn 0 | Turn 1 | Turn 2 | Turn 3 | Turn 4 | 总计 |
+|---------|--------|--------|--------|--------|--------|------|
+| Busy | 145 | - | - | - | - | 145 |
+| Experienced | 138 | 77 | 1 | - | - | 216 |
+| Novice | 145 | 98 | 69 | 37 | 17 | 366 |
+
+Behavior-first 方向：724/727 正确（99.6%）。
+
+**关键问题：Experienced turn≥1 逆信号率 53.8%（42/78）**
+
+逆信号构成分析：
+
+| 类型 | 数量 | 占总78 | 原因 |
+|------|------|--------|------|
+| γ 奖励 artifact | 36 | 46.2% | task_score 相同，但 Clarify 有负 interrupt_cost（-0.08），多了 0.016 reward |
+| 真正 Clarify 更好 | 6 | 7.7% | 多轮澄清确实提升了代码质量 |
+| 正常信号 | 36 | 46.2% | Execute reward ≥ Clarify reward |
+
+**根因**：4/07 修复 γ=0.20 > λ=0.12 后，有效澄清的 interrupt_cost = λ - γ = -0.08（奖励）。Experienced turn≥1 的 Clarify 轨迹中，用户回答了问题 → cost 为负 → Clarify reward 比 Execute 高 0.016。DPO 训练时近一半 pairs 在说"Clarify 更好"，模型学不到 turn≥1 该 Execute。
+
+**解决方案（待实施）**：
+1. **过滤方案**：drop `|margin| < 0.05` 的逆信号 pairs（78→42 pairs，逆信号率降到 14.3%）
+2. **修 reward 方案**：turn≥1 时不给 Clarify 负 interrupt_cost 奖励
+
+### 27. method.tex 更新
+
+新增 Evaluation Metrics 小节：
+- Task Success Rate：BigCodeBench pass@k 定义（k 个候选中至少一个通过全部测试 = success）
+- Proactive Behavior Metrics：action accuracy、avg turns、clarify rate
+
+### 28. v28 纯 Llama 端到端评估（修复 prompt 回显后）
+
+5 samples × 3 personas，Llama DPO 生成所有内容，gpt-4o-mini 只做用户模拟。
+
+**Proactive behavior（行为模式 — 与 OpenAI 版一致）：**
+
+| Persona | Avg turns | Clarify rate | 行为 |
+|---------|-----------|-------------|------|
+| Busy | 1.0 | 0% | 5/5 Turn 0 Execute ✓ |
+| Experienced | 4.6 | 78.3% | 2/5 早切 Execute (Turn 1-2)，3/5 多轮 Clarify |
+| Novice | 6.0 | 83.3% | 5/5 多轮 Clarify → forced Execute |
+
+**Task success rate（pass@1）：**
+
+| Persona | pass@1 | pass@5 |
+|---------|--------|--------|
+| Busy | 0% (0/5) | 0% (0/5) |
+| Experienced | **20% (1/5)** | 20% (1/5) |
+| Novice | 0% (0/5) | 0% (0/5) |
+| **Overall** | **6.7% (1/15)** | 6.7% (1/15) |
+
+唯一 PASS：BigCodeBench/1133 Experienced（Clarify 1 轮获取 API 返回类型和错误处理信息 → Turn 1 Execute → candidate 1/5 通过全部测试）。同一 task 的 Busy（直接 Execute）和 Novice（5 轮 Clarify）均 FAIL。
+
+### 29. Task success rate 偏低的排查（初步）
+
+**初步排查结论：不是模型 bug，是这批 task 本身难。**
+
+验证步骤：
+1. canonical solution + imports + def → score=1.0 ✓（测试执行管线正确）
+2. `extract_code_from_text` 对 markdown 代码块提取正确 ✓
+3. **gpt-4o-mini 在这 5 个 masked task 上 pass@1 也是 0%**（部分分：484=33%, 678=80%，但无一全过）
+4. `validate_llama_gap_v20` 的 43.3% 用的是不同的 90 个 task + base Llama（无 DPO）+ `max_new_tokens=512`，那批 task 不含这 5 个
+
+### 30. v28 扩大评估（20 samples）
+
+20 samples × 3 personas，纯 Llama DPO 端到端：
+
+| Persona | Avg turns | Clarify rate | pass@1 | 行为正确率 |
+|---------|-----------|-------------|--------|-----------|
+| Busy | 1.0 | 0% | 5% (1/20) | 20/20 (100%) ✓ |
+| Experienced | 5.5 | 81.8% | 5% (1/20) | 2/20 (10%) ✗ |
+| Novice | 6.0 | 83.3% | 0% (0/20) | 20/20 (100%) ✓ |
+| **Overall** | - | - | **3.3% (2/60)** | - |
+
+PASS cases：Busy/BigCodeBench/415（直接 Execute）、Experienced/BigCodeBench/1133（Clarify 1 轮→Execute）。
+
+### 31. DPO 是否影响代码生成能力？
+
+同样 20 个 masked task，Base Llama（无 DPO）直接 Execute：
+
+| 模型 | pass@1 |
+|------|--------|
+| Base Llama（无 DPO） | **0% (0/20)** |
+| v28 DPO Busy（直接 Execute） | **5% (1/20)** |
+
+**结论：DPO 没有降低代码生成能力**，反而略有提升。问题出在 masked 数据质量。
+
+### 32. Masked 数据质量问题深入排查
+
+发现两个严重问题导致 task success rate 极低：
+
+#### 问题 1：断句残留（96% 数据受影响）
+
+masking 删除 output_format 内容后，留下残缺的句子开头：
+
+```
+原始：The function should output with:\n    str: The filename...
+masked 后：The function \nYou should write self-contained code...
+```
+
+`"The function \n"` 是一个无意义的断句残留，333 条测试数据中 321 条（96%）都有此问题。
+
+**已修复**：简单文本清理，删除 `\nThe function \n` → 保存为 `test_states_clean_for_eval_fixed.jsonl`。种子数据 `bigcodebench_masked_states.jsonl` 中 455/470（97%）也有同样问题。
+
+#### 问题 2（根本原因）：output_format 被 mask 但 disclosure_info 未存完整内容
+
+被 mask 的 `output_format` 包含**返回值类型和格式**，是测试通过的关键信息：
+
+| Task | masked 掉的 output_format | 测试会检查 |
+|------|--------------------------|-----------|
+| 1133 | `str: The filename into which the JSON data was written` | assert 返回值是文件名字符串 |
+| 484 | `pd.DataFrame: Generated sensor readings` | assert 返回 DataFrame |
+| 138 | `Axes object, x-axis 'Letters', y-axis 'Frequency', title 'Letter Frequency'` | assert 图表标签和标题 |
+| 678 | `DataFrame containing data from all processed files` | assert 返回 DataFrame |
+| 630 | `str: The full file path` | assert 返回路径字符串 |
+
+但 `disclosure_rule.disclosure_info.output_format` 只存了 `{'specification': 'should output with:'}` — **没有具体内容**。即使模型 Clarify 了 output_format，用户模拟器也无法披露完整的返回值信息，Clarify 对 task success 的提升被严重限制。
+
+**影响**：
+- 模型不知道返回什么 → 测试 assert 返回值 fail
+- Clarify 无法恢复此信息 → 多轮对话也没用
+- 这解释了为什么 Novice（多轮 Clarify）pass rate 反而不如 Experienced/Busy
+
+**修复方案**：把 `masked_fields.output_format` 的完整内容填入 `disclosure_info.output_format`，使用户模拟器能通过 Clarify 披露返回值信息。不需要重做 masking，只需修补 disclosure_info 字段。
+
+### 下一步
+
+1. **修补 disclosure_info**：把 masked_fields.output_format 完整内容填入 disclosure_info，使 Clarify 能恢复返回值信息
+2. **清理断句残留**：对种子数据和测试数据都清理 `"The function \n"` 断句
+3. **修复 Experienced turn≥1 逆信号**：过滤 `|margin| < 0.05` 的 artifact pairs
+4. 用修复后的数据重新生成轨迹 → 训练 v29 → 评估
+5. 对比修复前后的 task success rate
+
+---
+
+## 2026-04-08
+
+### 15. 修复 Execute prompt 拼接问题（clean execute query）
+
+**问题**：Novice 多轮 Clarify 后，`current_state['query']` 包含完整对话历史（3500+ chars），传给 gpt-4o-mini 生成代码时噪声太多（assistant 废话、重复内容、空代码块），导致 clarified 代码质量反而比 direct 差。
+
+对比数据（20 states 旧数据）：15 个 Novice case 中只有 2 个 clarified > direct，5 个 worse。
+
+**根因**：`generate_trajectories.py:565` 每轮把完整 assistant_msg + user_reply 拼进 query，Execute 时直接用这个膨胀的 query。
+
+**修复**：新增 `build_clean_execute_query()` 函数：
+- Execute 时用 `initial_masked_query` + `disclosure_rule.disclosed_info`（结构化追踪的澄清信息）构造干净 prompt
+- 格式和 `ideal_disclosed` 一致：`"Key requirements: item1; item2; ..."`
+- Clarify 仍用原始 dialogue history（需要上下文来生成问题）
+
+修改了两处 Execute 代码生成：
+1. loop 内 Execute（~line 690）
+2. force Execute（~line 860）
+
+**关键 insight**：`disclosed_info` 已经在 `update_state_for_next_turn` 中按 category 结构化追踪了每轮披露的信息，不需要从对话文本中提取。
+
+### 16. 3 states 验证
+
+结果：71 条轨迹，17 pairs。逆信号率 29.4%（vs 之前 33.1%）。
+
+Execute prompt 长度从 2600+ chars 降到 ~600 chars。Clarified 代码不再被对话噪声污染。
+
+### 17. 同步 method.tex 与 NeurIPS PDF
+
+对比 `docs/method.tex`（旧）与 `docs/NeurIPS__TactfulLLM.pdf`（新），同步了三处：
+- R_task：5 档分段函数 → 直接用 pass_rate
+- C_interrupt：简化为 `c = λ - γ·α + δ·r`
+- w_interrupt：0.3 → 0.2
+
+新增 **Behavior-First Pair Construction** 段落到 method.tex：
+- 三个 persona 的理想行为模式表格
+- target action 函数 $a^*(p, t)$ 公式化
+- Trajectory diversity（forced first action + fork）和 state-aligned rebalancing 的实现说明
+
+### 18. 30 states 验证完成
+
+轨迹文件：`data/logs/trajectories_20260407_231005.jsonl`（640 条轨迹）
+
+**逆信号率：21.6%**（vs 之前 33.1%），clean execute query 有效。
+
+分析发现 Novice 高 turn 逆信号 68% 来自**被用户拒绝的 Clarify 轨迹被选为 chosen**。
+
+### 19. 过滤被拒绝 Clarify 轨迹
+
+修改 `reward/compute_rewards.py`，三处过滤：
+1. 选 Clarify best trajectory 时，优先选未被拒绝的（`interrupt_cost < 0.8`）
+2. Method B 多轮 pairs，跳过被拒绝的 Clarify turn
+3. Method A fork pairs，跳过被拒绝的 mainline Clarify
+
+**过滤后**：176 → 155 pairs，逆信号率 21.6% → **16.8%**
+
+| Persona | Turn | Before | After |
+|---------|------|--------|-------|
+| Novice | 1 | 24.0% | **13.6%** |
+| Novice | 2 | 31.8% | **7.1%** |
+| Novice | 3 | 21.4% | **0%** |
+
+Pairs 文件：`data/dpo/prefs_v28_clean_30states_filtered.jsonl`
+
+### 20. 新增 `--skip_states` 参数
+
+`generate_trajectories.py` 新增 `--skip_states N`，跳过前 N 个 states，用于续跑不重复。
+
+### 21. 150 states 正式数据生成（进行中）
+
+先跑 30 states 已完成，再跑 120 states（skip 前 30）拼接。
+
+120 states 正在跑，预计 ~6 小时。
+
+### 22. 训练和评估脚本检查
+
+确认 `train_dpo.py` 和 `evaluate_dpo_model.py` 均 ready for v28：
+- action prefix stripping ✓
+- pick_action_from_generation ✓
+- persona 传 render_state ✓
+- 默认参数：beta=0.1, epochs=3, lr=5e-5, lora_rank=64
+
+### 下一步
+
+1. 120 states 跑完后拼接 30 states 数据，compute_rewards 生成 pairs
+2. 训练 v28（Llama-3.1-8B-Instruct）
+3. 评估 v28 persona 区分度
+4. 同样 pairs 训练 Qwen2.5-7B-Instruct 作为第二个 base model
+
+---
+
+## 2026-04-07（续）
+
+### 9. 排查 20 states pair 为空问题
+
+之前 `traj_v27_real_20states_20260407_042623.jsonl` 的 compute_rewards 产出 0 pairs，原因：**轨迹生成时未传 `--llm_model`，所有 assistant_msg 为同一条 dummy 输出**。compute_rewards 的 `same_message` 检查正确地跳过了这些 pair。
+
+### 10. 重新生成 20 states 轨迹（gpt-4o-mini）
+
+```
+python scripts/generate_trajectories.py --mode dataset --domain coding \
+  --dataset_path data/seeds/bigcodebench_masked_states.jsonl \
+  --n_states 20 --llm_model gpt-4o-mini --all_personas --max_turns 5 --n_samples 3
+```
+
+结果：434 条轨迹，207 个不同 assistant_msg，消息多样性正常。
+
+轨迹文件：`data/data/logs/traj_v27_20states_llm_20260407_093902.jsonl`
+
+### 11. 修复 `get_correct_action`：Novice turn≥3 切换 Execute
+
+之前 Novice 在所有 turn 都返回 Clarify，但实际轨迹最后一轮一定是 Execute。
+
+修改 `reward/compute_rewards.py` 的 `get_correct_action`：
+- Novice-Learner：turn < 3 → Clarify，turn ≥ 3 → Execute
+
+### 12. 修复 interrupt_cost γ 参数：有效澄清应为奖励
+
+论文设计意图：用户回答了问题 → cost 为负（即加分）。但代码中 γ=0.08 < λ=0.12，有效澄清 cost = +0.04（还在扣分），与设计矛盾。
+
+修改 `reward/compute.py` 的 `compute_interrupt_cost_v2`：
+- γ: 0.08 → **0.20**（γ > λ，使有效澄清 cost = 0.12 - 0.20 = -0.08，即奖励）
+
+三种情况：
+- 用户回答了：cost = n_q × (0.12 - 0.20) = **-0.08/问题**（奖励）
+- 用户没回答：cost = n_q × 0.12（轻罚）
+- 用户拒绝了：cost = n_q × (0.80 + 0.12) = 0.92（重罚）
+
+### 13. 20 states compute_rewards 验证
+
+最终结果（两个修复叠加后）：121 pairs
+
+| Persona | Turn 0 | Turn 1 | Turn 2 | Turn 3 | Turn 4 | 合计 |
+|---------|--------|--------|--------|--------|--------|------|
+| Busy | 20 | - | - | - | - | 20 |
+| Experienced | 20 | 13 | - | - | - | 33 |
+| Novice | 20 | 18 | 14 | 10 | 6 | 68 |
+
+Pair 方向全部正确。逆信号（chosen_reward < rejected_reward）从 51.7% 降到 **33.1%**。
+
+关键改善：
+- Novice turn=0 逆信号：85% → **30%**
+- Experienced turn=0 逆信号：64% → **21%**
+- Experienced turn=0 覆盖率：14/20 → **19/20**
+
+### 14. 发现：Novice clarified 代码质量不稳定
+
+对比同一 state 的代码 pass rate：
+
+| 版本 | 说明 | 表现 |
+|------|------|------|
+| direct | 不澄清直接写 | baseline |
+| clarified | Novice 多轮澄清后写 | 2/15 better, 5/15 worse |
+| ideal_disclosed | 一次性给全部信息 | 多数 ≥ direct |
+| oracle | 完整原始 query | 天花板 |
+
+信息本身有用（ideal_disclosed 验证过），但 **Novice 多轮对话后 context 太长，gpt-4o-mini 代码生成质量反而下降**。
+
+例：BigCodeBench/22: direct=1.00, ideal=1.00, 但 clarified=0.00
+
+**待排查**：是否是 prompt 拼接方式的问题（多轮对话历史干扰代码生成）。
+
+### 下一步
+
+1. **排查 Novice clarified 代码质量问题**：检查最终 Execute 的 prompt，看对话历史是否干扰代码生成
+2. 修复后重新生成 20 states 验证
+3. 跑 150 states 正式数据（gpt-4o-mini）
+4. 训练 v27
+
+---
+
+## 2026-04-07
+
+### 1. Reward 重设计：删除所有 persona 参数
+
+决定从 reward 函数中删除 persona_adjustment 和 Busy additional_penalty，改为 unified reward：
+
+    R = task_score - w_interrupt * interrupt_cost
+
+理由：reward 衡量客观代码质量，persona 偏好不应影响 reward 计算。否则论文里难以自圆其说。
+
+修改文件：reward/compute_rewards.py
+- 删除 compute_rewards_for_group 里的 Busy additional_penalty (~12行)
+- 删除 compute_trajectory_level_rewards 里的 persona_adjustment 块 (~100行)
+- 两处均替换为统一公式
+
+---
+
+### 2. Behavior-First Pair Construction
+
+Unified reward 导致新问题：task_score 天然偏高 Execute，所有 turn=0 对都变成 Execute chosen，persona-blind。
+
+解决方案：preference 方向由 persona 设计决定，不由 reward 大小决定。
+
+新增 get_correct_action(persona_name, dialogue_turn) 函数：
+- Busy-Developer：任何 turn 都返回 Execute
+- Novice-Learner：任何 turn 都返回 Clarify
+- Experienced-Engineer：turn=0 返回 Clarify，turn>=1 返回 Execute
+
+主循环逻辑：先查 get_correct_action，chosen = correct action 对应的最优轨迹，rejected = 另一个 action 的最优轨迹。reward 只用于在同 action 内选最优轨迹，不再决定 chosen/rejected 方向。
+
+Method B：加了 persona_name == "Novice-Learner" 过滤，去掉 reward gate。
+Method A：改为 get_correct_action 决定方向。
+Method C：强制 chosen=Execute rej=Clarify（Experienced turn>=1 应 Execute）。
+
+---
+
+### 3. Rebalance 改为按 (state, persona, turn) 分组
+
+旧版按 (state, persona) 分组，会把 Experienced 的 turn=0 pair 和 turn=1 pair 合并取一个最优，导致 turn=1 Execute pair 被丢弃。
+
+新版按 (state, persona, turn) 三元组分组，保留所有 turn 的 pair，再筛选三个 persona 都有 pair 的 complete states。
+
+---
+
+### 4. 验证：3 states + 18 states 小规模测试
+
+跑了 3 states 和 18 states 的轨迹生成 + compute_rewards，结果符合预期：
+
+18 states 的 pair 分布（64 pairs）：
+- Busy turn=0：17 pairs，其中 4/17 behavior-first 覆盖（reward 建议 Clarify 但强制 Execute）
+- Experienced turn=0：17 pairs，0/17 覆盖（reward 自然支持 Clarify，无需覆盖）
+- Experienced turn=1：13 pairs，12/13 behavior-first 强制 Execute（reward 建议 Clarify）
+- Novice turn=0：17 pairs，17/17 behavior-first 强制 Clarify（reward 建议 Execute）
+
+Experienced turn=1 的 Execute pair 由 Method C fork 提供，每个 state 都正常触发。
+
+---
+
+### 5. 发现：task_uncertainty 全部为 0.3
+
+所有 18 个测试 state 的 task_uncertainty 都是固定值 0.3。
+
+后果：Novice 在 turn=1 的判断条件 task_uncertainty > 0.3 不成立（0.3 > 0.3 = False），所以 Novice 也在 turn=1 直接 Execute，没有出现 Clarify -> Clarify -> Execute 的多轮模式。
+
+当前三个 persona 的轨迹模式完全相同（都是 Execute 或 Clarify -> Execute），persona 差异完全靠 pair 标签方向体现，不靠轨迹本身长度体现。
+
+待决策：是否修复 task_uncertainty 分布或调低 Novice turn=1 阈值，让多轮 Clarify 出现。
+
+---
+
+### 6. 修复 target_execute_ratio 默认值
+
+默认值 0.8 会在 state-aligned rebalance 之后再做 action rebalance，把 Experienced turn=0 Clarify pair 和 Novice Clarify pair 全部删掉。
+
+修复：将默认值改为 -1（禁用），compute_rewards.py 第 1168 行。
+
+---
+
+### 7. 调查 task_uncertainty=0.3 问题：虚惊一场
+
+debug 数据（18/20 states）用的是 dummy query "帮我写个 Python 爬虫"，导致 task_uncertainty 固定为 0.3。
+
+真实 bigcodebench 数据的 task_uncertainty 分布：
+- 范围：0.80 ~ 0.90，均值 0.82
+- Novice 阈值 0.3：0.82 > 0.3 = True，多轮 Clarify 正常触发
+- task_uncertainty 问题是 debug dummy query 的假象，无需修复
+
+---
+
+### 8. 真实数据端到端验证（5 states + gpt-4o-mini）
+
+用真实 bigcodebench 数据 + gpt-4o-mini API 跑了 5 states 完整流程：
+
+**轨迹生成结果（113 条，5 states × 3 personas × 3 samples）：**
+- Busy 主线：Execute（10条），Clarify→Execute（5条，强制生成用于对比）
+- Experienced 主线：Clarify→Execute（10条），Execute（5条，强制生成）
+- Novice 主线：Clarify→Clarify→Clarify→Clarify→Execute（6条），Clarify→Clarify→Clarify→Execute（2条）等多轮模式
+
+生成内容真实有效：
+- Execute 轨迹包含真实 Python 代码（```python ... def task_func ...）
+- Clarify 轨迹包含真实澄清问题（"To better understand your requirements, could you clarify..."）
+
+**DPO pair 生成结果（29 pairs，rebalance 后）：**
+
+| Persona | Turn | Chosen | Rejected | 数量 |
+|---------|------|--------|----------|------|
+| Busy | 0 | Execute | Clarify | 5 |
+| Experienced | 0 | Clarify | Execute | 3 |
+| Experienced | 1 | Execute | Clarify | 4 |
+| Novice | 0 | Clarify | Execute | 5 |
+| Novice | 1 | Clarify | Execute | 5 |
+| Novice | 2 | Clarify | Execute | 4 |
+| Novice | 3 | Clarify | Execute | 3 |
+
+关键验证点：
+- Novice turn=1/2/3 的多轮 Clarify pairs 全部出现 ✓（之前 debug 数据缺失的部分）
+- Experienced turn=1 切换 Execute ✓
+- behavior-first 覆盖：12/29 pairs 的 chosen_reward < rejected_reward，方向被强制纠正 ✓
+
+**结论：完整流程验证通过，可以跑 150 states 正式数据。**
+
+关键文件：
+- 轨迹：`data/logs/traj_v27_real_5states_llm_20260407_044214.jsonl`
+- Pairs：`data/dpo/prefs_v27_real_5states.jsonl`
+
+---
+
+### 下一步
+
+1. 跑正式 150 states 轨迹生成（gpt-4o-mini，预计 1-2 小时）
+2. compute_rewards 生成 pair 数据
+3. 训练 v27
+
+---
+
+## 2026-04-06
+
+### 1. 定位并修复三个核心 Bug
+
+#### Bug 1：action selection 使用 single-token argmax（已修复）
+
+**现象**：v21 / v23 评估 100% Execute，Clarify F1 = 0%
+
+**根因**：`pick_action_from_logits` 比较 logit[Clarify=128256] 与 logit[Execute=17617]。
+`Clarify` 是新加的 special token，lm_head 权重弱（~0.5）；`Execute` 是预训练原有 token（~6.3）。
+gap = -5.9，LoRA 无法弥合，模型永远选 Execute。
+
+**修复**：新增 `pick_action_from_generation`（`policy/infer.py`）：
+生成 30 token，检测开头是否为代码标志（` ``` `、`def`、`import` 等）→ Execute，否则 → Clarify。
+
+---
+
+#### Bug 2：DPO 训练数据含人工 action 前缀（已修复）
+
+**现象**：DPO model 与 BASE model 生成完全相同，LoRA adapter 无效。
+
+**根因**：chosen / rejected 以 `"Clarify\n..."` / `"Execute\n..."` 开头。
+Llama 从不自然生成这种前缀，DPO 在极低概率区间训练，梯度近乎为零。
+
+**修复**：`to_dpo_format`（`policy/train_dpo.py`）里 strip 掉 action 前缀，
+同时去掉 special token 注册和 `resize_token_embeddings`，去掉 `_init_new_token_lm_head` 调用。
+
+**效果（v24）**：Clarify F1 从 0% → 45.7%，Execute Rate 从 100% → 73.3%。
+
+---
+
+#### Bug 3：rebalance 步骤三个 persona 各自独立抽样（已修复）
+
+**现象**：v24 / v25 三个 persona 行为完全相同（persona-blind）。
+
+**根因**：`rebalance_prefs_by_persona`（`reward/compute_rewards.py`）三个 persona 各自
+按 hash 独立选 150 pair，导致大量 state 只有 Busy pair，缺少同一任务不同 persona 对比信号。
+
+**修复**：重写为 state-aligned 版本：
+1. 找三个 persona 都有 pair 的 state 交集（149 / 150 个 state）
+2. 每个 state × 每个 persona 各保留 chosen_reward 最高的一条 pair
+3. 禁用 action rebalance（`target_execute_ratio=-1`）
+
+**新数据**：`data/dpo/prefs_method_abc_150states_aligned.jsonl`，449 pairs，149 states 三 persona 全覆盖。
+
+---
+
+### 2. 发现更深层问题：reward 函数未区分 dialogue_turn
+
+通过分析 aligned 训练数据按 turn 的分布：
+
+| Persona | Turn | pairs 数 | chosen=Execute |
+|---------|------|---------|----------------|
+| Novice | 0 | 54 | 17%（Clarify ✓）|
+| Busy | 0 | 150 | 98%（Execute ✓）|
+| Experienced | 0 | 140 | 5%（Clarify ✓）|
+| Novice | 1 | 92 | 10%（Clarify ✓）|
+| Experienced | **1** | **9** | **11%（Clarify ✗ 应为 Execute！）**|
+
+**根本原因**：`persona_adjustment`（`reward/compute_rewards.py`）没有考虑 `dialogue_turn`。
+Experienced 在 turn=1（已 Clarify 一轮）应切换到 Execute，但 reward 函数仍给 Clarify 更高分。
+- turn=1 Experienced pairs 极少（只有 9 条 vs Novice 92 条）
+- 仅有的 9 条数据也在教模型对 Experienced 选 Clarify
+
+**结论**：v26 就算训练成功也无法区分 Experienced 与 Novice，数据本身有误。
+
+---
+
+### 3. 模型训练历史
+
+| 版本 | 数据 | beta | epoch | 状态 / 问题 |
+|------|------|------|-------|------------|
+| v21 | prefs_method_abc | 0.3 | 3 | Bug1+2，100% Execute |
+| v23 | 同上 + lmhead init | 0.3 | 3 | Bug1+2，100% Execute |
+| v24 | natural format | 0.3 | 3 | Bug3，Clarify F1=45.7% 但 persona-blind |
+| v25 | aligned | 0.3 | 3 | Bug3 修复，但 persona-blind |
+| **v26** | **aligned** | **0.05** | **5** | **训练完成，评估中** |
+
+---
+
+### 4. v26 结果
+
+**Quick action check（30 states × 3 persona）**：
+
+| Persona | Clarify | Execute |
+|---------|---------|---------|
+| Novice-Learner | 29/30 (97%) | 1/30 |
+| Busy-Developer | 7/30 (23%) | **23/30 (77%)** |
+| Experienced-Engineer | 28/30 (93%) | 2/30 |
+
+Busy 已与 Novice 拉开差距，但 Experienced 仍与 Novice 几乎相同（符合 reward bug 预期）。
+
+**完整评估（eval_v26_lowbeta.json）** 显示三个 persona 全部 Clarify，原因：`evaluate_dpo_model.py`
+调用 `render_state(state)` 未传 persona 参数。已修复，重跑中 → `outputs/eval_v26_lowbeta_fixed.json`
+
+---
+
+### 5. 代码修改汇总
+
+| 文件 | 改动 |
+|------|------|
+| `policy/infer.py` | 新增 `pick_action_from_generation`；`pick_action_from_logits` 标注已废弃 |
+| `policy/train_dpo.py` | strip action prefix；去掉 special token 注册和 resize；去掉 `_init_new_token_lm_head` |
+| `eval/evaluate_dpo_model.py` | 改用 `pick_action_from_generation`；修复 `render_state` 未传 persona 的 bug |
+| `eval/evaluate_multi_turn_persona.py` | 改用 `pick_action_from_generation` + `render_state_with_persona` |
+| `reward/compute_rewards.py` | 重写 `rebalance_prefs_by_persona` 为 state-aligned 版本 |
+
+---
+
+### 下一步
+
+1. **修复 `reward/compute_rewards.py`**：Experienced + `dialogue_turn >= 1` → Execute reward > Clarify reward
+2. 修完后重新生成轨迹和 pairs，重新训练
+3. 查看 `outputs/eval_v26_lowbeta_fixed.json` 结果
+
+---
+
+## 2026-04-02
+
+### 1. 检查轨迹数据
+
+文件：`data/logs/traj_colm_3turn_persona_150states_20260402_053113_20260402_053116.jsonl`
+
+**基本情况**：
+- 150 个 tasks，1586 条记录，3 个 persona 各 450 条轨迹
+- 所有记录都有 `test` / `convcodeworld_tests` 字段（数据源问题已解决）
+- task_score 全部为空（reward 还没计算）
+
+**Persona 差异（Execute rate）**：
+
+| Persona | Execute 率 |
+|---------|-----------|
+| Busy-Developer | 66.7% |
+| Experienced-Engineer | 66.5% |
+| Novice-Learner | 43.8% |
+
+- Busy vs Novice 差距 22.9%，超过论文要求的 15% ✓
+- **问题：Busy 和 Experienced 几乎一样**，论文需要三者有区分
+
+---
+
+### 2. 澄清后 task success 分析
+
+- 直接 Execute：16.7%
+- Clarify-first：5.6%（整体更低）
+- Clarify + 获得 edge_cases_info：9.6%
+- Clarify 但**没获得** edge_cases_info：**0%**（三个 persona 全是 0）
+
+只有 Busy 在 Clarify+EdgeInfo 时超过直接 Execute（25.9% vs 17.3%）。
+
+---
+
+### 3. validate_llama_gap 实验（v20）
+
+n=90，每个 persona 各 30 个，对比 Llama 在 5 种条件下的代码生成成功率：
+
+| 条件 | pass_rate |
+|------|-----------|
+| direct | 43.3% |
+| old_clarified | 35.6% |
+| new_clarified | 44.4% |
+| ideal_disclosed | **56.7%** |
+| oracle | 53.3% |
+
+- 方向依然成立（`DIRECTION VALID`）
+- gap 缩小原因：新数据 direct baseline 更高（43.3% vs 40.0%），模型本身更强
+- `ideal_disclosed` 和 `direct` 差距 +13.3%，是论文的强动机论据
+
+输出文件：`outputs/validate_llama_gap_v20.json`
+
+---
+
+### 4. 代码修改
+
+**`scripts/generate_trajectories.py`**：
+- 新增 `ideal_disclosed` 版本（masked query + 所有 masked_fields 直接展示）
+- 重命名 `code_versions` 字段：`masked_with_clarification` → `clarified`，`masked_only` → `direct`，`full_query` → `oracle`，新增 `ideal_disclosed`
+
+**`reward/compute_rewards.py`**：
+- 同步更新 `code_versions["full_query"]` → `code_versions["oracle"]`
+
+**`scripts/validate_llama_gap.py`**：
+- 更新 `TRAJ_PATH` 指向新轨迹文件
+
+---
+
+### 关键文件
+
+| 文件 | 说明 |
+|------|------|
+| `data/logs/traj_colm_3turn_persona_150states_20260402_053113_20260402_053116.jsonl` | 2026-04-02 生成的主轨迹 |
+| `outputs/validate_llama_gap_v20.json` | v20 validate 实验结果 |

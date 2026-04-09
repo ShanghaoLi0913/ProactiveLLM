@@ -289,20 +289,8 @@ def compute_rewards_for_group(
         if user_stopped:
             total_r = 0.0  # 用户气跑了，无论代码多好，Reward一律0
         else:
-            # 2. 对Busy角色，每多一轮对话，加大扣分（从0.1到0.4）
-            persona_name = (t.get("persona", {}) or {}).get("name", "")
-            dialogue_turn = state.get("dialogue_turn", 0)
-            
-            # 额外的对话轮次惩罚（仅对Busy-Developer）
-            additional_penalty = 0.0
-            if persona_name == "Busy-Developer" and dialogue_turn > 0:
-                # 每多一轮，扣0.4分（从0.1提高到0.4）
-                additional_penalty = 0.4 * dialogue_turn
-            
-            # 新公式: R = R_task - C_interrupt - additional_penalty
-            # 注意：在新公式中，有效澄清的奖励已经包含在C_Interrupt的计算中
-            # （通过-γb_t a_t项减少成本，相当于奖励）
-            r = cfg.w_task * task_score - cfg.w_interrupt * interrupt_cost - additional_penalty
+            # Unified reward: R = task_score - w_interrupt * interrupt_cost
+            r = cfg.w_task * task_score - cfg.w_interrupt * interrupt_cost
 
             # For 1-turn coding trajectories, Clarify cannot complete the task by design.
             # Without an explicit penalty, Clarify tends to dominate because:
@@ -425,107 +413,10 @@ def compute_trajectory_level_rewards(
             # User stopped: trajectory failed, reward = 0
             total_r = 0.0
         else:
-            # Persona-aware reward adjustment
-            persona_name = (turn.get("persona", {}) or {}).get("name", "")
-            task_uncertainty = state.get("task_uncertainty", 0.0)
-            
-            # Base reward: R = R_final - C_interrupt
-            base_reward = float(cfg.w_task * final_task_score - cfg.w_interrupt * interrupt_cost)
-            
-            # Persona-specific adjustments
-            persona_adjustment = 0.0
-            
-            if persona_name == "Novice-Learner":
-                # Novice-Learner: Clarify multiple turns, then Execute
-                # More tolerant of Clarify, especially for high uncertainty tasks
-                if dialogue_turn == 0:
-                    # Turn 0: Strong preference for Clarify
-                    if action == "Clarify":
-                        uncertainty_bonus = task_uncertainty * 0.20  # Up to 0.20 bonus for high uncertainty at Turn 0
-                        persona_adjustment = uncertainty_bonus
-                    elif action == "Execute":
-                        if task_uncertainty >= 0.7:
-                            persona_adjustment = -0.15  # Strong penalty for Execute on high uncertainty at Turn 0
-                        elif task_uncertainty >= 0.5:
-                            persona_adjustment = -0.10  # Penalty for Execute on medium-high uncertainty at Turn 0
-                        else:
-                            persona_adjustment = -0.05  # Small penalty for Execute at Turn 0
-                else:
-                    # Turn 1+: Continue Clarify, then Execute
-                    if action == "Clarify":
-                        # Reduce interrupt cost penalty for Clarify (make it more attractive)
-                        # Higher uncertainty → more benefit from Clarify
-                        uncertainty_bonus = task_uncertainty * 0.15  # Up to 0.15 bonus for high uncertainty
-                        persona_adjustment = uncertainty_bonus
-                        
-                        # Multi-turn bonus: If prev_action was Clarify, continue Clarify is good
-                        if prev_action == "Clarify" and task_uncertainty > 0.5:
-                            persona_adjustment += 0.15  # Increased bonus for continuing Clarify
-                    elif action == "Execute":
-                        # Execute is acceptable after multiple Clarify turns
-                        if task_uncertainty >= 0.7:
-                            persona_adjustment = -0.05  # Small penalty for Execute on high uncertainty
-                        # Multi-turn bonus: If prev_action was Clarify, Execute is acceptable
-                        if prev_action == "Clarify":
-                            persona_adjustment += 0.05  # Small bonus for Execute after Clarify
-            
-            elif persona_name == "Busy-Developer":
-                # Busy-Developer: Almost always Execute at Turn 0, strong penalty for multi-turn
-                if dialogue_turn == 0:
-                    # Turn 0: Strong preference for Execute
-                    if action == "Execute":
-                        persona_adjustment = 0.20  # Strong bonus for Execute at Turn 0
-                    elif action == "Clarify":
-                        persona_adjustment = -0.20  # Strong penalty for Clarify at Turn 0
-                elif dialogue_turn > 0:
-                    # Additional penalty for each extra turn (0.3 per turn)
-                    persona_adjustment = -0.3 * dialogue_turn
-                    # Also: slight bonus for Execute on low uncertainty (encourage direct action)
-                    if action == "Execute" and task_uncertainty < 0.4:
-                        persona_adjustment += 0.05
-                
-                # Multi-turn bonus: If prev_action was Clarify, Execute is strongly preferred
-                if prev_action == "Clarify" and action == "Execute":
-                    persona_adjustment += 0.15  # Strong bonus for Execute after Clarify
-            
-            elif persona_name == "Experienced-Engineer":
-                # Experienced-Engineer: Clarify ONCE at Turn 0, then Execute immediately.
-                # Turn 0: Clarify is correct (ask the key question once).
-                # Turn 1+: Execute is always correct (stop over-clarifying).
-                if dialogue_turn == 0:
-                    # Turn 0: Strong preference for Clarify (especially for high uncertainty)
-                    if action == "Clarify":
-                        if task_uncertainty >= 0.7:
-                            persona_adjustment = 0.25  # Strong bonus for Clarify on high uncertainty at Turn 0
-                        elif task_uncertainty >= 0.5:
-                            persona_adjustment = 0.20  # Bonus for Clarify on medium-high uncertainty at Turn 0
-                        elif task_uncertainty >= 0.4:
-                            persona_adjustment = 0.15  # Bonus for Clarify on medium uncertainty at Turn 0
-                    elif action == "Execute":
-                        if task_uncertainty >= 0.7:
-                            persona_adjustment = -0.20  # Strong penalty for Execute on high uncertainty at Turn 0
-                        elif task_uncertainty >= 0.5:
-                            persona_adjustment = -0.15  # Penalty for Execute on medium-high uncertainty at Turn 0
-                        elif task_uncertainty < 0.4:
-                            persona_adjustment = 0.05  # Small bonus for Execute on low uncertainty at Turn 0
-                else:
-                    # Turn 1+: Experienced should EXECUTE now, not keep clarifying.
-                    # Flip direction vs Turn 0: Execute is rewarded, Clarify is penalized.
-                    if action == "Execute":
-                        if prev_action == "Clarify":
-                            persona_adjustment = 0.20  # Strong bonus: execute right after clarifying once
-                        else:
-                            persona_adjustment = 0.10  # Bonus for execute at turn 1+
-                    elif action == "Clarify":
-                        # Over-clarifying: always penalize for Experienced at Turn 1+
-                        if task_uncertainty >= 0.7:
-                            persona_adjustment = -0.15  # Strong penalty for over-clarifying
-                        elif task_uncertainty >= 0.5:
-                            persona_adjustment = -0.10  # Penalty for over-clarifying
-                        else:
-                            persona_adjustment = -0.05  # Small penalty even on low uncertainty
-            
-            total_r = float(base_reward + persona_adjustment)
+            # Unified reward: R = task_score - w_interrupt * interrupt_cost
+            # Persona differences emerge naturally from trajectory structure
+            # (Busy trajectories have fewer turns → lower interrupt_cost)
+            total_r = float(cfg.w_task * final_task_score - cfg.w_interrupt * interrupt_cost)
         
         training_text = resolve_execute_code_for_training_and_reward(
             turn, use_full_query=cfg.full_query_for_execute
@@ -729,10 +620,18 @@ def rebalance_prefs_by_persona(
     prefs: List[Dict],
     seed: int,
 ) -> List[Dict]:
-    """Downsample over-represented personas so each persona has equal pair count.
+    """State-aligned rebalance: keep one pair per (state, persona, dialogue_turn).
 
-    Groups by persona name (pref["persona"]["name"] or pref["persona"] string).
-    Keeps min_count pairs per persona, chosen deterministically by stable hash.
+    Strategy:
+    1. Group pairs by (state_id, persona, dialogue_turn).
+    2. For each group, keep the best pair (highest chosen_reward).
+    3. Find states where ALL personas have at least one pair (at any turn).
+    4. From those complete states, keep all (persona, turn) pairs.
+
+    This preserves multi-turn signal:
+    - Busy:       turn=0 Execute pair
+    - Novice:     turn=0 Clarify + turn=1 Clarify + ...
+    - Experienced: turn=0 Clarify + turn=1 Execute  ← critical distinction
     """
     if not prefs:
         return prefs
@@ -743,36 +642,76 @@ def rebalance_prefs_by_persona(
             return persona.get("name", "Unknown")
         return str(persona) if persona else "Unknown"
 
+    def _get_sid(p: Dict) -> str:
+        return p["state"].get("id", str(p["state"]))
+
+    def _get_turn(p: Dict) -> int:
+        return int(p.get("state", {}).get("dialogue_turn", p.get("dialogue_turn", 0)))
+
     from collections import defaultdict
-    by_persona: Dict[str, List[Dict]] = defaultdict(list)
+
+    # Group by (state_id, persona, turn) — keep best pair per group
+    by_spt: Dict = defaultdict(list)
     for p in prefs:
-        by_persona[_get_persona(p)].append(p)
+        key = (_get_sid(p), _get_persona(p), _get_turn(p))
+        by_spt[key].append(p)
 
-    if len(by_persona) <= 1:
-        return prefs
+    best_by_spt: Dict = {}
+    for key, candidates in by_spt.items():
+        best_by_spt[key] = max(candidates, key=lambda p: p.get("chosen_reward") or 0.0)
 
-    min_count = min(len(v) for v in by_persona.values())
-    if min_count == 0:
-        return prefs
+    all_personas = sorted({_get_persona(p) for p in prefs})
 
-    result = []
-    for persona_name, persona_prefs in by_persona.items():
-        if len(persona_prefs) <= min_count:
-            result.extend(persona_prefs)
-        else:
-            # Deterministically keep min_count pairs via stable hash
-            sorted_prefs = sorted(
-                persona_prefs,
-                key=lambda p: _stable_hash_to_unit_interval(p["state"].get("id", str(p["state"])), seed),
-            )
-            result.extend(sorted_prefs[:min_count])
+    # Find states that have at least one pair for ALL personas
+    by_state_personas: Dict = defaultdict(set)
+    for (sid, persona, turn) in best_by_spt:
+        by_state_personas[sid].add(persona)
+    all_personas_set = set(all_personas)
+    complete_states = sorted(
+        [sid for sid, ps in by_state_personas.items() if ps >= all_personas_set],
+        key=lambda sid: _stable_hash_to_unit_interval(sid, seed),
+    )
 
-    print(f"🔧 Per-persona rebalance: {len(prefs)} -> {len(result)} "
-          f"({min_count} pairs × {len(by_persona)} personas)")
-    for persona_name, persona_prefs in sorted(by_persona.items()):
-        kept = min(len(persona_prefs), min_count)
-        print(f"   {persona_name}: {len(persona_prefs)} -> {kept}")
+    # Keep all (persona, turn) pairs for complete states
+    result = [
+        pair
+        for (sid, persona, turn), pair in best_by_spt.items()
+        if sid in set(complete_states)
+    ]
+
+    # Print summary
+    print(f"🔧 State-aligned rebalance (per turn): {len(prefs)} pairs → {len(result)} pairs")
+    print(f"   Complete states (all {len(all_personas)} personas): {len(complete_states)}")
+    by_persona_turn: Dict = defaultdict(lambda: defaultdict(int))
+    for p in result:
+        by_persona_turn[_get_persona(p)][_get_turn(p)] += 1
+    for persona in sorted(by_persona_turn):
+        turns = by_persona_turn[persona]
+        total = sum(turns.values())
+        detail = "  ".join(f"turn={t}:{c}" for t, c in sorted(turns.items()))
+        print(f"   {persona}: {total} pairs  ({detail})")
     return result
+
+
+def get_correct_action(persona_name: str, dialogue_turn: int) -> Optional[str]:
+    """Return the behaviorally correct action for a persona at a given dialogue turn.
+
+    Encodes persona design intent — used for behavior-first pair construction
+    so that preference direction is determined by persona policy, not reward magnitude.
+
+    - Busy-Developer:       always Execute (values speed, dislikes interruptions)
+    - Novice-Learner:       Clarify at turn 0-2, Execute at turn>=3 (ask several rounds, then act)
+    - Experienced-Engineer: Clarify at turn=0, Execute at turn>=1 (ask once, then act)
+
+    Returns None for unknown personas (caller falls back to reward-based ordering).
+    """
+    if persona_name == "Busy-Developer":
+        return "Execute"
+    elif persona_name == "Novice-Learner":
+        return "Clarify" if dialogue_turn < 3 else "Execute"
+    elif persona_name == "Experienced-Engineer":
+        return "Clarify" if dialogue_turn == 0 else "Execute"
+    return None
 
 
 def compute_preferences(
@@ -902,10 +841,20 @@ def compute_preferences(
                 continue
             
             # For each action group, find the best trajectory (highest reward)
+            # For Clarify group: prefer trajectories where user answered (not rejected).
+            # A rejected Clarify has interrupt_cost >= 0.8 (δ penalty) and should not
+            # be chosen as the "best" representative of the Clarify action.
             action_best = {}
             for action, trajs in action_groups.items():
                 if trajs:
-                    best = max(trajs, key=lambda x: x["reward"])
+                    if action == "Clarify":
+                        # Prefer non-rejected Clarify trajectories
+                        non_rejected = [t for t in trajs
+                                        if t["turn0"].get("interrupt_cost", 0) < 0.8]
+                        pool = non_rejected if non_rejected else trajs
+                    else:
+                        pool = trajs
+                    best = max(pool, key=lambda x: x["reward"])
                     action_best[action] = best
             
             # Also find worst trajectories for comparison
@@ -938,28 +887,32 @@ def compute_preferences(
                     if pref_assistant_text(best_turn0_1) == pref_assistant_text(best_turn0_2):
                         skipped_reasons["same_message"] += 1
                         continue
-                    
-                    # Determine which is chosen based on reward
-                    if best_traj1["reward"] > best_traj2["reward"]:
-                        chosen_traj = best_traj1
-                        rejected_traj = best_traj2
-                        chosen_turn0 = best_turn0_1
-                        rejected_turn0 = best_turn0_2
-                    elif best_traj2["reward"] > best_traj1["reward"]:
-                        chosen_traj = best_traj2
-                        rejected_traj = best_traj1
-                        chosen_turn0 = best_turn0_2
-                        rejected_turn0 = best_turn0_1
+
+                    # Behavior-first: chosen/rejected determined by persona design, not reward.
+                    # For each (persona, turn), we know which action is "correct" by design.
+                    # chosen = best trajectory that took the correct action
+                    # rejected = best trajectory that took the incorrect action
+                    dialogue_turn_here = best_turn0_1["state"].get("dialogue_turn", 0)
+                    correct_action = get_correct_action(persona_name, dialogue_turn_here)
+
+                    if correct_action and correct_action in action_best:
+                        other_actions = [a for a in action_best if a != correct_action]
+                        if not other_actions:
+                            skipped_reasons["only_one_action"] += 1
+                            continue
+                        other_action = other_actions[0]
+                        chosen_traj = action_best[correct_action]
+                        rejected_traj = action_best[other_action]
+                        chosen_turn0 = chosen_traj["turn0"]
+                        rejected_turn0 = rejected_traj["turn0"]
                     else:
-                        # Reward相同，跳过
-                        skipped_reasons["reward_diff_too_small"] += 1
-                        continue
-                    
-                    # Check reward difference (use smaller threshold for trajectory-level)
-                    reward_diff = chosen_traj["reward"] - rejected_traj["reward"]
-                    if reward_diff < 0.0001:  # Very small threshold to allow more pairs
-                        skipped_reasons["reward_diff_too_small"] += 1
-                        continue
+                        # Fallback: reward-based for unknown personas
+                        if best_traj1["reward"] >= best_traj2["reward"]:
+                            chosen_traj, rejected_traj = best_traj1, best_traj2
+                            chosen_turn0, rejected_turn0 = best_turn0_1, best_turn0_2
+                        else:
+                            chosen_traj, rejected_traj = best_traj2, best_traj1
+                            chosen_turn0, rejected_turn0 = best_turn0_2, best_turn0_1
                     
                     # Extract dialogue_turn and prev_action from Turn 0
                     dialogue_turn = chosen_turn0["state"].get("dialogue_turn", 0)
@@ -985,10 +938,9 @@ def compute_preferences(
                     total_pairs_generated += 1
 
                     # --- Method B: multi-turn pairs for Turn 1+ Clarify turns ---
-                    # For the chosen Clarify trajectory, generate additional pairs at each
-                    # subsequent Clarify turn using the rejected Execute trajectory's Turn 0
-                    # response as the counterfactual "what if we executed right now".
-                    if chosen_turn0["action"] == "Clarify":
+                    # Only for Novice-Learner: keeps Clarifying at turn=1+.
+                    # Experienced-Engineer should Execute at turn=1+ (handled by Method A/C).
+                    if chosen_turn0["action"] == "Clarify" and persona_name == "Novice-Learner":
                         clarify_traj_id = chosen_traj["trajectory_id"]
                         execute_turn0 = rejected_turn0  # the Execute-at-T0 response
 
@@ -1002,11 +954,15 @@ def compute_preferences(
                                 continue  # already handled above
                             if ct.get("action") != "Clarify":
                                 continue  # only Clarify turns get multi-turn pairs
+                            # Skip rejected Clarify turns — user didn't engage,
+                            # so this is not evidence that Clarify is preferred.
+                            if ct.get("interrupt_cost", 0) >= 0.8:
+                                continue
 
                             ct_reward = ct.get("total_reward", chosen_traj["reward"])
                             exe_reward = rejected_traj["reward"]
-                            if ct_reward - exe_reward < 0.0001:
-                                continue  # no useful signal
+                            # Behavior-first: Novice should Clarify at turn=1+.
+                            # No reward gate — behavioral signal takes priority.
 
                             ct_msg = pref_assistant_text(ct)
                             exe_msg = pref_assistant_text(execute_turn0)
@@ -1054,6 +1010,9 @@ def compute_preferences(
                         break
                 if mainline_clarify is None:
                     continue
+                # Skip if the mainline Clarify was rejected by the user
+                if mainline_clarify.get("interrupt_cost", 0) >= 0.8:
+                    continue
                 clarify_reward = mainline_clarify.get("total_reward", 0)
                 execute_reward = fork_turn.get("total_reward", 0)
                 if abs(clarify_reward - execute_reward) < 0.0001:
@@ -1062,12 +1021,21 @@ def compute_preferences(
                 execute_msg = pref_assistant_text(fork_turn)
                 if not clarify_msg or not execute_msg or clarify_msg == execute_msg:
                     continue
-                if clarify_reward > execute_reward:
+                # Behavior-first: persona design determines chosen action at fork turn.
+                fork_persona_name = (mainline_clarify.get("persona") or {}).get("name", "")
+                fork_dialogue_turn = fork_at - 1
+                fork_correct_action = get_correct_action(fork_persona_name, fork_dialogue_turn)
+                if fork_correct_action == "Clarify":
                     chosen_t, rejected_t = mainline_clarify, fork_turn
                     chosen_a, rejected_a = "Clarify", "Execute"
                 else:
-                    chosen_t, rejected_t = fork_turn, mainline_clarify
-                    chosen_a, rejected_a = "Execute", "Clarify"
+                    # Execute is correct (Experienced/Busy at turn>=1), or unknown persona → reward-based
+                    if fork_correct_action == "Execute" or execute_reward >= clarify_reward:
+                        chosen_t, rejected_t = fork_turn, mainline_clarify
+                        chosen_a, rejected_a = "Execute", "Clarify"
+                    else:
+                        chosen_t, rejected_t = mainline_clarify, fork_turn
+                        chosen_a, rejected_a = "Clarify", "Execute"
                 prefs.append({
                     "state": mainline_clarify["state"],
                     "persona": mainline_clarify.get("persona", {}),
@@ -1119,12 +1087,10 @@ def compute_preferences(
                 clarify_msg = pref_assistant_text(fork_turn)
                 if not execute_msg or not clarify_msg or execute_msg == clarify_msg:
                     continue
-                if execute_reward > clarify_reward:
-                    chosen_t, rejected_t = mainline_execute, fork_turn
-                    chosen_a, rejected_a = "Execute", "Clarify"
-                else:
-                    chosen_t, rejected_t = fork_turn, mainline_execute
-                    chosen_a, rejected_a = "Clarify", "Execute"
+                # Behavior-first: Method C is specifically for Experienced T1+.
+                # Experienced should always Execute at turn>=1 — enforce regardless of reward.
+                chosen_t, rejected_t = mainline_execute, fork_turn
+                chosen_a, rejected_a = "Execute", "Clarify"
                 prefs.append({
                     "state": mainline_execute["state"],
                     "persona": mainline_execute.get("persona", {}),
@@ -1216,8 +1182,8 @@ def parse_args():
     parser.add_argument(
         "--target_execute_ratio",
         type=float,
-        default=0.8,
-        help="Target ratio for Execute in chosen prefs (default: 0.8; set <0 or >1 to disable)",
+        default=-1,
+        help="Target ratio for Execute in chosen prefs (set <0 or >1 to disable; default: disabled)",
     )
     parser.add_argument(
         "--rebalance_seed",

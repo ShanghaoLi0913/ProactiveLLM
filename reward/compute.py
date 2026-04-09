@@ -111,13 +111,13 @@ def compute_interrupt_cost_v2(meta: Dict, n_questions: int, assistant_msg: str =
     Returns:
         C_interrupt: 累积的中断成本
     """
-    # 参数设置（更平衡：避免强烈偏向Clarify）
-    # γ：有效澄清的成本抵消（奖励）- 降低以减少Clarify的过度优势
-    # δ：无效澄清的惩罚
-    # λ：提问的基础成本，避免"无脑提问" - 提高以增加Clarify的成本
-    gamma = 0.08  # 从0.2降到0.08，减少有效澄清的奖励
+    # 参数设置：有效澄清应获得奖励（γ > λ 使 cost 为负）
+    # γ：有效澄清的奖励 - 用户回答了说明问得好，应该加分
+    # δ：无效澄清的惩罚 - 用户拒绝了说明问得不好
+    # λ：提问的基础成本 - 每次提问都有固定开销
+    gamma = 0.20  # γ > λ，使有效澄清 cost = λ - γ = -0.08（净奖励）
     delta = 0.8   # 保持不变
-    lambda_param = 0.12  # 从0.1升到0.12，提高提问的基础成本
+    lambda_param = 0.12  # 保持不变
     
     # b_t: 是否提出澄清问题
     b = 1 if n_questions > 0 else 0

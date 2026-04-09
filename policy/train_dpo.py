@@ -84,10 +84,60 @@ def to_dpo_format(records, tokenizer):
         )
         
         dataset["prompt"].append(prompt)
-        # Full response (code/question)
-        dataset["chosen"].append(ex["chosen_assistant_msg"])
-        dataset["rejected"].append(ex["rejected_assistant_msg"])
+        # Strip artificial "Clarify\n" / "Execute\n" action prefixes so DPO trains
+        # on natural response format (code starts with ```python, questions start
+        # with natural language). The base model never generates these prefixes, so
+        # training with them caused DPO to operate on near-zero-probability sequences
+        # and the LoRA adapter had zero effect on actual generation behavior.
+        def _strip_action_prefix(msg: str) -> str:
+            for prefix in ("Clarify\n", "Execute\n"):
+                if msg.startswith(prefix):
+                    return msg[len(prefix):]
+            return msg
+
+        dataset["chosen"].append(_strip_action_prefix(ex["chosen_assistant_msg"]))
+        dataset["rejected"].append(_strip_action_prefix(ex["rejected_assistant_msg"]))
     return dataset
+
+
+def _init_new_token_lm_head(model, tokenizer, orig_vocab_size: int) -> None:
+    """Initialize lm_head rows for newly added special tokens from semantic neighbors.
+
+    Newly resized rows in lm_head are random and frozen (LoRA does not touch them).
+    This makes argmax over Clarify vs Execute always prefer the token with pretrained
+    weights (Execute=17617). Initializing Clarify's row from semantically related
+    existing tokens gives LoRA a meaningful projection direction to learn from.
+    """
+    import torch
+
+    # orig_vocab_size must be captured BEFORE resize_token_embeddings (passed by caller).
+    # Hardcode the action tokens we add; avoids fast-tokenizer backend attribute issues.
+    _action_neighbors = {
+        "Clarify": ["ask", "Ask", "question", "clarify", "clarification", "inquiry"],
+        # "Execute" is already an original vocab token (id=17617); skip.
+    }
+
+    try:
+        lm_head_weight = model.lm_head.weight  # [vocab, hidden]
+    except AttributeError:
+        return
+
+    with torch.no_grad():
+        for tok_str, neighbor_words in _action_neighbors.items():
+            new_id = tokenizer.convert_tokens_to_ids(tok_str)
+            if new_id is None or new_id < orig_vocab_size:
+                continue  # token was already in the original vocab; nothing to do
+            neighbor_ids = []
+            for n in neighbor_words:
+                nid = tokenizer.convert_tokens_to_ids(n)
+                if nid is not None and nid != tokenizer.unk_token_id and nid < orig_vocab_size:
+                    neighbor_ids.append(nid)
+            if not neighbor_ids:
+                continue
+            avg = lm_head_weight[neighbor_ids].float().mean(dim=0)
+            lm_head_weight[new_id] = avg.to(lm_head_weight.dtype)
+            print(f"✅ Initialized lm_head[{new_id}] ('{tok_str}') "
+                  f"from {len(neighbor_ids)} neighbors: {neighbor_ids}")
 
 
 def train(
@@ -118,14 +168,13 @@ def train(
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # Add action tokens as special tokens (Sequential Decision: Clarify/Execute)
-    special_tokens = {"additional_special_tokens": ["Clarify", "Execute"]}
-    tokenizer.add_special_tokens(special_tokens)
-    print("✅ Added special tokens: Clarify, Execute")
-    
+    # No special tokens needed: DPO now trains on natural response format.
+    # Clarify responses = natural question text; Execute responses = code (```python...).
+    # Inference detects action by checking if generation starts with code markers.
+
     # ✅ V15 Fix: Convert to DPO format using chat template
     dpo_data = to_dpo_format(records, tokenizer)
-    print(f"📊 Using {len(dpo_data['prompt'])} examples for training (sequential decision: Clarify/Execute)")
+    print(f"📊 Using {len(dpo_data['prompt'])} examples for training (natural format: code vs questions)")
 
     # Model loading with optional 4-bit quantization (QLoRA)
     use_qlora = False
@@ -174,8 +223,7 @@ def train(
             local_files_only=True,  # 强制使用本地缓存
         )
 
-    # Resize embeddings after adding special tokens
-    model.resize_token_embeddings(len(tokenizer))
+    # No special tokens added → no embedding resize needed.
 
     # Apply LoRA if available
     if _HAS_PEFT:

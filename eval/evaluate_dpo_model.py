@@ -320,7 +320,7 @@ def score_code_passfail(code: str, tests: str, timeout: int = 30, debug: bool = 
 # Import unified render_state function - MUST be identical to training
 # (Already has PROJECT_ROOT in sys.path from earlier)
 from policy.render_state import render_state
-from policy.infer import get_template, build_action_selection_chat_prompt, pick_action_from_logits
+from policy.infer import get_template, build_action_selection_chat_prompt, pick_action_from_logits, pick_action_from_generation
 
 
 def set_global_seed(seed: int) -> None:
@@ -354,13 +354,15 @@ def set_global_seed(seed: int) -> None:
 
 
 def select_action_with_loaded_model(state_text: str, tokenizer, model) -> str:
-    """Next-token argmax over Clarify/Execute (chat-wrapped prompt, same as training)."""
+    """Generate a short response and parse Clarify/Execute from the first word.
+
+    Replaces the single-token argmax approach which always returned Execute because
+    the new 'Clarify' special token (id=128256) has weak lm_head weights (~0.5)
+    vs the pretrained 'Execute' token (id=17617, ~6.3). LoRA cannot close this gap.
+    Generating text and parsing the first word correctly reads the DPO-trained preference.
+    """
     prompt = build_action_selection_chat_prompt(state_text, tokenizer)
-    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
-    inputs = {k: v.to(model.device) for k, v in inputs.items()}
-    with torch.no_grad():
-        logits = model(**inputs).logits
-    return pick_action_from_logits(tokenizer, logits[0, -1, :])
+    return pick_action_from_generation(model, tokenizer, prompt, max_new_tokens=4)
 
 
 def generate_with_template_local(
@@ -475,6 +477,7 @@ def evaluate_model(
             token=hf_token if hf_token else None,
             local_files_only=False,  # Allow using cache
         )
+        # Only add special tokens for older checkpoints that were trained with them
         special_tokens = {"additional_special_tokens": ["Clarify", "Execute"]}
         policy_tokenizer.add_special_tokens(special_tokens)
 
@@ -541,7 +544,8 @@ def evaluate_model(
             state = dict(state)
             state["query"] = state.get("original_instruct_prompt") or state.get("query", "")
         
-        state_text = render_state(state)
+        persona = pref.get("persona") if isinstance(pref.get("persona"), dict) else None
+        state_text = render_state(state, persona=persona)
         predicted_action = select_action_with_loaded_model(state_text, policy_tokenizer, policy_model)
         task_prompt = state.get("query", "")
         domain = state.get("domain", "coding")
