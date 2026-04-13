@@ -276,10 +276,9 @@ def load_states_from_dataset(dataset_path: Path, domain: str, limit: Optional[in
             # Ensure disclosed_info is initialized if not present
             if "disclosed_info" not in disclosure_rule:
                 disclosure_rule["disclosed_info"] = {
-                    "edge_cases": [],
-                    "input_constraints": [],
                     "output_format": [],
                     "validation_rules": [],
+                    "note_that": [],
                 }
             state_dict["disclosure_rule"] = disclosure_rule
         
@@ -338,7 +337,7 @@ def llm_output(
 
 
 def sanitize_clarify_message(assistant_msg: str) -> str:
-    """Ensure Clarify action does not include code output."""
+    """Ensure Clarify action does not include code output or code-referencing prose."""
     # Remove fenced code blocks
     sanitized = re.sub(r"```.*?```", "", assistant_msg, flags=re.DOTALL)
     # If an opening fence exists without a closing fence, drop everything after it
@@ -352,9 +351,24 @@ def sanitize_clarify_message(assistant_msg: str) -> str:
             continue
         sanitized_lines.append(line)
     sanitized = "\n".join(sanitized_lines).strip()
+
+    # Remove sentences/paragraphs that reference removed code blocks
+    # e.g. "Here's the code:", "This code calculates...", "Let me know if you need adjustments!"
+    code_ref_patterns = [
+        r"(?i)here['\u2019]?s (the |is )?(updated |complete |full )?code[^.!?\n]*[.!?]?",
+        r"(?i)here is the (updated |complete |full )?code[^.!?\n]*[.!?]?",
+        r"(?i)this (code|function|implementation) [^?]*?[.!]\s*",
+        r"(?i)let me know if you need (any )?(further |more )?(adjustments?|modifications?|changes?|help)[^.!?]*[.!?]",
+    ]
+    for pattern in code_ref_patterns:
+        sanitized = re.sub(pattern, "", sanitized)
+
+    # Collapse excess blank lines
+    sanitized = re.sub(r"\n{3,}", "\n\n", sanitized).strip()
+
     if "?" not in sanitized:
         sanitized = (sanitized + "\n" if sanitized else "")
-        sanitized += "Could you clarify any edge cases or constraints I should handle?"
+        sanitized += "Could you clarify the expected output format and any edge cases I should handle?"
     return sanitized
 
 
@@ -375,11 +389,27 @@ def select_mainline_action_from_persona(persona, state: Optional[Dict] = None) -
     - Novice: ~1.8 turns (mostly Clarify first)
     """
     prev_reject = state.get("prev_reject", 0) if state else 0
-    
+
     # Condition 1: If user rejected in previous turn, execute (don't ask more questions)
     if prev_reject > 0:
         return "Execute"
-    
+
+    # Condition 1b: If ALL masked items have been disclosed, no point in further Clarify
+    # Compare disclosed count vs total count per field (not just empty/non-empty)
+    disclosure_rule = state.get("disclosure_rule", {}) if state else {}
+    if disclosure_rule:
+        masked_fields = disclosure_rule.get("masked_fields", {})
+        disclosed_info = disclosure_rule.get("disclosed_info", {})
+        all_disclosed = True
+        for field in ["output_format", "validation_rules", "note_that"]:
+            total_items = len(masked_fields.get(field, []))
+            disclosed_items = len(disclosed_info.get(field, []))
+            if total_items > 0 and disclosed_items < total_items:
+                all_disclosed = False
+                break
+        if all_disclosed and state.get("dialogue_turn", 0) > 0:
+            return "Execute"
+
     # Get task uncertainty from state
     task_uncertainty = state.get("task_uncertainty", 0.5) if state else 0.5
     dialogue_turn = state.get("dialogue_turn", 0) if state else 0
@@ -537,15 +567,14 @@ def update_state_for_next_turn(current_state: Dict, user_reaction: Dict, assista
         # 确保disclosure_rule存在disclosed_info字段
         if "disclosed_info" not in disclosure_rule:
             disclosure_rule["disclosed_info"] = {
-                "edge_cases": [],
-                "input_constraints": [],
                 "output_format": [],
                 "validation_rules": [],
+                "note_that": [],
             }
-        
+
         # 更新disclosed_info，添加本次披露的信息（去重）
         disclosed_info = disclosure_rule["disclosed_info"]
-        for category in ["edge_cases", "input_constraints", "output_format", "validation_rules"]:
+        for category in ["output_format", "validation_rules", "note_that"]:
             if category in disclosed_items:
                 existing = set(disclosed_info.get(category, []))
                 new_items = set(disclosed_items[category])
@@ -576,16 +605,18 @@ def build_clean_execute_query(initial_state: Dict, current_state: Dict) -> str:
     """Build a clean query for Execute by combining initial masked query with disclosed info.
 
     Instead of using raw dialogue history (which confuses code generation),
-    extract structurally tracked disclosed_info and present it cleanly,
-    similar to the ideal_disclosed format.
+    extract structurally tracked disclosed_info and present it cleanly.
+
+    Always uses the actual disclosed split items (not original specification),
+    reflecting what the model actually learned through dialogue.
+    For ideal (all info at once) comparison, see code_versions["ideal_disclosed"].
     """
     initial_query = initial_state.get("query", "")
 
-    # Extract disclosed_info from current state's disclosure_rule
     disclosure_rule = current_state.get("disclosure_rule", {})
     disclosed_info = disclosure_rule.get("disclosed_info", {})
 
-    # Collect all disclosed items
+    # Collect all disclosed items (split items as obtained through dialogue)
     disclosed_parts = []
     for category, items in disclosed_info.items():
         if items:
@@ -597,7 +628,6 @@ def build_clean_execute_query(initial_state: Dict, current_state: Dict) -> str:
         disclosed_ctx = "Key requirements: " + "; ".join(disclosed_parts)
         return f"{initial_query}\n\nAdditional information from clarification:\n{disclosed_ctx}"
     else:
-        # No disclosed info yet (e.g., user rejected all clarifications)
         return initial_query
 
 
@@ -660,21 +690,18 @@ def generate_multi_turn_conversation(initial_state: Dict, domain: str,
             disclosure_rule = current_state.get("disclosure_rule")
             if disclosure_rule:
                 # Extract key information from disclosure_rule to guide question generation
-                disclosure_info = disclosure_rule.get("disclosure_info", {})
                 masked_fields = disclosure_rule.get("masked_fields", {})
-                
-                # Build guidance text for the model
+                disclosed_info = disclosure_rule.get("disclosed_info", {})
+
+                # Build guidance text: only include fields that are masked AND not yet disclosed
                 guidance_parts = []
-                
-                # Check what information is available but masked
-                if masked_fields.get("input_constraints"):
-                    guidance_parts.append("- Input constraints or default values")
-                if masked_fields.get("output_format"):
+
+                if masked_fields.get("output_format") and not disclosed_info.get("output_format"):
                     guidance_parts.append("- Output format or return type")
-                if masked_fields.get("edge_cases"):
-                    guidance_parts.append("- Edge cases to handle")
-                if masked_fields.get("validation_rules"):
+                if masked_fields.get("validation_rules") and not disclosed_info.get("validation_rules"):
                     guidance_parts.append("- Validation rules or error handling")
+                if masked_fields.get("note_that") and not disclosed_info.get("note_that"):
+                    guidance_parts.append("- Special rules or naming conventions")
                 
                 if guidance_parts:
                     guidance_text = "\n".join(guidance_parts)
@@ -724,23 +751,6 @@ Generate 1-2 specific questions that would help clarify these missing aspects.""
             dialogue_turn=current_state.get("dialogue_turn", 0),
         )
         
-        # Track if edge_cases info was obtained through Clarify (for "contrastive conflicts")
-        has_edge_cases_info = current_state.get("has_edge_cases_info", False)
-        if action == "Clarify" and reaction.get("meta", {}).get("answered_clarification", 0) > 0:
-            # Check if the answer contains edge_cases information
-            user_reply = reaction.get("user_reply", "")
-            edge_case_keywords = ["edge case", "empty", "negative", "zero", "null", "none", "constraint", "special", "exception", "invalid", "error", "boundary", "extreme"]
-            if any(keyword.lower() in user_reply.lower() for keyword in edge_case_keywords):
-                has_edge_cases_info = True
-            
-            # If disclosure_rule has edge_cases, assume edge_cases info was obtained
-            disclosure_rule = current_state.get("disclosure_rule")
-            if disclosure_rule:
-                disclosure_info = disclosure_rule.get("disclosure_info", {})
-                input_constraints = disclosure_info.get("input_constraints", {})
-                if input_constraints.get("edge_cases"):
-                    has_edge_cases_info = True
-        
         # Create trajectory for this turn
         traj = {
             "trajectory_id": trajectory_id,  # Unique ID to link all turns in this trajectory
@@ -758,12 +768,11 @@ Generate 1-2 specific questions that would help clarify these missing aspects.""
             "turn": turn + 1,
             "is_mainline": True,  # All turns in multi-turn are mainline
             "is_terminal": False,  # Will be set to True if task completed or user stopped
-            "has_edge_cases_info": has_edge_cases_info,  # Track if edge_cases info was obtained
         }
         trajectories.append(traj)
         
         # Check if task is completed (only for Execute action)
-        # Use enhanced task completion check that considers persona and edge_cases info
+        # Check task completion after Execute
         if action == "Execute":
             # Generate 3 versions of code for comparison
             code_versions = {}
@@ -804,16 +813,18 @@ Generate 1-2 specific questions that would help clarify these missing aspects.""
                 # If no clarification happened, masked_only is same as masked_with_clarification
                 code_versions["direct"] = assistant_msg
 
-            # Version 4: ideal_disclosed — masked query + all masked_fields directly revealed
+            # Version 4: ideal_disclosed — masked query + original specification text
+            # Uses disclosure_info.specification (original full text) instead of split items,
+            # representing the ceiling for what Clarify could achieve.
             disclosure_rule = initial_state.get("disclosure_rule", {})
-            masked_fields = disclosure_rule.get("masked_fields", {}) if disclosure_rule else {}
+            original_specs = disclosure_rule.get("disclosure_info", {}) if disclosure_rule else {}
             ideal_parts = []
-            for field_items in masked_fields.values():
-                for item in (field_items if isinstance(field_items, list) else [field_items]):
-                    if str(item).strip():
-                        ideal_parts.append(str(item).strip())
+            for field in ["output_format", "validation_rules", "note_that"]:
+                spec = original_specs.get(field, {}).get("specification", "")
+                if spec.strip():
+                    ideal_parts.append(spec.strip())
             if ideal_parts:
-                ideal_ctx = "Key requirements: " + "; ".join(ideal_parts)
+                ideal_ctx = "Key requirements:\n" + "\n".join(f"- {p}" for p in ideal_parts)
                 ideal_query = f"{initial_masked_query}\n\nAdditional information from clarification:\n{ideal_ctx}"
                 ideal_state = initial_state.copy()
                 ideal_state["query"] = ideal_query
@@ -847,8 +858,7 @@ Generate 1-2 specific questions that would help clarify these missing aspects.""
         # is_same_turn=False because this is moving to the next dialogue turn (not within same turn)
         current_state = update_state_for_next_turn(current_state, reaction, assistant_msg, is_same_turn=False)
         
-        # Update has_edge_cases_info in state for next turn
-        current_state["has_edge_cases_info"] = has_edge_cases_info
+        pass  # state updated by update_state_for_next_turn above
     
     # If loop ended without break (reached max_turns or user stopped), check if we need to force Execute
     has_executed = any(t.get("action") == "Execute" for t in trajectories)
@@ -911,16 +921,16 @@ Generate 1-2 specific questions that would help clarify these missing aspects.""
             # If no clarification happened, masked_only is same as masked_with_clarification
             code_versions["direct"] = assistant_msg
 
-        # Version 4: ideal_disclosed — masked query + all masked_fields directly revealed
+        # Version 4: ideal_disclosed — masked query + original specification text
         disclosure_rule = initial_state.get("disclosure_rule", {})
-        masked_fields = disclosure_rule.get("masked_fields", {}) if disclosure_rule else {}
+        original_specs = disclosure_rule.get("disclosure_info", {}) if disclosure_rule else {}
         ideal_parts = []
-        for field_items in masked_fields.values():
-            for item in (field_items if isinstance(field_items, list) else [field_items]):
-                if str(item).strip():
-                    ideal_parts.append(str(item).strip())
+        for field in ["output_format", "validation_rules", "note_that"]:
+            spec = original_specs.get(field, {}).get("specification", "")
+            if spec.strip():
+                ideal_parts.append(spec.strip())
         if ideal_parts:
-            ideal_ctx = "Key requirements: " + "; ".join(ideal_parts)
+            ideal_ctx = "Key requirements:\n" + "\n".join(f"- {p}" for p in ideal_parts)
             ideal_query = f"{initial_masked_query}\n\nAdditional information from clarification:\n{ideal_ctx}"
             ideal_state = initial_state.copy()
             ideal_state["query"] = ideal_query
@@ -954,7 +964,6 @@ Generate 1-2 specific questions that would help clarify these missing aspects.""
             "turn": len(trajectories) + 1,
             "is_mainline": True,
             "is_terminal": True,
-            "has_edge_cases_info": current_state.get("has_edge_cases_info", False),
             "code_versions": code_versions,
             "task_completed": task_completed,
             "forced_execute": True,  # Mark as forced Execute (due to max_turns or user_stopped)

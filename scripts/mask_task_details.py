@@ -105,13 +105,100 @@ def mask_prompt(instruct_prompt: str) -> Tuple[str, Dict[str, str]]:
     return masked, masked_content
 
 
+def _split_output_format(text: str) -> List[str]:
+    """
+    把 output_format 拆成多个 sub-items。
+
+    OF 有稳定的 "type: description" 格式（95.7% 的任务），适合拆分。
+    拆分策略：
+    1. "type: description" → [Return type, 描述]
+    2. dict 的 'key': desc 模式 → 每个 key 一个 item
+    3. 多行描述中，独立行（大写开头+含冒号）拆分，续行合并
+    4. 单行多句 → 按句子边界拆
+
+    VR/NT 是自由文本，无稳定格式，不拆分。
+    """
+    text = text.strip()
+    if not text:
+        return []
+
+    # ── Step 1: 找 "type: description" 分割点 ──
+    # 匹配 "float:", "dict:", "Tuple[int, str]:", "List[str]:" 等
+    # 类型名只包含标识符字符、方括号、圆括号、逗号、空格、点号
+    type_match = re.match(r'^([\w\[\]\(\), \.]+):\s*', text)
+    if not type_match or len(type_match.group(1)) > 50:
+        # 无类型前缀 或 前缀太长（可能把描述误匹配了），不拆
+        return [text]
+
+    return_type = type_match.group(1).strip()
+    description = text[type_match.end():].strip()
+
+    if not description:
+        return [text]
+
+    items = [f"Return type: {return_type}"]
+
+    # ── Step 2: 拆分描述部分 ──
+
+    # 策略 A: dict/tuple 的 'key': desc 模式
+    key_pattern = re.compile(r"['\"](\w+)['\"]:\s*(.+?)(?=\n\s*['\"]|\Z)", re.DOTALL)
+    key_matches = key_pattern.findall(description)
+    if len(key_matches) >= 2:
+        for key_name, key_desc in key_matches:
+            items.append(f"Field '{key_name}': {key_desc.strip().rstrip('.')}")
+        return items
+
+    # 策略 B: 多行描述 — 只在"独立行"处拆分
+    # 独立行：大写字母开头 + 含有冒号（如 "DataFrame: ...", "Axes: ..."）
+    # 或编号开头（如 "1. pandas.DataFrame: ..."）
+    # 其他行视为续行，合并到前一个 item
+    lines = [l.strip() for l in description.split('\n') if l.strip()]
+    if len(lines) >= 2:
+        merged = [lines[0]]
+        for l in lines[1:]:
+            is_independent = (
+                re.match(r'^[\w\.]+[\w\[\]\(\), \.]*:\s', l) or  # 类型+冒号 (DataFrame: ..., plt.Axes: ..., str: ...)
+                re.match(r'^\d+\.\s+', l) or                      # 编号 (1. ...)
+                re.match(r'^[-•]\s+', l)                           # 列表项 (- ...)
+            )
+            if is_independent:
+                merged.append(l)
+            else:
+                merged[-1] = merged[-1] + " " + l
+        if len(merged) >= 2:
+            items.extend(merged)
+            return items
+
+    # 策略 C: 单行多句（句号 + 大写字母开头）
+    full_desc = " ".join(lines)  # 合并所有行为单行
+    sentences = re.split(r'(?<=[a-z\)\]])\.\s+(?=[A-Z])', full_desc)
+    sentences = [s.strip() for s in sentences if s.strip()]
+    if len(sentences) >= 2:
+        # 合并过短句（<25 chars）到前一句
+        merged = []
+        for s in sentences:
+            if merged and len(s) < 25:
+                merged[-1] = merged[-1] + " " + s
+            else:
+                merged.append(s)
+        if len(merged) >= 2:
+            items.extend(merged)
+            return items
+
+    # 策略 D: 都不满足，描述作为整体（type + desc = 2 items）
+    items.append(full_desc)
+    return items
+
+
 def create_disclosure_rule(masked_content: Dict[str, str]) -> Dict:
     """
     创建 disclosure_rule 数据结构。
-    masked_fields 和 disclosure_info 均存完整内容，两者一致。
+    output_format 拆成多个 sub-items（有稳定的 type: desc 格式）。
+    validation_rules / note_that 保持原样不拆（自由文本，无稳定格式）。
+    disclosure_info 保留完整内容供参考。
     """
     masked_fields = {
-        "output_format":    [masked_content["output_format"]] if masked_content.get("output_format") else [],
+        "output_format":    _split_output_format(masked_content.get("output_format", "")),
         "validation_rules": [masked_content["validation_rules"]] if masked_content.get("validation_rules") else [],
         "note_that":        [masked_content["note_that"]] if masked_content.get("note_that") else [],
     }

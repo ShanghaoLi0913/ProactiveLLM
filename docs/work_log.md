@@ -4,6 +4,149 @@
 
 ---
 
+## 2026-04-12
+
+### 49. 论文完整实验计划确定
+
+详见 `docs/v29_experiment_log.md` §14。
+
+**2 backbones**: Llama-3.1-8B + Qwen2.5-7B。**5 个方法**: TactfulLLM-DPO (ours), Direct Execution, Prompt-only, Always-Clarify, CollabLLM。**3 个实验**: Main performance, Recovery analysis, Persona sensitivity。
+
+当前阶段只做 Llama，200-state 评估确认显著性后，优先加 Prompt-only 和 Always-Clarify baseline（不需要训练，最快出结果），然后 Qwen backbone 和 CollabLLM。
+
+### 48. 200-state 扩大评估启动（50 已有 + 150 新增）
+
+详见 `docs/v29_experiment_log.md` §13。
+
+50-state 结果 DPO 14% vs Base 8% 趋势正确但不显著（p=0.139）。Power analysis 显示 200 states 可达 p≈0.001, power 89%。
+
+从 981 个可用 state 中采样 150 个（seed=43，与训练 109 + 已测试 50 零重叠），文件 `data/seeds/test_states_v29_eval_150extra.jsonl`。DPO 150-state 评估已启动（预计 ~9h），Base 待 DPO 完成后启动。完成后与 50-state 结果合并为 200-state 最终结果。
+
+**训练集不增大**：500 pairs 已饱和（accuracy 100%），pass@1 瓶颈在代码生成能力非数据量。
+
+**200-state 后下一步**：加 SFT + Prompting baseline，用同一 200-state 测试集评估，构成最终论文实验。
+
+### 47. v29 DPO vs Base 50-state 评估完成
+
+详见 `docs/v29_experiment_log.md` §12.4。
+
+**行为分化**: DPO 完全成功 — Novice(85.7% clarify, 7.0 turns) > Experienced(62.4%, 2.66) > Busy(0%, 1.0)。Base 完全 persona-blind（三 persona clarify 49-62%，无差异）。
+
+**pass@1: DPO 14% vs Base 8%**（+75% 相对提升）。Novice 差距最大：DPO 16% vs Base 4%（+300%）。20-state 时 DPO=Base=15% 是样本噪声，50-state 揭示了真实差距。
+
+**pass@5 持平**: DPO 20% vs Base 19.3%，说明 DPO 学的是决策策略而非代码生成能力。
+
+**20-state 的 Busy 担忧消除**: DPO Busy 14% > Base 10%，之前 20-state 的 -5% 是噪声。
+
+**Base 乱问反而差**: Base Busy clarify 62% 但 pass@1 仅 10%，不分 persona 乱问不如 DPO 的 persona-aware 策略。
+
+---
+
+## 2026-04-11
+
+### 46. Busy 表现不佳的深入分析
+
+详见 `docs/v29_experiment_log.md` §11.5。
+
+DPO Busy 永远 T0 Execute → 只有 masked query → 从未获得额外信息。控制变量对比（两者都 0-clarify 时）DPO Busy 11.8% < Base 17.6%，暗示 DPO LoRA 轻微损害纯代码生成能力。
+
+两个叠加因素：①永远不 Clarify 导致信息不足 ②LoRA 可能伤害 code gen。Novice 通过多轮 Clarify 恢复信息弥补了这个损失。
+
+**论文意义**: 这体现了 persona-aware 的核心 trade-off — Clarify 有代价（打断用户）也有收益（恢复信息），不同 persona 偏好下产生不同的 task success trade-off。
+
+### 45. 扩大评估至 50 states（进行中）
+
+详见 `docs/v29_experiment_log.md` §12。
+
+20-state 评估 pass@1 DPO = Base = 15%，样本量太少（1 task 差异 = 5%）。从 1031 个未使用 state 中采样 50 个（seed=42，与 109 训练 state 零重叠），文件 `data/seeds/test_states_v29_eval_50.jsonl`。
+
+DPO 50-state 评估进行中，Base Llama 待 DPO 完成后启动。
+
+### 44. v29 DPO vs Base Llama 对比（20 states）
+
+详见 `docs/v29_experiment_log.md` §11.2-11.4。
+
+**DPO 行为学习成功**: Novice clarify 85.7%、Experienced 68.3%、Busy 0%。Base 完全 persona-blind。
+
+**代码质量对比（20 states）**:
+- pass@1: DPO 15% = Base 15%（总体无差异）
+- pass@5: DPO **18.3%** > Base 15%（+3.3%，Novice 贡献最大 25% vs 15%）
+- Novice pass@1: DPO 20% > Base 15%（多轮 Clarify 有效）
+- Busy pass@1: DPO 10% < Base 15%（仅差 1 task，采样噪声）
+
+结论：行为分化成功，pass@5 有提升趋势但 20 samples 不够显著 → 扩大到 50 states。
+
+### 43. v29 多轮评估启动
+
+详见 `docs/v29_experiment_log.md` §11。
+
+20 个 BigCodeBench states（与训练轨迹 109 states 零重叠），3 personas × 20 states = 60 对话。本地 Llama 端到端生成，gpt-4o-mini 用户模拟。
+
+初步观察（前 8 states）：行为差异化正确——Busy 全部 T0 Execute，Novice 全部多轮 Clarify，Experienced 1-2 轮 Clarify 后 Execute。
+
+评估完成后需跑 Base Llama (`--no_lora`) 对照，验证 v29 masking 下的 baseline pass rate。
+
+### 42. v29 DPO 训练完成
+
+详见 `docs/v29_experiment_log.md` §10。
+
+500 pairs, beta=0.1, epochs=3, QLoRA (r=64)。训练 17 分钟，loss 0.597→0.006，accuracy 59%→100%。模型保存至 `models/v29_100states/`。
+
+数据泄露检查：初始测试集有 2 个 state 出现在轨迹数据中，已替换为干净 states。
+
+### 41. 逆信号与 reward gap 深入分析 → 决定直接训练
+
+详见 `docs/v29_experiment_log.md` §9。
+
+**逆信号本质**：72 个逆信号中 52 个是 interrupt bonus 噪声（task_score 相同，γ bonus 翻转方向），20 个是真逆信号（Clarify 确实帮了代码，但 behavior-first 选了 Execute/另一方）。真逆信号是论文核心 tradeoff 的体现，应保留。
+
+**γ=λ 方案否决**：模拟后 Busy 只剩 12 个 pairs 且 8 个逆信号。γ=λ 破坏了"打断有成本"的核心机制，不可行。
+
+**关键发现：reward gap 不进 DPO loss**。`train_dpo.py` 用标准 `trl.DPOTrainer`，只需 (prompt, chosen, rejected)，reward gap 不影响梯度。逆信号对训练实际无害——chosen/rejected 方向由 behavior-first 保证正确。
+
+**决定：停止调 reward 参数，直接用 500 pairs 训练 v29。** 继续调 reward 不会改善最终 pass rate。真正决定 pass rate 的是模型行为学习（已验证可行）和代码生成能力（非 reward 问题）。
+
+### 40. v29 100-state 4 层分析完成
+
+详见 `docs/v29_experiment_log.md` §7-8。
+
+**数据规模**: 109 unique states, 2794 trajectory turns, 1527 trajectories → 500 preference pairs (107 complete states)。
+
+**Layer 1 — 轨迹行为** ✅: Novice(2.30) > Experienced(1.80) > Busy(1.25)，与 10 states 一致。
+
+**Layer 2 — Pass Rate** ⚠️: direct=0.373, clarified=**0.399**, ideal_disclosed=0.385, oracle=0.436。**clarified > direct 确认**（10 states 时 clarified < direct 是样本噪声）。整体 pass rate 比 10 states 低（0.37 vs 0.56），10 states 抽到的 task 偏简单。clarified > ideal_disclosed 反直觉，可能是 `"; ".join(items)` 格式比原始 spec 更结构化。
+
+**Layer 3 — 信号质量** ⚠️: 正确信号率 75.6%（10-state 84.8%，v28 ~60%）。逆信号率 14.4%（10-state 8.7%，v28 ~25%）。Novice 96% 正确，Experienced T1 逆信号 **64%**（39/61，其中 35 个是 interrupt bonus 噪声），Busy T0 只有 34% 正确+46% zero gap。
+
+**Layer 4 — Gap 来源**: 66.6% 纯 interrupt bonus 驱动，只有 23.4% 有 task_score 差异。Scale up 没有改善——不是样本量问题，是 gpt-4o-mini 在多数 task 上 pass rate 差异不足。强信号 pairs (gap≥0.05) 有 146 个 (29.2%)。
+
+**待决策**:
+1. Experienced T1 逆信号：设 γ=λ 去掉 bonus / 过滤 |gap|<0.05 / 两者结合
+2. Busy zero gap (46%)：暂不处理或过滤
+3. 是否直接用 500 pairs 训练
+
+---
+
+## 2026-04-10
+
+### 39. v29 100-state 生成启动
+
+10-state 验证通过后，启动 100-state 生成（~5.5h, gpt-4o-mini, n_samples=4）。分两批生成（part1: 57 states, part2: 52 states），合并后 109 unique states。
+
+### 38. v29 10-state 4 层分析完成
+
+详见 `docs/v29_experiment_log.md`。
+
+**Layer 1 — 轨迹行为** ✅: Novice(2.22) > Experienced(1.80) > Busy(1.25)，排序正确。
+
+**Layer 2 — Pass Rate**: direct=0.563, clarified=0.541, ideal_disclosed=0.589, oracle=0.612。masking 修复有效（v28≈0→v29 0.56+）。但 clarified < direct（差异 0.022，样本小待确认）。
+
+**Layer 3 — 信号质量**: 总正确信号率 84.8%（v28 ~60%），逆信号率 8.7%（v28 ~25%）。Novice 100% 正确。Experienced T1 逆信号 3/7，其中 2 个是 interrupt bonus 噪声（gap=0.032），1 个真逆信号。
+
+**Layer 4 — Gap 深入分析**: 46 pairs 中 27 个 gap 在 0.032-0.048 之间，全部来自 interrupt bonus（γ-λ=0.08 × w_interrupt=0.2），不是 task_score 差异。根因是 10 states 太少，task_score 大多全 0 或全 1.0。讨论了方案 B（过滤小 gap）和方案 C（去掉 bonus），决定先 scale up 到 100 states 再定。
+
+---
+
 ## 2026-04-09
 
 ### 37. v29 计划：基于结构化 masking 重新生成数据

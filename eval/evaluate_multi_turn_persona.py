@@ -449,9 +449,49 @@ def evaluate_multi_turn_conversation(
     else:
         print("📌 User 模拟（react）：dummy / 规则（--user_dummy 或未设置 llm_model）", flush=True)
     
+    # --- Resume support: load already-completed state_ids from output or partial file ---
+    completed_state_ids = set()
+    results = []
+    _incremental_path = output_path + ".partial" if output_path else None
+    # Prefer partial file (has latest progress), fall back to final output
+    _resume_file = None
+    if _incremental_path and os.path.exists(_incremental_path):
+        _resume_file = _incremental_path
+    elif output_path and os.path.exists(output_path):
+        _resume_file = output_path
+    if _resume_file:
+        try:
+            with open(_resume_file, 'r') as f:
+                existing = json.load(f)
+            existing_results = existing.get("detailed_results", [])
+            # A state is complete only if all 3 personas finished
+            from collections import Counter as _Counter
+            _state_counts = _Counter(r["state_id"] for r in existing_results)
+            completed_state_ids = {sid for sid, cnt in _state_counts.items() if cnt >= len(PERSONAS)}
+            results = [r for r in existing_results if r["state_id"] in completed_state_ids]
+            print(f"🔄 Resume: 从 {_resume_file} 恢复 {len(completed_state_ids)} 个已完成 state，跳过", flush=True)
+        except (json.JSONDecodeError, KeyError):
+            print("⚠️  恢复文件损坏，从头开始", flush=True)
+            results = []
+
+    def _save_incremental(results_so_far, persona_stats_so_far):
+        """Save current progress after each state (all 3 personas done)."""
+        if not _incremental_path:
+            return
+        # Recompute summary stats for saving
+        _ps = {}
+        for pn, st in persona_stats_so_far.items():
+            _ps[pn] = dict(st)
+            if st["total_conversations"] > 0:
+                _ps[pn]["avg_turns_per_conversation"] = st["total_turns"] / st["total_conversations"]
+                total_actions = st["clarify_turns"] + st["execute_turns"]
+                _ps[pn]["clarify_rate"] = st["clarify_turns"] / total_actions if total_actions else 0.0
+        out = {"summary": _ps, "detailed_results": results_so_far}
+        with open(_incremental_path, 'w') as f:
+            json.dump(out, f, indent=2, ensure_ascii=False)
+
     print("\n🚀 开始评估...", flush=True)
     # Evaluate each state with each persona
-    results = []
     persona_stats = defaultdict(lambda: {
         "total_conversations": 0,
         "total_turns": 0,
@@ -462,8 +502,30 @@ def evaluate_multi_turn_conversation(
         "multi_turn_clarify_count": 0,  # 多轮clarify的conversations数量
         "pass_at_k": {f"pass@{k}": {"total": 0, "passed": 0} for k in pass_at_k},
     })
-    
+
+    # Rebuild persona_stats from resumed results
+    for r in results:
+        stats = persona_stats[r["persona"]]
+        stats["total_conversations"] += 1
+        stats["total_turns"] += r["total_turns"]
+        stats["clarify_turns"] += r["clarify_count"]
+        stats["execute_turns"] += r["execute_count"]
+        if r.get("has_multi_turn_clarify"):
+            stats["multi_turn_clarify_count"] += 1
+        for td in r.get("conversation", []):
+            if td.get("action") == "Execute" and "pass_at_k" in td:
+                for k in pass_at_k:
+                    key = f"pass@{k}"
+                    if key in td["pass_at_k"]:
+                        stats["pass_at_k"][key]["total"] += 1
+                        if td["pass_at_k"][key]:
+                            stats["pass_at_k"][key]["passed"] += 1
+
     for state_idx, initial_state in enumerate(test_states):
+        # Skip already-completed states (resume support)
+        if initial_state.get("id", "unknown") in completed_state_ids:
+            print(f"\n⏭️  跳过已完成: {state_idx + 1}/{len(test_states)}: {initial_state.get('id', 'unknown')}", flush=True)
+            continue
         print(f"\n{'='*80}", flush=True)
         print(f"样本 {state_idx + 1}/{len(test_states)}: {initial_state.get('id', 'unknown')}", flush=True)
         print(f"{'='*80}", flush=True)
@@ -606,7 +668,11 @@ def evaluate_multi_turn_conversation(
                             stats["pass_at_k"][key]["total"] += 1
                             if turn_data["pass_at_k"][key]:
                                 stats["pass_at_k"][key]["passed"] += 1
-    
+
+        # Incremental save after each state (all 3 personas done)
+        _save_incremental(results, persona_stats)
+        print(f"  💾 已保存进度 ({state_idx + 1}/{len(test_states)})", flush=True)
+
     # Calculate final stats
     for persona_name, stats in persona_stats.items():
         if stats["total_conversations"] > 0:
@@ -649,6 +715,10 @@ def evaluate_multi_turn_conversation(
         with open(output_path, 'w') as f:
             json.dump(output, f, indent=2, ensure_ascii=False)
         print(f"\n✅ 结果已保存到: {output_path}")
+        # Clean up partial file
+        if _incremental_path and os.path.exists(_incremental_path):
+            os.rename(_incremental_path, output_path)
+            print(f"  (partial → final: {output_path})")
     
     return results, persona_stats
 
