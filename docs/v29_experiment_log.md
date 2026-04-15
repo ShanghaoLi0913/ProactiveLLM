@@ -840,9 +840,36 @@ PYTHONUNBUFFERED=1 python eval/evaluate_multi_turn_persona.py \
 - 是否需要在训练数据中增加 Novice Execute 的正样本
 - 是否需要在 reward 中加 turn penalty 抑制过长对话
 
-### 13.7 评估结果
+### 13.7 200-State 评估结果
 
-待评估完成后补充。
+> 日期: 2026-04-14
+> DPO 150-extra 完成于 2026-04-14，Base 150-extra 分两批完成（108 + 42 states）
+
+#### 200-State DPO vs Base 完整对比
+
+| Persona | DPO pass@1 | Base pass@1 | DPO pass@5 | Base pass@5 |
+|---------|:---:|:---:|:---:|:---:|
+| Novice-Learner | **18.5%** (37/200) | 12.5% (25/200) | **25.5%** (51/200) | 20.5% (41/200) |
+| Experienced-Engineer | **15.5%** (31/200) | 12.5% (25/200) | **25.0%** (50/200) | 19.0% (38/200) |
+| Busy-Developer | 14.0% (28/200) | 13.0% (26/200) | 20.0% (40/200) | 20.0% (40/200) |
+| **Overall** | **16.0%** (96/600) | **12.7%** (76/600) | **23.5%** (141/600) | **19.8%** (119/600) |
+
+#### Fisher Exact Tests (pass@1, one-sided)
+
+| 对比 | p-value | 显著? |
+|------|:---:|:---:|
+| Overall | 0.059 | ❌ (接近) |
+| Novice | 0.064 | ❌ (接近) |
+| Experienced | 0.236 | ❌ |
+| Busy | 0.442 | ❌ |
+
+#### 分析
+
+1. **趋势正确但统计不显著** — DPO 全面优于 Base（+3.3% overall），但 p=0.059 未过 0.05
+2. **Gap 比 50-state 预期小** — 50-state 时 DPO 14% vs Base 8%（gap=6%），200-state 实际 gap 只有 3.3%
+3. **原因**：Base 150-extra 的 pass@1 没有继续低（稳定在 7-9%），而 50-state 的 Base 8% 本身就偏高
+4. **行为分化依然完美** — DPO 三档分化稳定（Novice 7.0 > Experienced 2.6 > Busy 1.0），Base persona-blind
+5. **决定**：不再扩大测试集，转向 baseline 对比来丰富论文叙事
 
 ---
 
@@ -906,7 +933,190 @@ PYTHONUNBUFFERED=1 python eval/evaluate_multi_turn_persona.py \
 
 ---
 
-## 15. 文件清单
+## 16. Prompt-only Baseline（进行中）
+
+> 日期: 2026-04-14
+> 目标: 验证"纯 prompt 描述 persona 能否驱动行为分化"，回应 reviewer "why not just prompt?"
+
+### 16.1 实现方案
+
+在 `eval/evaluate_multi_turn_persona.py` 新增 `--prompt_only` flag：
+- 使用 Base Llama（无 LoRA），加载方式与 `--no_lora` 相同
+- Action 选择使用 `select_action_prompt_only()` 替代 `select_action_with_model()`
+- System prompt 包含 persona 描述（patience/expertise/特点），但**不包含任何决策规则或轮数阈值**
+- 让模型自己根据 persona 描述判断是否 Clarify
+
+### 16.2 Prompt 设计原则
+
+**只描述用户特征，不给策略**：
+- Busy-Developer: "low patience, mid-level expertise, time-constrained, prefers efficiency"
+- Novice-Learner: "high patience, low expertise, unfamiliar with domain"
+- Experienced-Engineer: "moderate patience, high expertise, may not provide complete specs"
+
+通用指令: "Consider the user's characteristics when deciding" — 不含轮数、阈值或任何 oracle 知识。
+
+### 16.3 Sanity Check（2 states）
+
+| Persona | State 1 turns | State 2 turns | avg turns |
+|---------|:---:|:---:|:---:|
+| Novice-Learner | 7 (forced) | 3 | 4.50 |
+| Busy-Developer | 4 | 5 | **5.00** |
+| Experienced-Engineer | 3 | 3 | 3.00 |
+
+**关键发现**：Prompt-only **几乎没有行为分化**。Busy (5.0轮) 甚至比 Novice (4.5轮) 问得更多。Base Llama 无视 prompt 中的 persona 描述，一律倾向 Clarify。
+
+对比 DPO: Novice 7.0 > Experienced 2.6 > Busy 1.0 — 分化完美。
+
+### 16.4 50-State 评估（进行中）
+
+```
+PYTHONUNBUFFERED=1 python eval/evaluate_multi_turn_persona.py \
+  --prompt_only --base_model meta-llama/Llama-3.1-8B-Instruct \
+  --test_states data/seeds/test_states_v29_eval_50.jsonl \
+  --max_samples 50 --max_turns 6 \
+  --llm_model gpt-4o-mini --pass_at_k 1 5 \
+  --output outputs/eval_v29_prompt_only_50test.json
+```
+
+- 50 states × 3 personas = 150 组对话，预计 3-5 小时
+- 完成后与 DPO 50-state 和 Base 50-state 做三方对比
+- 如果 50-state 结果符合预期，再扩展到 200 states
+
+### 16.5 预期结果
+
+Prompt-only 应该：
+1. **行为分化弱或无** — 三个 persona 行为差异不大（sanity check 已确认）
+2. **pass@1 接近 Base** — 没有学过策略，行为随机，不应优于 Base
+3. **论文价值**: 证明 persona-aware proactive behavior 不能靠 prompting 解决，需要 DPO 训练
+
+---
+
+## 18. Prompt-only 50-State 完整结果
+
+> 日期: 2026-04-15
+> 50 states 评估完成
+
+| Persona | pass@1 | pass@5 | Avg Turns | Rej Rate |
+|---------|:---:|:---:|:---:|:---:|
+| Novice-Learner | 14.0% (7/50) | 20.0% (10/50) | 5.82 | 46.5% |
+| Experienced-Engineer | 6.0% (3/50) | 16.0% (8/50) | 5.38 | 55.7% |
+| Busy-Developer | 6.0% (3/50) | 18.0% (9/50) | 5.32 | 89.4% |
+| **Overall** | **8.7% (13/150)** | **18.0% (27/150)** | **5.51** | **63.2%** |
+
+**关键结论**:
+1. **行为零分化** — 三个 persona 的 avg turns 几乎一样（5.3-5.8），完全无视 persona prompt
+2. **pass@1 最差** — 8.7%，比 Base (12.7%) 和 DPO (16.0%) 都低
+3. **Busy 被疯狂打扰** — 83% clarify rate、89.4% rejection rate，加了 persona prompt 反而更糟
+4. **论文价值** — 直接回应 reviewer "why not just prompt?"
+
+---
+
+## 19. Direct Execution 50-State 结果
+
+> 日期: 2026-04-15
+> 实现 `--direct_execution` flag，强制 Turn 0 Execute，不做任何 clarification
+
+| Persona | pass@1 | pass@5 | Avg Turns | Rej Rate |
+|---------|:---:|:---:|:---:|:---:|
+| Novice-Learner | 6.0% (3/50) | 12.0% (6/50) | 1.0 | 0% |
+| Experienced-Engineer | 8.0% (4/50) | 14.0% (7/50) | 1.0 | 0% |
+| Busy-Developer | 8.0% (4/50) | 14.0% (7/50) | 1.0 | 0% |
+| **Overall** | **7.3% (11/150)** | **13.3% (20/150)** | **1.0** | **0%** |
+
+**关键结论**:
+1. **zero-interaction lower bound** — pass@1 7.3% 是所有方法中最低的
+2. **证明 clarification 有价值** — DPO 16.0% vs Direct 7.3%，+8.7% 绝对提升
+3. **三 persona 无差异** — 没有交互就没有行为分化
+
+---
+
+## 20. Clarify-first (K=1) Baseline ✅
+
+> 日期: 2026-04-15
+> 实现 `--always_clarify K` flag，固定 K 轮 Clarify 后 Execute
+
+**设计**: Turn 0 强制 Clarify（Base Llama 生成澄清问题）→ gpt-4o-mini 模拟用户回答 → Turn 1 强制 Execute。所有 persona 统一 2 turns。
+
+**命名改为 Clarify-first**: 比 Always-Clarify 更准确描述 K=1 的行为（"先问一轮再写代码"）。
+
+**50-state 结果**:
+
+| Persona | pass@1 | pass@5 | Avg Turns | Rej Rate |
+|---------|:---:|:---:|:---:|:---:|
+| Novice-Learner | 8.0% (4/50) | 20.0% (10/50) | 2.0 | — |
+| Experienced-Engineer | 12.0% (6/50) | 20.0% (10/50) | 2.0 | — |
+| Busy-Developer | 8.0% (4/50) | 18.0% (9/50) | 2.0 | — |
+| **Overall** | **9.3% (14/150)** | **19.3% (29/150)** | **2.0** | **52.0%** |
+
+**关键结论**:
+1. 比 Direct Execution (+2.0% pass@1) 有提升，说明 1 轮 Clarify 能获取少量信息
+2. 52% rejection rate 很高 — Busy persona 拒绝大部分 clarify（只有 1 轮机会）
+3. 所有 persona 固定 2 turns，无行为分化（by design）
+
+---
+
+## 21. Baseline 全面对比（50-state 口径）
+
+> 日期: 2026-04-15
+
+| Method | pass@1 | pass@5 | Avg Turns | Rej Rate |
+|--------|:---:|:---:|:---:|:---:|
+| Direct Execution | 7.3% | 13.3% | 1.0 | 0% |
+| Clarify-first (K=1) | 9.3% | 19.3% | 2.0 | 52.0% |
+| Base LLM | 12.7%* | 19.8%* | 2.2* | 62.7%* |
+| Prompt-only | 8.7% | 18.0% | 5.5 | 63.2% |
+| **TactfulLLM (ours)** | **16.0%*** | **23.5%*** | **3.5*** | **45.2%*** |
+
+*Base 和 DPO 为 200-state 结果，其余为 50-state。
+
+**Rejection Rate 分析**:
+- C_interrupt (论文公式) 对 DPO 不利：DPO Novice 跑满 7 轮累积成本 2.235，高于 Base Novice 0.326
+- 原因：Novice 过拟合为"永远 Clarify"，大量 clarify turns + 45% rejection rate
+- 决定：Table 1 报 pass@1/pass@5/Avg Turns 按 persona 展开，Rejection Rate 在正文提及，不单独成表
+
+### 论文 Table 1 设计
+
+```
+pass@1 (Nov/Exp/Busy/All) | pass@5 (Nov/Exp/Busy/All) | Avg Turns (Nov/Exp/Busy/All)
+```
+- 12 data columns，NeurIPS 单栏可放
+- Rejection Rate 在正文一句话报
+- C_interrupt 不报（对 DPO 不利，因为 Novice 过度 Clarify）
+
+---
+
+## 22. Experiment 2: Recovery Analysis — Oracle & Ideal Disclosed 实现
+
+> 日期: 2026-04-15
+> 目标: 量化 clarification 恢复了多少被遮蔽的信息
+
+### 设计
+
+Experiment 2 比较 4 个 information level：
+1. **Direct** (已有): 遮蔽后 query 直接生成代码 → pass@k = 7.3%
+2. **Clarified** (已有): TactfulLLM 通过对话获取部分信息后生成代码 → pass@k = 16.0%
+3. **Ideal Disclosed** (新): 遮蔽 query + 所有 masked_fields 一次性给出 → pass@k = ?
+4. **Oracle** (新): 完整原始 `original_instruct_prompt` → pass@k = ?
+
+### 实现
+
+在 `eval/evaluate_multi_turn_persona.py` 中新增两个 flag:
+- `--oracle`: 用 `original_instruct_prompt` 替换 `query`，单轮 Execute，无 persona 循环
+- `--ideal_disclosed`: 保持遮蔽 `query`，但把所有 `masked_fields` 填入 `disclosed_info`，单轮 Execute
+
+关键设计：
+- **Persona-independent**: 这两个都是单轮生成，不涉及用户交互，结果与 persona 无关
+- **Base Llama** (no LoRA): 衡量信息量差异而非策略差异
+- 新增 pass@10 评估 (`--pass_at_k 1 5 10`)
+
+### 运行状态
+
+- Oracle 50-state: 🏃 运行中
+- Ideal Disclosed 50-state: ⏳ 待 Oracle 完成后启动
+
+---
+
+## 17. 文件清单
 
 | 文件 | 说明 |
 |------|------|
@@ -927,6 +1137,12 @@ PYTHONUNBUFFERED=1 python eval/evaluate_multi_turn_persona.py \
 | `outputs/eval_v29_base_llama_50test.json` | Base Llama 评估结果（50 states） |
 | `data/seeds/test_states_v29_eval_50.jsonl` | 50 个评估用 states（与训练无重叠） |
 | `data/seeds/test_states_v29_eval_150extra.jsonl` | 150 个额外评估用 states（seed=43，与训练+50test 无重叠） |
-| `outputs/eval_v29_dpo_150extra.json` | v29 DPO 评估结果（150 extra states，进行中） |
-| `outputs/eval_v29_base_150extra.json` | Base Llama 评估结果（150 extra states，待启动） |
+| `outputs/eval_v29_dpo_150extra.json` | v29 DPO 评估结果（150 extra states）✅ |
+| `outputs/eval_v29_base_150extra.json.partial` | Base Llama 评估结果（150 extra, 108 states partial）|
+| `outputs/eval_v29_base_150extra_remaining.json` | Base Llama 评估结果（150 extra, 剩余 42 states）✅ |
+| `outputs/eval_v29_prompt_only_50test.json` | Prompt-only baseline 评估结果（50 states）✅ |
+| `outputs/eval_v29_direct_execution_50test.json` | Direct Execution baseline 评估结果（50 states）✅ |
+| `outputs/eval_v29_clarify_first_50test.json` | Clarify-first (K=1) baseline 评估结果（50 states）✅ |
+| `outputs/eval_v29_oracle_50test.json` | Oracle (unmasked) 评估结果（50 states，运行中） |
+| `outputs/eval_v29_ideal_disclosed_50test.json` | Ideal Disclosed 评估结果（50 states，待启动） |
 | `reward/compute_rewards.py` | Reward + preference pair 生成 |

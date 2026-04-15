@@ -129,6 +129,68 @@ def select_action_with_model(
     return pick_action_from_generation(model, tokenizer, prompt, max_new_tokens=30)
 
 
+def select_action_prompt_only(
+    state: Dict,
+    tokenizer: AutoTokenizer,
+    model: torch.nn.Module,
+    persona: Dict,
+) -> str:
+    """Prompt-only baseline: base model + explicit persona-aware instructions.
+
+    Instead of DPO-trained weights, we give the base model a system prompt that
+    explicitly describes how each persona should decide between Clarify and Execute.
+    The model generates a short response; action is detected from content style
+    (same as select_action_with_model).
+    """
+    from policy.infer import pick_action_from_generation
+    from policy.render_state import render_state as render_state_with_persona
+
+    persona_name = persona.get("name", "Unknown")
+    patience = persona.get("patience", "mid")
+
+    # Build persona description — no strategy rules, only user characteristics
+    if patience == "low":  # Busy-Developer
+        persona_desc = (
+            "The user is a Busy-Developer. They have low patience and mid-level expertise. "
+            "They are time-constrained and prefer efficiency over thoroughness."
+        )
+    elif patience == "high":  # Novice-Learner
+        persona_desc = (
+            "The user is a Novice-Learner. They have high patience but low expertise. "
+            "They are unfamiliar with the domain and may benefit from a more careful approach."
+        )
+    else:  # Experienced-Engineer (mid patience)
+        persona_desc = (
+            "The user is an Experienced-Engineer. They have moderate patience and high expertise. "
+            "They are technically skilled but may not always provide complete specifications."
+        )
+
+    state_text = render_state_with_persona(state, persona=persona)
+
+    # System prompt: persona description + task framing, no decision rules
+    system_msg = (
+        f"{persona_desc}\n\n"
+        "You are a coding assistant. Given the user's profile and their task request, "
+        "decide how to respond:\n"
+        "- If you need more information to write correct code, ask a clarifying question.\n"
+        "- If you have enough information, write the code directly "
+        "(start with ```python or def or import).\n\n"
+        "Consider the user's characteristics when deciding."
+    )
+    messages = [
+        {"role": "system", "content": system_msg},
+        {"role": "user", "content": state_text},
+    ]
+    if hasattr(tokenizer, "apply_chat_template") and getattr(tokenizer, "chat_template", None):
+        prompt = tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True,
+        )
+    else:
+        prompt = f"{system_msg}\n\n{state_text}\n\nAssistant:"
+
+    return pick_action_from_generation(model, tokenizer, prompt, max_new_tokens=30)
+
+
 def generate_assistant_message(
     action: str,
     state: Dict,
@@ -333,10 +395,20 @@ def evaluate_multi_turn_conversation(
     pass_at_k: List[int] = [1, 3, 5],
     use_openai_for_generation: bool = False,
     no_lora: bool = False,
+    prompt_only: bool = False,
+    direct_execution: bool = False,
+    always_clarify: Optional[int] = None,
+    oracle: bool = False,
+    ideal_disclosed: bool = False,
 ):
     """Evaluate model's multi-turn behavior with different personas.
-    
+
     no_lora=True: 只加载 base_model（用于 Base Llama 对照），不加载 LoRA。
+    prompt_only=True: base model + explicit persona instructions (no DPO training).
+    direct_execution=True: always execute on turn 0, no clarification (lower bound baseline).
+    always_clarify=K: clarify for exactly K rounds, then execute (total K+1 turns).
+    oracle=True: use original unmasked instruct_prompt, single-turn Execute, no persona (upper bound).
+    ideal_disclosed=True: masked query + all masked_fields disclosed at once, single-turn Execute, no persona.
     """
     
     print("=" * 80)
@@ -346,8 +418,23 @@ def evaluate_multi_turn_conversation(
     hf_token = os.getenv("HF_TOKEN")
     
     # Load model
+    # Oracle / Ideal Disclosed are persona-independent single-turn evaluations
+    persona_independent = oracle or ideal_disclosed
+
     if no_lora:
-        print(f"\n📊 加载 Base 模型（无 LoRA）: {base_model}")
+        if oracle:
+            mode_label = "Oracle (unmasked) upper bound"
+        elif ideal_disclosed:
+            mode_label = "Ideal Disclosed upper bound"
+        elif direct_execution:
+            mode_label = "Direct Execution baseline"
+        elif always_clarify is not None:
+            mode_label = f"Always-Clarify (K={always_clarify}) baseline"
+        elif prompt_only:
+            mode_label = "Prompt-only baseline"
+        else:
+            mode_label = "Base 模型（无 LoRA）"
+        print(f"\n📊 加载 {mode_label}: {base_model}")
         tokenizer = AutoTokenizer.from_pretrained(
             base_model,
             use_fast=True,
@@ -423,7 +510,10 @@ def evaluate_multi_turn_conversation(
         print(f"✅ 采样后剩余 {len(test_states)} 条", flush=True)
     
     print(f"\n📊 评估 {len(test_states)} 个测试样本", flush=True)
-    print(f"📊 每个样本测试 {len(PERSONAS)} 个personas", flush=True)
+    if persona_independent:
+        print(f"📊 Persona-independent 模式：每个样本测试 1 次（无 persona）", flush=True)
+    else:
+        print(f"📊 每个样本测试 {len(PERSONAS)} 个personas", flush=True)
     print(f"📊 最大轮次: {max_turns}", flush=True)
     
     if use_openai_for_generation:
@@ -464,10 +554,11 @@ def evaluate_multi_turn_conversation(
             with open(_resume_file, 'r') as f:
                 existing = json.load(f)
             existing_results = existing.get("detailed_results", [])
-            # A state is complete only if all 3 personas finished
+            # A state is complete only if all personas finished (or 1 for persona-independent)
             from collections import Counter as _Counter
             _state_counts = _Counter(r["state_id"] for r in existing_results)
-            completed_state_ids = {sid for sid, cnt in _state_counts.items() if cnt >= len(PERSONAS)}
+            _required = 1 if persona_independent else len(PERSONAS)
+            completed_state_ids = {sid for sid, cnt in _state_counts.items() if cnt >= _required}
             results = [r for r in existing_results if r["state_id"] in completed_state_ids]
             print(f"🔄 Resume: 从 {_resume_file} 恢复 {len(completed_state_ids)} 个已完成 state，跳过", flush=True)
         except (json.JSONDecodeError, KeyError):
@@ -529,11 +620,84 @@ def evaluate_multi_turn_conversation(
         print(f"\n{'='*80}", flush=True)
         print(f"样本 {state_idx + 1}/{len(test_states)}: {initial_state.get('id', 'unknown')}", flush=True)
         print(f"{'='*80}", flush=True)
-        
+
+        # --- Oracle / Ideal Disclosed: persona-independent, single-turn Execute ---
+        if persona_independent:
+            initial_state_snapshot = copy.deepcopy(initial_state)
+            current_state = copy.deepcopy(initial_state)
+            persona_label = "Oracle" if oracle else "Ideal_Disclosed"
+
+            if oracle:
+                # Replace masked query with full original instruct_prompt
+                current_state["query"] = current_state["original_instruct_prompt"]
+                initial_state_snapshot["query"] = current_state["original_instruct_prompt"]
+                print(f"  Mode: Oracle (unmasked prompt)", flush=True)
+            else:
+                # Ideal Disclosed: pre-fill all masked_fields into disclosed_info
+                dr = current_state.get("disclosure_rule", {})
+                masked = dr.get("masked_fields", {})
+                # Build disclosed_info from all masked fields
+                disclosed_info = {}
+                for category, items in masked.items():
+                    if isinstance(items, list):
+                        disclosed_info[category] = list(items)
+                    elif isinstance(items, str):
+                        disclosed_info[category] = [items]
+                    else:
+                        disclosed_info[category] = []
+                dr["disclosed_info"] = disclosed_info
+                current_state["disclosure_rule"] = dr
+                print(f"  Mode: Ideal Disclosed (all masked fields given)", flush=True)
+
+            # Single-turn Execute
+            from scripts.generate_trajectories import PERSONAS as _PERSONAS
+            _dummy_persona = _PERSONAS[0]  # persona doesn't matter, just needed for react()
+            turn_data = _build_execute_turn_data(
+                0,
+                current_state,
+                _dummy_persona,
+                pass_at_k,
+                use_openai,
+                base_model,
+                llm_model,
+                model=model,
+                tokenizer=tokenizer,
+                total_questions_asked=0,
+                forced_final_execute=False,
+                initial_state=initial_state_snapshot,
+            )
+            result = {
+                "state_id": initial_state.get("id", "unknown"),
+                "persona": persona_label,
+                "conversation": [turn_data],
+                "total_turns": 1,
+                "actions": ["Execute"],
+                "clarify_count": 0,
+                "execute_count": 1,
+                "has_multi_turn_clarify": False,
+            }
+            results.append(result)
+
+            stats = persona_stats[persona_label]
+            stats["total_conversations"] += 1
+            stats["total_turns"] += 1
+            stats["execute_turns"] += 1
+            for k in pass_at_k:
+                key = f"pass@{k}"
+                if key in turn_data.get("pass_at_k", {}):
+                    stats["pass_at_k"][key]["total"] += 1
+                    if turn_data["pass_at_k"][key]:
+                        stats["pass_at_k"][key]["passed"] += 1
+            print(f"    Turn 0: Execute | pass@1={turn_data.get('pass_at_k', {}).get('pass@1', False)}")
+
+            _save_incremental(results, persona_stats)
+            continue
+        # --- End Oracle / Ideal Disclosed ---
+
         for persona_idx, persona_obj in enumerate(PERSONAS):
             persona_name = persona_obj.name
             print(f"\n  Persona: {persona_name}", flush=True)
-            
+
             # Initialize state with persona; keep a clean snapshot for Execute query
             initial_state_snapshot = copy.deepcopy(initial_state)
             current_state = copy.deepcopy(initial_state)
@@ -548,13 +712,25 @@ def evaluate_multi_turn_conversation(
             total_questions_asked = 0
 
             for turn in range(max_turns):
-                # Select action using trained model
-                action = select_action_with_model(
-                    current_state,
-                    tokenizer,
-                    model,
-                    current_state["persona"],
-                )
+                # Select action using trained model, prompt-only, direct execution, or always-clarify
+                if direct_execution:
+                    action = "Execute"
+                elif always_clarify is not None:
+                    action = "Clarify" if turn < always_clarify else "Execute"
+                elif prompt_only:
+                    action = select_action_prompt_only(
+                        current_state,
+                        tokenizer,
+                        model,
+                        current_state["persona"],
+                    )
+                else:
+                    action = select_action_with_model(
+                        current_state,
+                        tokenizer,
+                        model,
+                        current_state["persona"],
+                    )
                 
                 # Generate assistant message
                 if action == "Execute":
@@ -760,17 +936,48 @@ if __name__ == "__main__":
         action="store_true",
         help="用 gpt-4o-mini 生成 Clarify/Execute 内容（默认用本地 DPO 模型）",
     )
-    
+    parser.add_argument(
+        "--prompt_only",
+        action="store_true",
+        help="Prompt-only baseline: base model + explicit persona instructions for action selection (no DPO training).",
+    )
+    parser.add_argument(
+        "--direct_execution",
+        action="store_true",
+        help="Direct Execution baseline: always execute on turn 0, no clarification.",
+    )
+    parser.add_argument(
+        "--always_clarify",
+        type=int,
+        default=None,
+        metavar="K",
+        help="Always-Clarify baseline: clarify for exactly K rounds, then execute (total K+1 turns).",
+    )
+    parser.add_argument(
+        "--oracle",
+        action="store_true",
+        help="Oracle upper bound: use original unmasked instruct_prompt, single-turn Execute, no persona.",
+    )
+    parser.add_argument(
+        "--ideal_disclosed",
+        action="store_true",
+        help="Ideal Disclosed upper bound: masked query + all masked_fields disclosed at once, single-turn Execute.",
+    )
+
     args = parser.parse_args()
 
-    if not args.no_lora and not args.model_dir:
-        parser.error("需要 --model_dir（LoRA 目录），或使用 --no_lora 评估 Base 模型")
+    if not args.no_lora and not args.prompt_only and not args.direct_execution and args.always_clarify is None and not args.oracle and not args.ideal_disclosed and not args.model_dir:
+        parser.error("需要 --model_dir（LoRA 目录），或使用 --no_lora / --prompt_only / --direct_execution / --always_clarify / --oracle / --ideal_disclosed 评估 Base 模型")
     if args.no_lora and args.model_dir:
         print("ℹ️  已指定 --no_lora，忽略 --model_dir", flush=True)
 
     # 与 scripts/generate_trajectories 一致：默认 gpt-4o-mini；--user_dummy 则 llm_model=None
     llm_for_user = None if args.user_dummy else (args.llm_model.strip() or None)
     
+    # prompt_only, direct_execution, always_clarify, oracle, ideal_disclosed imply no_lora (uses base model)
+    if args.prompt_only or args.direct_execution or args.always_clarify is not None or args.oracle or args.ideal_disclosed:
+        args.no_lora = True
+
     evaluate_multi_turn_conversation(
         model_dir=args.model_dir,
         base_model=args.base_model,
@@ -783,4 +990,9 @@ if __name__ == "__main__":
         pass_at_k=args.pass_at_k,
         use_openai_for_generation=args.use_openai_for_generation,
         no_lora=args.no_lora,
+        prompt_only=args.prompt_only,
+        direct_execution=args.direct_execution,
+        always_clarify=args.always_clarify,
+        oracle=args.oracle,
+        ideal_disclosed=args.ideal_disclosed,
     )

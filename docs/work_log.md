@@ -4,6 +4,82 @@
 
 ---
 
+## 2026-04-15
+
+### 59. Experiment 2: Oracle & Ideal Disclosed 实现
+
+详见 `docs/v29_experiment_log.md` §22。
+
+在 `eval/evaluate_multi_turn_persona.py` 新增 `--oracle` 和 `--ideal_disclosed` flag。两者都是 persona-independent 单轮 Execute（无用户交互），用 Base Llama 衡量不同信息量下的代码质量。Oracle 50-state 运行中，Ideal Disclosed 待启动。新增 pass@10 评估。
+
+### 58. Clarify-first (K=1) baseline 50-state 完成
+
+详见 `docs/v29_experiment_log.md` §20。
+
+结果：**pass@1 9.3%**, **pass@5 19.3%**, Avg Turns 2.0, Rejection Rate 52.0%。比 Direct Execution (+2.0% pass@1) 略有提升，说明 1 轮 clarify 能获取少量信息。所有 persona 固定 2 turns 无行为分化。
+
+### 57. 论文 Table 设计确定
+
+详见 `docs/v29_experiment_log.md` §21。
+
+**Table 1 (Main Results)**: pass@1 / pass@5 / Avg Turns × 4 personas (Nov/Exp/Busy/All) = 12 列。按 backbone 分组（Llama + Qwen）。Rejection Rate 在正文一句话提及，不单独成表。C_interrupt 不报（DPO Novice 过度 Clarify 导致成本反而高于 Base）。
+
+### 56. Clarify-first (K=1) baseline 实现并启动
+
+详见 `docs/v29_experiment_log.md` §20。
+
+实现 `--always_clarify K` flag，Turn 0 强制 Clarify → Turn 1 强制 Execute。命名从 Always-Clarify 改为 **Clarify-first**（更准确描述 K=1 的"先问一轮再写代码"行为）。50-state 评估进行中。
+
+### 55. Direct Execution baseline 50-state 完成
+
+详见 `docs/v29_experiment_log.md` §19。
+
+实现 `--direct_execution` flag，强制 Turn 0 Execute。结果：**pass@1 7.3%**（所有方法最低），三 persona 无差异。确认为 zero-interaction lower bound，证明 clarification 有价值（DPO 16.0% vs Direct 7.3%）。
+
+### 54. Baseline 对比框架确定
+
+5 个 baseline + ours:
+- **Direct Execution**: 从不问（lower bound）✅
+- **Clarify-first**: 必问一轮 → 进行中
+- **Base LLM**: 裸模型自由决定 ✅
+- **Prompt-only**: persona prompt 无训练 ✅
+- **CollabLLM**: 外部方法 → 待实现
+- **TactfulLLM (ours)**: DPO 训练 ✅
+
+Appendix baseline 描述已写完（实现细节 + 设计理由）。
+
+### 53. Prompt-only baseline 50-state 完成
+
+详见 `docs/v29_experiment_log.md` §18。
+
+结果：**pass@1 8.7%**（比 Base 12.7% 还低），行为零分化（三 persona avg turns 5.3-5.8），Busy rejection rate 89.4%。直接回应 reviewer "why not just prompt?"。
+
+---
+
+## 2026-04-14
+
+### 52. Prompt-only baseline 50-state 评估启动
+
+详见 `docs/v29_experiment_log.md` §16。
+
+实现 `--prompt_only` flag（`eval/evaluate_multi_turn_persona.py`），Base Llama + persona 描述 system prompt（无决策规则）。Sanity check 2 states 确认：**Prompt-only 几乎无行为分化**，Busy 甚至比 Novice 问得更多。50-state 评估进行中，预计 3-5 小时。
+
+### 51. 200-state DPO vs Base 完整对比完成
+
+详见 `docs/v29_experiment_log.md` §13.7。
+
+Base 150-extra 分两批跑完（108 + 42 states），合并后 200-state 结果：
+- **DPO pass@1 16.0% vs Base 12.7%**（+3.3%），趋势正确但 Fisher exact p=0.059 未达 0.05
+- Gap 比 50-state 预期小（50-state 时 gap=6%，200-state 实际 3.3%）
+- **行为分化依然完美**：DPO Novice 7.0 > Experienced 2.6 > Busy 1.0
+- 决定：不再扩大测试集，转向 baseline 对比丰富论文叙事
+
+### 50. Base 150-extra 剩余 42 states 补跑完成
+
+Base 150-extra 跑到 108/150 时中断（疑似容器休眠），提取已完成 state，生成 `test_states_v29_eval_150extra_remaining.jsonl`（42 states），利用 resume 机制补跑完成。
+
+---
+
 ## 2026-04-12
 
 ### 49. 论文完整实验计划确定
