@@ -4,6 +4,51 @@
 
 ---
 
+## 2026-04-16
+
+### 64. v30 DPO 训练完成 + 50-state 评估启动
+
+详见 `docs/v29_experiment_log.md` v30 部分。
+
+509 pairs, 同 v29 配置训练 17min。Loss 0.505→0.130, accuracy 97.5%（vs v29 100%，因为 pairs 更多样化）。模型保存至 `models/v30_100states/`。50-state 评估进行中，预计 5-7h。
+
+### 63. v30 Preference Pairs 生成完成
+
+详见 `docs/v29_experiment_log.md` v30 部分。
+
+最终 509 pairs（v29: 500）。关键变化：
+- **Busy**: turn 0 出现 Clarify=73 + Execute=34（复杂 task 问一轮），新增 turn 1 Execute=17
+- **Novice**: turn 2 从全 Clarify(36) 变为 Clarify=3 + Execute=25（信息够了就停），turn 3 全 Execute
+- **Experienced**: 不变
+
+### 62. v30 Busy 条件性 Clarify 设计
+
+分析 masked items 分布：1 item(1%), 2 items(31%), 3 items(40%), 4 items(23%), 5 items(5%)。
+
+设计：n_masked_items >= 3 时（68% task），Busy 在 turn 0 Clarify 一轮。解决 v29 中 Busy 行为 = Direct Execution 的问题，让 Busy 与 Direct baseline 有区分。
+
+### 61. v30 Disclosure-Aware 停止条件实现
+
+详见 `docs/v29_experiment_log.md` v30 部分。
+
+`compute_rewards.py` 核心改动：
+1. 新增 `compute_disclosure_info()` — 计算 disclosure_ratio 和 n_masked_items
+2. `get_correct_action()` — Novice: disclosure >= 50% 且 turn >= 2 → Execute；Busy: n_masked_items >= 3 → turn 0 Clarify
+3. Method B 跳过已充分披露的 Novice Clarify pairs
+4. 新增 Method B2 为 Busy 生成 turn 1 Execute pairs
+
+初版用 disclosure_ratio >= 1.0 阈值，发现 Clarify turns 的 disclosure 从未到 100%（因为 state 记录的是问问题之前的状态），调整为 >= 0.5 + turn >= 2。
+
+### 60. v30 计划：修复 Novice 过拟合 + Busy 行为极端
+
+v29 两个问题：
+1. **Novice 过拟合**：100% 跑满 7 轮，从不提前 Execute。根因：227 个 Novice pairs 几乎全是 chosen=Clarify
+2. **Busy = Direct Execution**：107 pairs 全是 chosen=Execute，与 Direct Execution baseline 无区别
+
+v30 方案：disclosure-aware 停止条件（Novice 信息够了就停）+ Busy 条件性 Clarify（复杂 task 问一轮）。
+
+---
+
 ## 2026-04-15
 
 ### 59. Experiment 2: Oracle & Ideal Disclosed 实现

@@ -169,92 +169,41 @@ Clarification 能恢复多少因 masking 丢失的信息？恢复量与 clarific
 
 ---
 
-## Experiment 3: Persona Sensitivity
+## ~~Experiment 3: Persona Sensitivity~~ (降级，融入 Exp 1)
 
-### Research Question
-模型是否真正理解 persona 并据此调整策略？persona 匹配是否比不匹配更有效？
+> 2026-04-16 决定：Part A 行为分析融入 Exp 1 正文（per-persona 数据已在 Table 1），
+> Part B Cross-Persona Swap 砍掉（42h GPU 成本高、结果可预测、加分有限）。
+> 省下的时间用于 Qwen backbone 和 Ablation Study。
 
-### Part A: Behavioral Analysis (数据来自 Exp 1)
+### Ablation Study (替代 Exp 3)
 
-展示 DPO vs Base 的 per-persona 行为差异。
+精简 ablation，只用 Llama backbone，验证两个核心 design choices：
 
-| Persona | DPO Clarify% | DPO Avg Turns | Base Clarify% | Base Avg Turns |
-|---|:---:|:---:|:---:|:---:|
-| Novice-Learner | | | | |
-| Experienced-Engineer | | | | |
-| Busy-Developer | | | | |
+| Variant | 改了什么 | 训练成本 | 评估成本 |
+|---|---|:---:|:---:|
+| TactfulLLM (full, v30) | — | done | 进行中 |
+| w/o disclosure-aware (v29 pairs) | 固定轮数规则，无 disclosure 感知 | 0 (已有模型) | 0 (已有结果) |
+| w/o behavior-first | pairs 按 reward 排序，不按 persona 设计 | 17min | ~7h |
 
-**Metrics:**
-- Clarify Rate per persona
-- Avg Turns per persona
-- First-Action distribution per persona
-- Per-persona pass@1 (DPO vs Base)
-
-**讲的故事:** DPO 三档行为分明 (Novice > Exp > Busy), Base persona-blind (三个 persona 行为一致)。
-
-### Part B: Cross-Persona Swap Experiment (新实验)
-
-**核心设计:** 模型看到的 persona 和用户模拟器的 persona 故意不匹配。
-
-3x3 矩阵:
-- 行 = Model Persona (模型看到的 persona prompt, 决定模型策略)
-- 列 = User Persona (用户模拟器的 persona, 决定用户的耐心和回复)
-- Cell = pass@1 (或 Utility)
-
-| | User=Novice | User=Experienced | User=Busy |
-|---|:---:|:---:|:---:|
-| **Model=Novice** | **matched** | mismatched | mismatched |
-| **Model=Experienced** | mismatched | **matched** | mismatched |
-| **Model=Busy** | mismatched | mismatched | **matched** |
-
-对角线 = matched (Exp 1 已有数据), 非对角线 = mismatched (需新跑)。
-
-**关键 case 分析:**
-
-| Swap | 预期行为 | 预期后果 |
-|---|---|---|
-| Model=Novice, User=Busy | 模型狂问 6 轮 | Busy 用户不耐烦/拒绝 -> 高 rejection, 低 pass@1 |
-| Model=Busy, User=Novice | 模型直接 Execute | Novice 用户愿意回答但没被问 -> 浪费信息恢复机会 |
-| Model=Novice, User=Experienced | 模型问太多 | Experienced 中途失去耐心 |
-| Model=Experienced, User=Novice | 模型只问 1-2 轮 | Novice 还愿意继续但模型已停 |
-
-**Metrics:**
-- pass@1 per cell
-- Avg Turns per cell
-- Rejection Rate per cell (用户拒绝回答的比例)
-- Utility per cell
-
-**讲的故事:**
-1. 对角线 (matched) 显著优于非对角线 (mismatched)
-2. -> Persona-aware 不只是"分化行为", 而是"匹配对了才有效"
-3. -> 直接回应 reviewer: "模型是真理解 persona, 不是过拟合"
-
-### Implementation Notes
-
-Cross-persona swap 需要修改评估脚本:
-- 当前: model persona = user simulator persona (绑定)
-- 修改: 支持 `--model_persona X --user_persona Y` 分开指定
-- 改动量: 小, 主要是把 persona_obj 拆成 model_persona 和 user_persona 两个参数
-
-### GPU Cost Estimate
-- Part A: 0h (复用 Exp 1 数据)
-- Part B: 6 个非对角线条件 x 200 states x 1 persona ≈ 6 x ~7h = ~42h
-  - 可优化: 每次跑 1 个 persona 比跑 3 个快 ~3x
+v29 vs v30 对比免费（两边数据都有），再加一个 reward-based ablation 只需 ~7h。
 
 ---
 
-## Timeline
+## Timeline (updated 2026-04-16)
 
 | Date | Task | Status |
 |---|---|---|
-| 4/13 - 4/14 | 150-extra DPO eval (150 states) | Running |
-| 4/14 - 4/16 | 150-extra Base eval (150 states) | Pending |
-| 4/16 | 200-state 结果合并 + 显著性确认 | Pending |
-| 4/16 - 4/18 | Exp 1: Direct + Prompt-only + Always-Clarify baselines | Pending |
-| 4/18 - 4/19 | Exp 2: Full Query baseline | Pending |
-| 4/19 - 4/22 | Exp 3 Part B: Cross-persona swap (6 conditions) | Pending |
-| 4/22 - 4/25 | Qwen backbone (training + Exp 1 eval) | Pending |
-| 4/25 - 5/05 | 补充实验 + 论文修改 | Pending |
+| 4/10 - 4/12 | v29: 轨迹生成 + DPO 训练 + 50-state 评估 | ✅ |
+| 4/12 - 4/14 | 200-state 扩大评估 (DPO + Base) | ✅ |
+| 4/14 - 4/15 | Exp 1 baselines: Prompt-only, Direct, Clarify-first | ✅ |
+| 4/15 | Exp 2: Oracle + Ideal Disclosed 实现 | 🏃 Oracle 运行中 |
+| **4/16** | **v30: disclosure-aware pairs + 训练** | **✅ 评估中** |
+| 4/17 | v30 50-state 结果分析 | Pending |
+| 4/17 - 4/18 | v30 200-state 评估 (如 50-state 结果好) | Pending |
+| 4/18 - 4/19 | Exp 2: Full Query + Ideal Disclosed 评估 | Pending |
+| 4/19 - 4/20 | Ablation: w/o behavior-first | Pending |
+| 4/20 - 4/25 | Qwen backbone (masking → 轨迹 → DPO → 评估) | Pending |
+| 4/25 - 5/05 | 论文写作 + 补充实验 | Pending |
 | 5/06 | NeurIPS deadline | |
 
 ---
