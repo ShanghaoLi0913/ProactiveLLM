@@ -693,21 +693,67 @@ def rebalance_prefs_by_persona(
     return result
 
 
-def get_correct_action(persona_name: str, dialogue_turn: int) -> Optional[str]:
+def compute_disclosure_info(state: dict) -> tuple:
+    """Compute disclosure ratio and total masked items count.
+
+    Returns (disclosure_ratio, n_masked_items).
+    disclosure_ratio is 0.0 if no masked fields exist.
+    """
+    dr = state.get("disclosure_rule", {})
+    mf = dr.get("masked_fields", {})
+    di = dr.get("disclosed_info", {})
+    total = sum(len(v) for v in mf.values() if isinstance(v, list))
+    if total == 0:
+        return 0.0, 0
+    disclosed = sum(len(v) for v in di.values() if isinstance(v, list))
+    return disclosed / total, total
+
+
+def get_correct_action(
+    persona_name: str,
+    dialogue_turn: int,
+    disclosure_ratio: Optional[float] = None,
+    n_masked_items: Optional[int] = None,
+) -> Optional[str]:
     """Return the behaviorally correct action for a persona at a given dialogue turn.
 
     Encodes persona design intent — used for behavior-first pair construction
     so that preference direction is determined by persona policy, not reward magnitude.
 
-    - Busy-Developer:       always Execute (values speed, dislikes interruptions)
-    - Novice-Learner:       Clarify at turn 0-2, Execute at turn>=3 (ask several rounds, then act)
+    - Busy-Developer:       Execute by default; Clarify at turn=0 only when task
+                            has high information deficit (n_masked_items >= 3)
+    - Novice-Learner:       Clarify while disclosure < 50% or turn < 2;
+                            Execute once enough info disclosed or turn >= 3
     - Experienced-Engineer: Clarify at turn=0, Execute at turn>=1 (ask once, then act)
+
+    When disclosure_ratio is provided, Novice switches to Execute once enough masked
+    information has been disclosed (ratio >= 0.5 and turn >= 2).
+    This teaches the model "stop asking when you have enough info" rather than
+    the fixed "always clarify for N turns" rule.
+
+    When n_masked_items is provided, Busy may Clarify once at turn=0 for tasks
+    with high information deficit (>= 3 masked items), teaching the model
+    "even impatient users benefit from one critical question on complex tasks."
 
     Returns None for unknown personas (caller falls back to reward-based ordering).
     """
     if persona_name == "Busy-Developer":
+        # High information deficit: even Busy benefits from 1 clarification
+        if (dialogue_turn == 0
+                and n_masked_items is not None and n_masked_items >= 3):
+            return "Clarify"
         return "Execute"
     elif persona_name == "Novice-Learner":
+        # Disclosure-aware: stop clarifying once enough info is disclosed.
+        # Note: disclosure_ratio at turn T reflects state BEFORE turn T's Q&A,
+        # so >=50% at turn T means the user has already answered ~half the items
+        # in prior turns — one more answer would bring it to ~67-75%.
+        # Threshold 0.5 + turn >= 2: Novice has asked 2+ rounds AND gathered
+        # at least half the info → time to Execute with what you have.
+        if (disclosure_ratio is not None and disclosure_ratio >= 0.5
+                and dialogue_turn >= 2):
+            return "Execute"
+        # Fallback: hard cap at turn 3 even if not enough disclosed
         return "Clarify" if dialogue_turn < 3 else "Execute"
     elif persona_name == "Experienced-Engineer":
         return "Clarify" if dialogue_turn == 0 else "Execute"
@@ -893,7 +939,8 @@ def compute_preferences(
                     # chosen = best trajectory that took the correct action
                     # rejected = best trajectory that took the incorrect action
                     dialogue_turn_here = best_turn0_1["state"].get("dialogue_turn", 0)
-                    correct_action = get_correct_action(persona_name, dialogue_turn_here)
+                    dr_here, n_items_here = compute_disclosure_info(best_turn0_1["state"])
+                    correct_action = get_correct_action(persona_name, dialogue_turn_here, dr_here, n_items_here)
 
                     if correct_action and correct_action in action_best:
                         other_actions = [a for a in action_best if a != correct_action]
@@ -940,6 +987,8 @@ def compute_preferences(
                     # --- Method B: multi-turn pairs for Turn 1+ Clarify turns ---
                     # Only for Novice-Learner: keeps Clarifying at turn=1+.
                     # Experienced-Engineer should Execute at turn=1+ (handled by Method A/C).
+                    # v30: disclosure-aware — skip Clarify-chosen pairs when all info
+                    # is already disclosed; the model should learn to Execute at that point.
                     if chosen_turn0["action"] == "Clarify" and persona_name == "Novice-Learner":
                         clarify_traj_id = chosen_traj["trajectory_id"]
                         execute_turn0 = rejected_turn0  # the Execute-at-T0 response
@@ -959,10 +1008,16 @@ def compute_preferences(
                             if ct.get("interrupt_cost", 0) >= 0.8:
                                 continue
 
+                            # v30: Check disclosure — if info is fully disclosed,
+                            # this Clarify is wasteful; skip it as a chosen example.
+                            ct_dr, ct_n_items = compute_disclosure_info(ct.get("state", {}))
+                            ct_correct = get_correct_action("Novice-Learner", ct_turn, ct_dr, ct_n_items)
+                            if ct_correct == "Execute":
+                                continue  # Don't teach "keep asking when you already know everything"
+
                             ct_reward = ct.get("total_reward", chosen_traj["reward"])
                             exe_reward = rejected_traj["reward"]
-                            # Behavior-first: Novice should Clarify at turn=1+.
-                            # No reward gate — behavioral signal takes priority.
+                            # Behavior-first: Novice should Clarify when info still missing.
 
                             ct_msg = pref_assistant_text(ct)
                             exe_msg = pref_assistant_text(execute_turn0)
@@ -982,6 +1037,51 @@ def compute_preferences(
                                 "rejected_task_score": rejected_turn0.get("task_score", 0),
                                 "chosen_interrupt_cost": ct.get("interrupt_cost", 0),
                                 "rejected_interrupt_cost": rejected_turn0.get("interrupt_cost", 0),
+                                "prev_action": "Clarify",
+                                "dialogue_turn": ct_turn,
+                                "multi_turn_pair": True,
+                            })
+                            total_pairs_generated += 1
+
+                    # --- Method B2: Busy turn 1 Execute pairs ---
+                    # When Busy chose Clarify at turn 0 (high info deficit tasks),
+                    # generate turn 1 pairs with chosen=Execute to teach
+                    # "Busy asks at most one question, then executes."
+                    if chosen_turn0["action"] == "Clarify" and persona_name == "Busy-Developer":
+                        clarify_traj_id = chosen_traj["trajectory_id"]
+                        execute_turn0 = rejected_turn0  # the Execute-at-T0 response
+
+                        full_clarify_turns = sorted(
+                            traj_turns_dict.get(clarify_traj_id, []),
+                            key=lambda x: x["state"].get("dialogue_turn", 0),
+                        )
+                        for ct in full_clarify_turns:
+                            ct_turn = ct["state"].get("dialogue_turn", 0)
+                            if ct_turn == 0:
+                                continue  # already handled above
+                            # For Busy turn 1+: chosen=Execute (stop asking)
+                            ct_msg = pref_assistant_text(ct)
+                            exe_msg = pref_assistant_text(execute_turn0)
+                            if not ct_msg or not exe_msg or ct_msg == exe_msg:
+                                continue
+
+                            ct_reward = ct.get("total_reward", chosen_traj["reward"])
+                            exe_reward = rejected_traj["reward"]
+
+                            # Busy turn 1: Execute is chosen, Clarify is rejected
+                            prefs.append({
+                                "state": ct["state"],
+                                "persona": ct.get("persona", chosen_turn0.get("persona", {})),
+                                "chosen_action": "Execute",
+                                "rejected_action": "Clarify",
+                                "chosen_assistant_msg": f"Execute\n{exe_msg}",
+                                "rejected_assistant_msg": f"Clarify\n{ct_msg}",
+                                "chosen_reward": exe_reward,
+                                "rejected_reward": ct_reward,
+                                "chosen_task_score": rejected_turn0.get("task_score", 0),
+                                "rejected_task_score": ct.get("task_score", 0),
+                                "chosen_interrupt_cost": rejected_turn0.get("interrupt_cost", 0),
+                                "rejected_interrupt_cost": ct.get("interrupt_cost", 0),
                                 "prev_action": "Clarify",
                                 "dialogue_turn": ct_turn,
                                 "multi_turn_pair": True,
@@ -1024,7 +1124,8 @@ def compute_preferences(
                 # Behavior-first: persona design determines chosen action at fork turn.
                 fork_persona_name = (mainline_clarify.get("persona") or {}).get("name", "")
                 fork_dialogue_turn = fork_at - 1
-                fork_correct_action = get_correct_action(fork_persona_name, fork_dialogue_turn)
+                fork_dr, fork_n_items = compute_disclosure_info(mainline_clarify.get("state", {}))
+                fork_correct_action = get_correct_action(fork_persona_name, fork_dialogue_turn, fork_dr, fork_n_items)
                 if fork_correct_action == "Clarify":
                     chosen_t, rejected_t = mainline_clarify, fork_turn
                     chosen_a, rejected_a = "Clarify", "Execute"

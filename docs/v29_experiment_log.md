@@ -1146,3 +1146,133 @@ Experiment 2 比较 4 个 information level：
 | `outputs/eval_v29_oracle_50test.json` | Oracle (unmasked) 评估结果（50 states，运行中） |
 | `outputs/eval_v29_ideal_disclosed_50test.json` | Ideal Disclosed 评估结果（50 states，待启动） |
 | `reward/compute_rewards.py` | Reward + preference pair 生成 |
+
+---
+
+## v30: Disclosure-Aware 停止条件
+
+> 日期: 2026-04-16
+> 目标: 修复 Novice 过拟合（永远 Clarify），让模型学会 "信息够了就 Execute"
+
+### 问题回顾
+
+v29 DPO 评估中 Novice 100% 跑满 7 轮（6 Clarify + 1 forced Execute），原因：
+- `get_correct_action` 硬编码 `turn < 3 → Clarify`，训练数据中 227 个 Novice pairs 几乎全是 chosen=Clarify
+- Method B 在 turn 1+ 无条件生成 chosen=Clarify pairs（"No reward gate"）
+- 模型从未见过 Novice "该停了" 的 Execute 正样本
+
+### 核心改动
+
+#### 1. `compute_disclosure_ratio(state)` — 新增函数
+从 `state.disclosure_rule` 计算已披露比例：`disclosed_count / masked_count`
+
+#### 2. `get_correct_action()` — Disclosure-aware Novice 规则
+```
+旧规则: Novice → Clarify if turn < 3 else Execute
+新规则: Novice → Execute if disclosure_ratio >= 1.0
+                  else Clarify if turn < 4
+                  else Execute
+```
+- 当所有 masked items 已全部 disclosed，任何 turn 都该 Execute
+- 硬上限从 turn 3 放宽到 turn 4（给更多 Clarify 空间，但有 disclosure 兜底）
+
+#### 3. Method B — 跳过已充分披露的 Clarify pairs
+在 Method B 循环中，对每个 Clarify turn 计算 `disclosure_ratio`，若 `get_correct_action` 返回 Execute，则不生成 chosen=Clarify pair。
+
+#### 4. Method A (fork pairs) — 传入 disclosure_ratio
+fork pair 的 `get_correct_action` 调用也传入 disclosure_ratio，保持一致。
+
+### 实际改动（最终版）
+
+经过迭代调试，最终规则：
+
+#### Novice-Learner
+- Turn 0-1: 总是 Clarify
+- Turn 2+: disclosure_ratio >= 0.5 → Execute（信息已够），否则继续 Clarify
+- Turn 3+: 硬上限 Execute
+
+注：disclosure_ratio 在 turn T 反映的是 turn T **之前**的累计披露状态（问问题之前），
+所以 turn 2 看到 50% 意味着前两轮已获取了一半信息。
+
+#### Busy-Developer
+- Turn 0: n_masked_items >= 3 → Clarify（复杂 task 值得问一轮），否则 Execute
+- Turn 1+: 总是 Execute（最多问一轮）
+
+68% 的 task 有 ≥3 masked items，所以 Busy 在多数 task 上会问一轮。
+
+#### Experienced-Engineer（不变）
+- Turn 0: Clarify
+- Turn 1+: Execute
+
+#### Method B2（新增）
+为 Busy 生成 turn 1 Execute pairs：当 Busy chosen=Clarify at turn 0 时，
+遍历该 trajectory 的 turn 1+，生成 chosen=Execute, rejected=Clarify pairs。
+
+### v30 Preference Pairs 对比
+
+**v29 (500 pairs)**
+```
+Busy-Developer: 107 pairs
+  turn=0: Clarify=0,   Execute=107
+
+Experienced-Engineer: 166 pairs
+  turn=0: Clarify=105, Execute=0
+  turn=1: Clarify=0,   Execute=61
+
+Novice-Learner: 227 pairs
+  turn=0: Clarify=107, Execute=0
+  turn=1: Clarify=81,  Execute=0
+  turn=2: Clarify=36,  Execute=0
+  turn=3: Clarify=2,   Execute=1
+```
+
+**v30 (509 pairs)**
+```
+Busy-Developer: 124 pairs
+  turn=0: Clarify=73,  Execute=34   ← 复杂task问一轮
+  turn=1: Clarify=0,   Execute=17   ← 问完就停
+
+Experienced-Engineer: 166 pairs
+  turn=0: Clarify=105, Execute=0
+  turn=1: Clarify=0,   Execute=61
+
+Novice-Learner: 219 pairs
+  turn=0: Clarify=107, Execute=0
+  turn=1: Clarify=81,  Execute=0
+  turn=2: Clarify=3,   Execute=25   ← 信息够→停
+  turn=3: Clarify=0,   Execute=3    ← 硬上限
+```
+
+### v30 DPO 训练
+
+配置同 v29：Llama-3.1-8B-Instruct + QLoRA (r=64), beta=0.1, epochs=3, lr=5e-5
+
+| Epoch | Loss | Accuracy | Margin |
+|:---:|:---:|:---:|:---:|
+| 0.35 | 0.505 | 66.3% | 0.984 |
+| 1.0 | 0.338 | 88.3% | 1.638 |
+| 2.0 | 0.209 | 92.2% | 3.133 |
+| 3.0 | 0.130 | 97.5% | 3.917 |
+
+vs v29（epoch 2 即 100%）略低，因为 v30 pairs 更多样化（Busy 混合 Clarify/Execute，
+Novice turn 2 翻转）。97.5% accuracy 是健康的，说明模型能学到但不是死记。
+
+模型保存至 `models/v30_100states/`。
+
+### v30 50-state 评估（进行中）
+
+```
+PYTHONUNBUFFERED=1 python eval/evaluate_multi_turn_persona.py \
+  --model_dir models/v30_100states \
+  --base_model meta-llama/Llama-3.1-8B-Instruct \
+  --test_states data/seeds/test_states_v29_eval_50.jsonl \
+  --max_samples 50 --max_turns 6 \
+  --llm_model gpt-4o-mini --pass_at_k 1 5 \
+  --output outputs/eval_v30_dpo_50test.json
+```
+
+预期：
+- Novice avg turns 从 7.0 降到 ~3-4
+- Busy avg turns 从 1.0 升到 ~1.3-1.5
+- pass@1 维持或提升（≥16%）
+- 行为分化保持三档
