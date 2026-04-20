@@ -52,10 +52,20 @@ Thumbs.db
 
 # Model cache (optional, uncomment if needed)
 # .cache/
-# models/
+models/
+.claude/
 data/external/ConvCodeWorld/*
 scripts/run_experiment.sh
 scripts/activate_env.sh
+
+# BigCodeBench task execution pollution (root-level junk from eval runs)
+/*.png
+/*.csv
+!/pareto_tradeoff.png
+!/rejection_tradeoff.png
+key4_*.txt
+Untitled
+split_aa
 
 # Temporary test files
 *.txt
