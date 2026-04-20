@@ -89,7 +89,7 @@ def main():
     base_dir = Path("/root/autodl-tmp/ProactiveLLM")
     
     # 100 states训练数据
-    traj_path = base_dir / "data/data/logs/traj_bigcode_100states_20260206_050454.jsonl"
+    traj_path = base_dir / "data/logs/traj_bigcode_100states_20260206_050454.jsonl"
     prefs_v3_path = base_dir / "data/dpo/prefs_bigcode_100_filtered.jsonl"
     prefs_v4_path = base_dir / "data/dpo/prefs_bigcode_100_repaired.jsonl"
     

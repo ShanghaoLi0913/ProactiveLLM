@@ -155,7 +155,7 @@ def main():
     base_dir = Path("/root/autodl-tmp/ProactiveLLM")
     
     # 加载数据
-    traj_path = base_dir / "data/data/logs/traj_bigcode_100states_20260206_050454.jsonl"
+    traj_path = base_dir / "data/logs/traj_bigcode_100states_20260206_050454.jsonl"
     execute_prefs_path = base_dir / "data/dpo/prefs_bigcode_100_repaired.jsonl"  # V4的高质量Execute数据
     all_prefs_path = base_dir / "data/dpo/prefs_bigcode_100.jsonl"  # 原始数据（包含失败样本）
     

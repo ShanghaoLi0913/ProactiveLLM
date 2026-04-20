@@ -78,7 +78,6 @@ headers_only*.json
 # Temporary directories
 test_*/
 docs_backup/
-data/data/
 
 # Old version scripts (keep only latest)
 scripts/eval_v[0-9]*.py
