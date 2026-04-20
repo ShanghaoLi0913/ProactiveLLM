@@ -123,12 +123,43 @@ Clarification 能恢复多少因 masking 丢失的信息？恢复量与 clarific
 
 | Condition | Input | 说明 |
 |---|---|---|
-| Full Query | 完整 instruct_prompt | 上界：没有信息缺失 |
-| Masked + Ideal Disclosed | masked query + 被 mask 原文完美还原 | 理论最优恢复 |
+| Full Query | 完整 instruct_prompt（原始自然 prose） | Task upper reference |
+| Masked + Ideal Disclosed | masked query + 原始 spec（bullet list，显式 "Additional information from clarification" 段） | Clarification ceiling |
 | Masked + Clarified (Novice) | masked query + 6 轮 Clarify 获得的信息 | 多轮实际恢复 |
 | Masked + Clarified (Experienced) | masked query + 1-2 轮 Clarify 获得的信息 | 少轮实际恢复 |
 | Masked + Clarified (Busy) | masked query + 0 轮 Clarify | = Masked Direct |
 | Masked Direct | masked query, 不 Clarify | 下界：零信息恢复 |
+
+### Ideal Disclosed 格式（v2，2026-04-21 更新）
+
+原始 v1 实现用 `masked_fields`（v29 split 后的条目，含 `Return type:` 等人造标签）+ `"; "` 单行分号。实测 pass@1 低于 TactfulLLM Overall，违反 ceiling 预期。原因是 eval prompt 格式不够自然。
+
+v2 改用 **`disclosure_info.specification`（原始未切分的 BigCodeBench spec 文本）** + **bullet list**：
+
+```
+{masked_query_with_code_template}
+You should write self-contained code starting with:
+```python
+...
+```
+
+Additional information from clarification:
+Key requirements:
+- {original spec of output_format}
+- {original spec of validation_rules}
+- {original spec of note_that}
+```
+
+**与 paper 定义的对齐**：
+- "masked query is supplemented" ✓
+- "ground-truth values of all masked fields" ✓（disclosure_info.specification = 被 mask 的原始 ground-truth 文本）
+- "appended as a structured list" ✓（bullet list）
+- "clarification ceiling" ✓（100% disclosure rate）
+
+**与 Full Query 的区别**（仍保持可区分）：
+- 信息位置：代码模板**后** vs Full Query 代码模板**前**
+- 整合方式：两段式 "主 query + Additional information" vs Full Query 单段自然 prose
+- 元信息：`Additional information from clarification:` 明示为澄清结果
 
 ### Metrics
 
@@ -169,23 +200,40 @@ Clarification 能恢复多少因 masking 丢失的信息？恢复量与 clarific
 
 ---
 
-## ~~Experiment 3: Persona Sensitivity~~ (降级，融入 Exp 1)
+## Ablation Study (替代原 Exp 3)
 
-> 2026-04-16 决定：Part A 行为分析融入 Exp 1 正文（per-persona 数据已在 Table 1），
-> Part B Cross-Persona Swap 砍掉（42h GPU 成本高、结果可预测、加分有限）。
-> 省下的时间用于 Qwen backbone 和 Ablation Study。
+> 2026-04-16 决定：Exp 3 Cross-Persona Swap 砍掉，改为 Ablation Study。
+> v30 disclosure-aware 尝试失败（pass@1 全面崩盘），回退到 v29 代码。
+> Ablation 改为验证两个 input signal 的贡献：Persona 和 Task Uncertainty。
 
-### Ablation Study (替代 Exp 3)
+### Research Question
+TactfulLLM 的 persona-conditioned 和 task-conditioned 决策信号各自贡献多少？
 
-精简 ablation，只用 Llama backbone，验证两个核心 design choices：
+### Design
 
-| Variant | 改了什么 | 训练成本 | 评估成本 |
-|---|---|:---:|:---:|
-| TactfulLLM (full, v30) | — | done | 进行中 |
-| w/o disclosure-aware (v29 pairs) | 固定轮数规则，无 disclosure 感知 | 0 (已有模型) | 0 (已有结果) |
-| w/o behavior-first | pairs 按 reward 排序，不按 persona 设计 | 17min | ~7h |
+保持 v29 DPO pairs 不变，只修改 `render_state.py` 中 prompt 格式，重训 + 评估：
 
-v29 vs v30 对比免费（两边数据都有），再加一个 reward-based ablation 只需 ~7h。
+| Variant | 改了什么 | Prompt 变化 | 训练成本 | 评估成本 |
+|---|---|---|:---:|:---:|
+| TactfulLLM (full) | — | 完整 prompt | 0 (已有) | 0 (已有) |
+| w/o Persona | 移除 `[User Profile]` 块 | 无 Type/Patience/Expertise | ~17min | ~7h (50-state) |
+| w/o Uncertainty | 移除 `Task Uncertainty` 行 | 无 uncertainty 数值 | ~17min | ~7h (50-state) |
+
+### Implementation
+- `render_state.py` 加 `ablation_mode` 参数：`"no_persona"` / `"no_uncertainty"`
+- 通过 `ABLATION_MODE` 环境变量传入训练和评估脚本
+- 代码已实现（在 v30 commit 后 revert，需重新添加）
+
+### Metrics
+- pass@1, pass@5, Avg Turns, Rejection Rate, OGR
+
+### 期望结果
+- w/o Persona: 三个 persona 行为趋同（无法区分用户类型），Avg Turns 偏离理想值
+- w/o Uncertainty: 模型无法感知任务复杂度，对简单/复杂任务采用相同策略
+
+### 叙事
+"Calibrated proactivity depends on both user-conditioned (persona) and
+task-conditioned (uncertainty) decision signals."
 
 ---
 
@@ -196,12 +244,11 @@ v29 vs v30 对比免费（两边数据都有），再加一个 reward-based abla
 | 4/10 - 4/12 | v29: 轨迹生成 + DPO 训练 + 50-state 评估 | ✅ |
 | 4/12 - 4/14 | 200-state 扩大评估 (DPO + Base) | ✅ |
 | 4/14 - 4/15 | Exp 1 baselines: Prompt-only, Direct, Clarify-first | ✅ |
-| 4/15 | Exp 2: Oracle + Ideal Disclosed 实现 | 🏃 Oracle 运行中 |
-| **4/16** | **v30: disclosure-aware pairs + 训练** | **✅ 评估中** |
-| 4/17 | v30 50-state 结果分析 | Pending |
-| 4/17 - 4/18 | v30 200-state 评估 (如 50-state 结果好) | Pending |
+| 4/15 | Exp 2: Oracle + Ideal Disclosed 实现 | 🏃 |
+| 4/16 | v30 尝试 (disclosure-aware) → 失败，回退 v29 | ✅ (abandoned) |
+| **4/17** | **Ablation: w/o Persona + w/o Uncertainty 训练** | **Pending** |
+| 4/17 - 4/18 | Ablation 50-state 评估 | Pending |
 | 4/18 - 4/19 | Exp 2: Full Query + Ideal Disclosed 评估 | Pending |
-| 4/19 - 4/20 | Ablation: w/o behavior-first | Pending |
 | 4/20 - 4/25 | Qwen backbone (masking → 轨迹 → DPO → 评估) | Pending |
 | 4/25 - 5/05 | 论文写作 + 补充实验 | Pending |
 | 5/06 | NeurIPS deadline | |

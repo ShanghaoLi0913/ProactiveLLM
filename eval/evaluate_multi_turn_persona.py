@@ -123,8 +123,10 @@ def select_action_with_model(
     code starters (```, def, import...) → Execute; natural language → Clarify.
     """
     from policy.infer import build_action_selection_chat_prompt, pick_action_from_generation
+    import os
     from policy.render_state import render_state as render_state_with_persona
-    state_text = render_state_with_persona(state, persona=persona)
+    ablation_mode = os.environ.get("ABLATION_MODE", None)
+    state_text = render_state_with_persona(state, persona=persona, ablation_mode=ablation_mode)
     prompt = build_action_selection_chat_prompt(state_text, tokenizer)
     return pick_action_from_generation(model, tokenizer, prompt, max_new_tokens=30)
 
@@ -165,7 +167,8 @@ def select_action_prompt_only(
             "They are technically skilled but may not always provide complete specifications."
         )
 
-    state_text = render_state_with_persona(state, persona=persona)
+    ablation_mode = os.environ.get("ABLATION_MODE", None)
+    state_text = render_state_with_persona(state, persona=persona, ablation_mode=ablation_mode)
 
     # System prompt: persona description + task framing, no decision rules
     system_msg = (
@@ -374,6 +377,7 @@ def _build_execute_turn_data(
         "assistant_msg": assistant_msg[:200] + "..." if len(assistant_msg) > 200 else assistant_msg,
         "user_reaction": user_reaction.get("user_reply", "")[:100] + "..." if len(user_reaction.get("user_reply", "")) > 100 else user_reaction.get("user_reply", ""),
         "answered_clarification": user_reaction.get("meta", {}).get("answered_clarification", 0),
+        "disclosed_items": user_reaction.get("meta", {}).get("disclosed_items", {}),
         "forced_final_execute": forced_final_execute,
     }
     task_completed = candidate_results[0]["passed"] if candidate_results else False
@@ -633,21 +637,39 @@ def evaluate_multi_turn_conversation(
                 initial_state_snapshot["query"] = current_state["original_instruct_prompt"]
                 print(f"  Mode: Oracle (unmasked prompt)", flush=True)
             else:
-                # Ideal Disclosed: pre-fill all masked_fields into disclosed_info
+                # Ideal Disclosed v2 (2026-04-21): use original disclosure_info.specification
+                # text (not v29-split masked_fields) + bullet-list format, pre-constructed and
+                # injected into query. Cleaner format → closer to clarification-ceiling intent.
                 dr = current_state.get("disclosure_rule", {})
-                masked = dr.get("masked_fields", {})
-                # Build disclosed_info from all masked fields
-                disclosed_info = {}
-                for category, items in masked.items():
-                    if isinstance(items, list):
-                        disclosed_info[category] = list(items)
-                    elif isinstance(items, str):
-                        disclosed_info[category] = [items]
-                    else:
-                        disclosed_info[category] = []
-                dr["disclosed_info"] = disclosed_info
+                disclosure_info = dr.get("disclosure_info", {})
+                ideal_parts = []
+                for category, spec_dict in disclosure_info.items():
+                    spec_text = ""
+                    if isinstance(spec_dict, dict):
+                        spec_text = spec_dict.get("specification", "").strip()
+                    if spec_text:
+                        ideal_parts.append(spec_text)
+                # Fallback to masked_fields if disclosure_info is empty/missing
+                if not ideal_parts:
+                    masked = dr.get("masked_fields", {})
+                    for category, items in masked.items():
+                        if isinstance(items, list):
+                            for it in items:
+                                if str(it).strip():
+                                    ideal_parts.append(str(it).strip())
+                        elif isinstance(items, str) and items.strip():
+                            ideal_parts.append(items.strip())
+                # Build final query: masked query + bulleted Additional information section
+                initial_masked_query = current_state.get("query", "")
+                if ideal_parts:
+                    ideal_ctx = "Key requirements:\n" + "\n".join(f"- {p}" for p in ideal_parts)
+                    ideal_query = f"{initial_masked_query}\n\nAdditional information from clarification:\n{ideal_ctx}"
+                    current_state["query"] = ideal_query
+                    initial_state_snapshot["query"] = ideal_query
+                # Clear disclosed_info so build_clean_execute_query doesn't re-append
+                dr["disclosed_info"] = {}
                 current_state["disclosure_rule"] = dr
-                print(f"  Mode: Ideal Disclosed (all masked fields given)", flush=True)
+                print(f"  Mode: Ideal Disclosed v2 (original specs, bullet list, {len(ideal_parts)} items)", flush=True)
 
             # Single-turn Execute
             from scripts.generate_trajectories import PERSONAS as _PERSONAS
@@ -780,6 +802,7 @@ def evaluate_multi_turn_conversation(
                         "assistant_msg": assistant_msg[:200] + "..." if len(assistant_msg) > 200 else assistant_msg,
                         "user_reaction": user_reaction.get("user_reply", "")[:100] + "..." if len(user_reaction.get("user_reply", "")) > 100 else user_reaction.get("user_reply", ""),
                         "answered_clarification": user_reaction.get("meta", {}).get("answered_clarification", 0),
+                        "disclosed_items": user_reaction.get("meta", {}).get("disclosed_items", {}),
                         "forced_final_execute": False,
                     }
                     conversation.append(turn_data)

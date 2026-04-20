@@ -67,13 +67,16 @@ def to_dpo_format(records, tokenizer):
         "chosen": [],
         "rejected": [],
     }
+    import os
+    ablation_mode = os.environ.get("ABLATION_MODE", None)
+
     for ex in records:
         # ⭐ Pass persona as separate parameter for explicit persona-awareness
         state = ex["state"]
         persona = ex.get("persona", None)
-        
+
         # Render state to text with persona
-        state_text = render_state(state, persona=persona)
+        state_text = render_state(state, persona=persona, ablation_mode=ablation_mode)
         
         # ✅ V15 Fix: Use chat template for clear prompt/response boundary
         messages = [{"role": "user", "content": state_text}]

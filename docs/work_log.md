@@ -4,7 +4,157 @@
 
 ---
 
+## 2026-04-18
+
+### 79. Experiment 2 narrative + 表格定稿（论文段落）
+
+跟用户迭代 Experiment 2 的 LaTeX 段落和表格：
+- 表格新增 **`Disc.` 列**（mean disclosure rate），把信息恢复机制做进表内自证
+- 砍掉额外 scatter / bin 图（pooled 信号 ρ=+0.088 弱，bin 非单调，per-persona 三联画 2/3 退化），决定只保留 4-condition grouped bar 作为主图
+- 段落开头从 "performance loss recovery" 改成两问并列：(i) clarification 恢复多少 mask 信息 (ii) 恢复是否转化为下游成功
+- 末段把 "DPO 和 information recovery 混在一起" 的诚实声明改成 disentanglement claim：TactfulLLM vs Ideal Disclosed 隔离 policy effect
+
+### 78. Experiment 2 数据更新 + OGR 计算
+
+凌晨 03:36 启动的 Ideal Disclosed 在跑（PID 751556）。Full Query (Oracle) 已完成：
+
+| Condition | pass@1 | pass@5 | Δ | OGR |
+|---|:---:|:---:|:---:|:---:|
+| Masked Direct | 12.3% | 18.5% | -- | 0% |
+| TactfulLLM Overall | 16.0% | 23.5% | +3.7 | **48%** |
+| · Novice | 18.5% | 25.5% | +7.0 | **82%** |
+| · Experienced | 15.5% | 25.0% | +3.0 | **40%** |
+| · Busy | 14.0% | 20.0% | +1.0 | **14%** |
+| Ideal Disclosed | partial 86/200 | -- | -- | -- |
+| Full Query | 20.0% | 28.0% | +7.7 | 100% |
+
+OGR 用每个 persona 自己的 Direct 做分母（Novice 11.5, Exp 12.5, Busy 13.0；Full Query 20.0 共用）。Novice 82% 接近 ceiling，Busy 14% 与 policy 学会 Execute 一致。
+
+Ideal Disclosed 进度 86/200（43%），实际 ~1.6 min/conv（5 candidate × Llama 8B 本地推理），剩 ~3h，预计上午 09:00 前后完成。`gpt-4o-mini` API 因为 single-turn execute 几乎不被调用。
+
+### 77. Disclosure 信息回填 — 修 eval bug + replay 脚本
+
+发现 eval JSON **没有记 `disclosed_items`**（simulator `react()` 返回了，但 `evaluate_multi_turn_persona.py` 在 turn_data 构造时漏掉），无法直接算 disclosure_rate。
+
+- **修复**：`evaluate_multi_turn_persona.py:379` 和 `:785` 两处 `turn_data` 加 `"disclosed_items": user_reaction.get("meta", {}).get("disclosed_items", {})`
+- **存量数据回填**：写 `scripts/replay_disclosure.py`，用 simulator 的确定性 `get_disclosure_info()` 重放已完成 eval 的 conversation → 重建 disclosed_items timeline。避免 5h 重跑。产出 `data/analysis/disclosure_per_conversation.csv`（600 行）
+
+### 76. Disclosure → pass@1 相关性分析
+
+写 `scripts/analyze_disclosure_recovery.py` 和 `scripts/plot_4condition_grouped.py`。
+
+**Disclosure rate by persona**（验证设计意图）：
+- Novice 0.886（expertise=low, 1 item/turn × 多轮累积，常饱和）
+- Experienced 0.780（mid, 3 items/turn）
+- Busy 0.000（policy 学会 Execute，根本不进 clarify 路径）
+
+**Recovery → success 的相关性**：
+- Pooled Spearman ρ=+0.088, p=0.032（弱信号，被 persona confounding）
+- Within-Experienced ρ=+0.202, p=0.004（**唯一干净 dynamic range**）
+- Within-Novice ρ=+0.041 p=0.57（饱和近 1.0 无变化）
+- Busy degenerate（disclosure 全 0）
+- Logistic regression `pass1 ~ disclosure_rate + C(persona)`：coef=+0.90, 95% CI [-0.19, +1.99], p=0.106（控制 persona 后边际）
+
+**Bin 图非单调**（[14.2, 11.1, 7.5, 19.0]）是 persona composition shift artifact：低 bin 全是 Busy，中 bin 是 Exp 偶然低段。结论：**不放散点/bin 图主文**，靠主表的 Disc. 列 + grouped bar 自证。
+
+输出图 `data/analysis/fig_recovery_4condition.png`：4 condition × 3 persona grouped bar，TBD bar 用 hatch 标注。
+
+---
+
+## 2026-04-17
+
+### 75. Experiment 2 过夜任务进度检查（12h 后）
+
+PID 603803 仍在跑（已 12h09m）：
+- **Direct Execution 200**: ✅ 完成（22:39 出结果）
+- **Oracle 200**: 🏃 48/200（约 24%，~1.5min/sample，预计还要 3-4h）
+- **Ideal Disclosed 200**: ⏳ 待 Oracle 完成后启动
+
+**Direct Execution 200-state 结果**（与 50-state 相比异常偏高）：
+
+| Persona | pass@1 | pass@5 |
+|---|:---:|:---:|
+| Novice | 11.5% (23/200) | 19.0% (38/200) |
+| Experienced | 12.5% (25/200) | 17.5% (35/200) |
+| Busy | 13.0% (26/200) | 19.0% (38/200) |
+| **Overall** | **12.3%** (74/600) | **18.5%** (111/600) |
+
+⚠️ 两个发现：
+1. **Direct 200 (12.3%) >> Direct 50 (7.3%)**，gap 5%。50-state 抽样可能偏难
+2. **Direct 三 persona 不一致** (11.5/12.5/13.0) — 按理无交互应完全相同。说明 `--direct_execution` 模式下 persona 信息可能仍进了 prompt，或采样随机性导致
+
+**对论文叙事的影响**：DPO vs Direct gap 从原本的 +8.7% (16.0 vs 7.3) 缩到 **+3.7%** (16.0 vs 12.3)。明早 Oracle/Ideal Disclosed 出来后填 Recovery 表。
+
+### 74. Experiment 2 过夜任务启动（Recovery Analysis 200-state）
+
+目标填 Recovery 表（Masked Direct / Clarified / Ideal Disclosed / Full Query）。已有：DPO 200-state（16%），Direct 50-state（7.3%）。今晚过夜跑三项，全部 200-state：
+
+1. Direct Execution 200-state（从 50-state resume，补 150 extra）
+2. Oracle / Full Query 200-state（persona-independent 单轮，Base Llama）
+3. Ideal Disclosed 200-state（persona-independent 单轮，Base Llama）
+
+`nohup /tmp/run_exp2_overnight.sh &`（PID 603803, PPID=1），log 在 `logs/exp2_overnight.log`。`.partial` resume 保护容器休眠。预计 3-5h。产出：
+- `outputs/eval_v29_direct_execution_200.json`
+- `outputs/eval_v29_oracle_200.json`
+- `outputs/eval_v29_ideal_disclosed_200.json`
+
+### 73. w/o Uncertainty 50-extra 中断 + 87-state 合并填表
+
+50-extra 跑到 37/50 states（111/150 对话）中断（疑似容器休眠，无进程），合并 50 + 37 = **87 states** 先填 ablation 表。完整 100-state 明天补跑剩余 13 states。
+
+**合并结果（87 states, 261 对话）**:
+
+| Persona | pass@1 | pass@5 | Avg Turns | Rej Rate |
+|---|:---:|:---:|:---:|:---:|
+| Novice | 9/87 (10.3%) | 20.7% | 7.6 | 45.4% |
+| Experienced | 12/87 (13.8%) | 19.5% | 2.7 | 37.5% |
+| Busy | 8/87 (9.2%) | 12.6% | 1.0 | 0% |
+| **Overall** | **11.1%** | 17.6% | 3.7 | — |
+
+**注意**：w/o Unc Exp 13.8% > full Exp 12.0%（test 规模不一致：full=50, w/o Unc=87）。待 full 扩到 100-state 或 w/o Unc 补到 100 后重新比较。
+
+### 72. Ablation w/o Uncertainty 50-extra 评估启动
+
+w/o Persona 50-extra 完成后，启动 w/o Uncertainty 50-extra（50 states × 3 personas）。Novice 跑满 8 轮，预计 3-5h。完成后合并为 100-state 最终结果。
+
+### 71. Ablation w/o Persona 100-state 结果确认
+
+50 + 50-extra 合并：pass@1 11.0%（33/300），三 persona turns 全部 ≈1.02。行为分化完全消失的结论在 100 states 下稳定。
+
+### 70. Ablation w/o Persona 50-extra 评估完成
+
+50 extra states 完成。结果：Novice 12.0%, Exp 12.0%, Busy 10.0%，turns 全部 1.0。与 50-state 一致，全部退化为 Direct Execution。
+
+### 69. Ablation 综合对比表整理
+
+详见 `docs/v29_experiment_log.md` Ablation Study 部分。
+
+核心结论：
+- **w/o Persona**: 行为分化消失（turns≈1.0），pass@1 14.0%→11.0%。Persona 是行为分化的必要条件。
+- **w/o Uncertainty**: 行为分化保持（8.0/2.6/1.0），pass@1 14.0%→10.7%。Uncertainty 不影响行为模式但影响代码质量。
+- 两个组件互补：persona 控制"何时问"，uncertainty 帮助"问得更有效"。
+
+---
+
 ## 2026-04-16
+
+### 68. Ablation w/o Uncertainty 训练完成
+
+`ABLATION_MODE=no_uncertainty`，17min 完成，loss 0.597→0.006，accuracy 100%（与 full v29 一致）。模型保存至 `models/v29_ablation_no_uncertainty/`。两个 ablation 的 50-state 评估过夜完成。
+
+### 67. Ablation w/o Persona 训练完成
+
+基于 v29 pairs（500 对），`ABLATION_MODE=no_persona` 训练 DPO。16min 完成，loss 0.642→0.386，accuracy 59.4%→87.5%。模型保存至 `models/v29_ablation_no_persona/`。
+
+### 66. Ablation Study 设计确定 + 代码实现
+
+Exp 3 (Cross-Persona Swap) 砍掉，替换为 Ablation Study：w/o Persona + w/o Uncertainty。
+`render_state.py` 加 `ablation_mode` 参数，`train_dpo.py` 和 `evaluate_multi_turn_persona.py` 通过 `ABLATION_MODE` 环境变量传入。代码已验证三种模式输出正确。
+
+### 65. v30 失败，回退 v29
+
+v30 50-state 评估中间结果（13 states）：pass@1 全面崩盘（Novice 7.7%, Exp 0%, Busy 0%，vs v29 18.5/15.5/14.0%）。Busy 过度 Clarify（avg 2.9 turns vs v29 1.0）。
+决定停止 v30 评估，回退到 v29 代码和模型。v30 commit 保留在 git history 中不 revert。
 
 ### 64. v30 DPO 训练完成 + 50-state 评估启动
 

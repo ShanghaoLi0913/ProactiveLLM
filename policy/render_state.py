@@ -44,7 +44,7 @@ except ImportError:
         return 0.5  # 默认值
 
 
-def render_state(state: Dict, persona: Dict = None) -> str:
+def render_state(state: Dict, persona: Dict = None, ablation_mode: str = None) -> str:
     """
     将state转换为纯文本prompt，不包含任何action指令或模板。
     
@@ -130,21 +130,28 @@ def render_state(state: Dict, persona: Dict = None) -> str:
     # - dialogue_turn: 当前对话轮次，帮助模型判断是否应该继续澄清
     # - prev_reject: 上一轮是否被拒绝，帮助模型判断用户耐心
     # - query: 用户的请求（可能包含对话历史）
-    lines = [
-        f"[Domain] {domain}",
-        "",
-        "[User Profile]",
-        f"Type: {persona_name}",
-        f"Patience: {persona_patience}",
-        f"Expertise: {persona_expertise}",
-        "",
-        "[Context]",
-        f"Task Uncertainty: {task_uncertainty:.2f}",  # 0.0=很确定，1.0=很不确定
-        f"Dialogue Turn: {dialogue_turn}",  # 当前对话轮次
-        f"Previous Reject: {prev_reject}",  # 上一轮是否被拒绝（0=否，1=是）
+    lines = [f"[Domain] {domain}", ""]
+
+    # Ablation: "no_persona" removes [User Profile] block entirely
+    if ablation_mode != "no_persona":
+        lines += [
+            "[User Profile]",
+            f"Type: {persona_name}",
+            f"Patience: {persona_patience}",
+            f"Expertise: {persona_expertise}",
+            "",
+        ]
+
+    lines.append("[Context]")
+    # Ablation: "no_uncertainty" removes Task Uncertainty line
+    if ablation_mode != "no_uncertainty":
+        lines.append(f"Task Uncertainty: {task_uncertainty:.2f}")
+    lines += [
+        f"Dialogue Turn: {dialogue_turn}",
+        f"Previous Reject: {prev_reject}",
         "",
         "[User Request]",
-        query,  # 用户的请求（可能包含对话历史）
+        query,
     ]
     
     return "\n".join(lines)

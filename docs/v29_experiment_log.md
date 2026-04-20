@@ -1276,3 +1276,343 @@ PYTHONUNBUFFERED=1 python eval/evaluate_multi_turn_persona.py \
 - Busy avg turns 从 1.0 升到 ~1.3-1.5
 - pass@1 维持或提升（≥16%）
 - 行为分化保持三档
+
+### v30 50-state 中间结果（13 states）→ 失败，回退 v29
+
+13 states 跑完后的中间结果（来自 `.partial` 文件）：
+
+| Persona | v30 pass@1 | v29 pass@1 (200) | v30 Avg Turns | v29 Avg Turns |
+|---|:---:|:---:|:---:|:---:|
+| Novice | 1/13 (7.7%) | 18.5% | 3.6 | 7.0 |
+| Experienced | 0/13 (0.0%) | 15.5% | 2.2 | 2.6 |
+| Busy | 0/13 (0.0%) | 14.0% | 2.9 | 1.0 |
+
+**问题**：
+1. **pass@1 全面崩盘**：三个 persona 都远低于 v29，不仅仅是 Novice
+2. **Busy 过度 Clarify**：58% T0 Execute（vs v29 100%），部分跑到 Turn 3-6。加了 conditional Clarify 后模型学过头了
+3. **Experienced 也退化**：T0 Execute 仅 14%（vs v29 38%）
+
+**结论**：v30 disclosure-aware 改动对 pair 分布影响过大，模型行为和代码质量同时退化。
+决定**回退到 v29 代码**，用 v29 模型和结果继续实验。
+
+---
+
+## Ablation Study（基于 v29）
+
+### 设计
+
+保持 v29 DPO pairs（500 对）不变，只修改 `render_state.py` 中 prompt 格式：
+
+| Variant | 改了什么 | Prompt 变化 |
+|---|---|---|
+| TactfulLLM (full) | — | 完整：User Profile + Task Uncertainty + Context |
+| w/o Persona | 移除 `[User Profile]` 块 | 无 Type/Patience/Expertise |
+| w/o Uncertainty | 移除 `Task Uncertainty` 行 | 无 uncertainty 数值 |
+
+实现方式：`render_state()` 加 `ablation_mode` 参数（`"no_persona"` / `"no_uncertainty"`），
+通过 `ABLATION_MODE` 环境变量在训练和评估时传入。
+
+### 训练
+
+配置同 v29：3 epochs, lr=5e-5, beta=0.1, QLoRA r=64。
+
+**w/o Persona 训练**（16min 完成）：
+
+| Epoch | Loss | Accuracy | Margin |
+|:---:|:---:|:---:|:---:|
+| 0.36 | 0.642 | 59.4% | 0.201 |
+| 1.04 | 0.648 | 69.9% | 0.301 |
+| 2.07 | 0.502 | 74.0% | 0.713 |
+| 3.0 | 0.386 | 87.5% | 1.022 |
+
+模型保存至 `models/v29_ablation_no_persona/`。
+
+**w/o Uncertainty 训练**（17min 完成）：
+
+| Epoch | Loss | Accuracy | Margin |
+|:---:|:---:|:---:|:---:|
+| 0.35 | 0.597 | 59.4% | 0.336 |
+| 1.0 | 0.129 | 95.9% | 2.779 |
+| 2.0 | 0.005 | 100% | 6.381 |
+| 3.0 | 0.006 | 100% | 6.285 |
+
+模型保存至 `models/v29_ablation_no_uncertainty/`。
+
+注：w/o Uncertainty 的训练曲线与 full v29 几乎一致（epoch 2 即 100%），说明 uncertainty 信息对 DPO 的 chosen/rejected 区分贡献不大。而 w/o Persona 只到 87.5%，说明缺少 persona 信息后模型更难区分正确动作。
+
+### 50-state 评估结果
+
+> 日期: 2026-04-16
+
+#### w/o Persona (50-state)
+
+| Persona | pass@1 | pass@5 | Avg Turns | Clarify Rate |
+|---------|:---:|:---:|:---:|:---:|
+| Novice-Learner | 8.0% (4/50) | 14.0% (7/50) | 1.04 | 3.8% |
+| Experienced-Engineer | 8.0% (4/50) | 16.0% (8/50) | 1.04 | 3.8% |
+| Busy-Developer | 16.0% (8/50) | 16.0% (8/50) | 1.04 | 3.8% |
+| **Overall** | **10.7% (16/150)** | **15.3% (23/150)** | **1.04** | **3.8%** |
+
+**行为分化完全消失** — 三个 persona turns 全部 ≈1.0，clarify rate 3.8%，退化为 Direct Execution。
+
+#### w/o Uncertainty (50-state)
+
+| Persona | pass@1 | pass@5 | Avg Turns | Clarify Rate |
+|---------|:---:|:---:|:---:|:---:|
+| Novice-Learner | 12.0% (6/50) | 22.0% (11/50) | 8.00 | 87.5% |
+| Experienced-Engineer | 12.0% (6/50) | 16.0% (8/50) | 2.56 | 60.9% |
+| Busy-Developer | 8.0% (4/50) | 14.0% (7/50) | 1.00 | 0.0% |
+| **Overall** | **10.7% (16/150)** | **17.3% (26/150)** | **3.85** | **49.5%** |
+
+**行为分化保持**（8.0 / 2.6 / 1.0，与 full 几乎一致），但 pass@1 从 14.0% 降到 10.7%。
+
+### 100-state 评估结果（50 + 50-extra 合并）
+
+> 日期: 2026-04-17
+
+为增强统计可靠性，两个 ablation 各追加 50 states（从 `test_states_v29_eval_150extra.jsonl` 前 50 个）。
+
+#### w/o Persona (100-state)
+
+| Persona | pass@1 | pass@5 | Avg Turns |
+|---------|:---:|:---:|:---:|
+| Novice-Learner | 10.0% (10/100) | 14.0% (14/100) | 1.02 |
+| Experienced-Engineer | 10.0% (10/100) | 15.0% (15/100) | 1.02 |
+| Busy-Developer | 13.0% (13/100) | 14.0% (14/100) | 1.02 |
+| **Overall** | **11.0% (33/300)** | **14.3% (43/300)** | **1.02** |
+
+100-state 确认：行为分化完全消失（三 persona turns 全部 ≈1.0），pass@1 11.0%。
+
+#### w/o Uncertainty (87-state partial, 2026-04-17)
+
+50-extra 跑到 37/50 states 中断（疑似容器休眠），合并 50 + 37 = 87 states 先填 ablation 表，完整 100-state 明天补剩余 13 states。
+
+| Persona | pass@1 | pass@5 | Avg Turns | Rej Rate |
+|---------|:---:|:---:|:---:|:---:|
+| Novice-Learner | 10.3% (9/87) | 20.7% (18/87) | 7.55 | 45.4% (259/570) |
+| Experienced-Engineer | 13.8% (12/87) | 19.5% (17/87) | 2.66 | 37.5% (54/144) |
+| Busy-Developer | 9.2% (8/87) | 12.6% (11/87) | 1.00 | 0% |
+| **Overall** | **11.1% (29/261)** | **17.6% (46/261)** | **3.74** | — |
+
+**注意**：w/o Unc Exp 13.8% 单列反超 full Exp 12.0%（full 为 50-state，此为 87-state），test 规模不一致导致的样本差异。建议后续统一到 100-state 再比较。
+
+### Ablation 综合对比表（论文 Table 用）
+
+最新口径（2026-04-17）：
+
+| Method | pass@1 | | | | Avg Turns | | | Rej Rate | | |
+|--------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| | Nov | Exp | Busy | All | Nov | Exp | Busy | Nov | Exp | Busy |
+| **TactfulLLM** (full, 50) | **16.0** | 12.0 | **14.0** | **14.0** | 7.0 | 2.7 | 1.0 | 45.7 | 49.4 | 0.0 |
+| w/o Persona (100) | 10.0 | 10.0 | 13.0 | 11.0 | 1.0 | 1.0 | 1.0 | 0.0 | 0.0 | 0.0 |
+| w/o Uncertainty (87†) | 10.3 | 13.8 | 9.2 | 11.1 | 7.6 | 2.7 | 1.0 | 45.4 | 37.5 | 0.0 |
+
+*三行 test 规模不一致（full=50, w/o Persona=100, w/o Uncertainty=87 partial）。†w/o Uncertainty 50-extra 在 37/50 处中断，明天补跑剩余 13 states。*
+
+### Ablation 分析
+
+1. **w/o Persona — 行为分化的必要条件**
+   - 移除 User Profile 后，模型无法区分 persona，三个用户的行为完全一致（turns≈1.0）
+   - 本质退化为 Direct Execution（几乎从不 Clarify）
+   - pass@1 从 14.0% 降到 11.0%（-3.0%）
+
+2. **w/o Uncertainty — 代码质量的贡献因子**
+   - 行为分化完好保持（Novice 8.0 > Experienced 2.6 > Busy 1.0）
+   - 说明行为分化主要由 persona 信息驱动，不依赖 uncertainty
+   - 但 pass@1 从 14.0% 降到 10.7%（-3.3%），尤其 Busy 14%→8%
+   - 说明 uncertainty 信号帮助模型做出更有效的决策
+
+3. **两个组件互补**
+   - Persona 控制 **"何时问"**（行为模式）
+   - Uncertainty 帮助 **"问得更有效"**（决策质量）
+   - 缺一不可：缺 persona 则无分化，缺 uncertainty 则质量降
+
+### 文件清单（新增）
+
+| 文件 | 说明 |
+|------|------|
+| `models/v29_ablation_no_persona/` | w/o Persona DPO LoRA adapter |
+| `models/v29_ablation_no_uncertainty/` | w/o Uncertainty DPO LoRA adapter |
+| `outputs/eval_v29_ablation_no_persona_50test.json` | w/o Persona 50-state 评估 ✅ |
+| `outputs/eval_v29_ablation_no_persona_50extra.json` | w/o Persona 50-extra 评估 ✅ |
+| `outputs/eval_v29_ablation_no_uncertainty_50test.json` | w/o Uncertainty 50-state 评估 ✅ |
+| `outputs/eval_v29_ablation_no_uncertainty_50extra.json.partial` | w/o Uncertainty 50-extra 评估（37/50，中断） |
+
+---
+
+## Experiment 2: Recovery Analysis — 200-state 过夜任务
+
+> 日期: 2026-04-17 晚启动
+> 目标: 填 Recovery 表（Masked Direct / Clarified / Ideal Disclosed / Full Query）
+
+### 任务规划
+
+Recovery 表按 200-state 口径，当前覆盖：
+
+| Condition | 现状 | 今晚动作 |
+|---|---|---|
+| Masked Direct | 50-state (7.3%) | 补 150 extra，resume 至 200 |
+| DPO Clarified | ✅ 200-state (16.0%, Nov 18.5 / Exp 15.5 / Busy 14.0) | 无需动作 |
+| Ideal Disclosed | 未启动 | 新跑 200-state |
+| Oracle / Full Query | 旧 20-state 在不同测试集上 | 新跑 200-state |
+
+### 启动配置
+
+```bash
+# /tmp/run_exp2_overnight.sh（nohup 后台）
+python eval/evaluate_multi_turn_persona.py --direct_execution ... --output outputs/eval_v29_direct_execution_200.json
+python eval/evaluate_multi_turn_persona.py --oracle          ... --output outputs/eval_v29_oracle_200.json
+python eval/evaluate_multi_turn_persona.py --ideal_disclosed ... --output outputs/eval_v29_ideal_disclosed_200.json
+```
+
+- Test set: `data/seeds/test_states_v29_eval_200.jsonl`（50test + 150extra 合并，200 states）
+- `--max_samples 200 --pass_at_k 1 5`，`--base_model meta-llama/Llama-3.1-8B-Instruct`
+- Direct: 3 personas（虽然行为相同，保持格式一致），另两项 persona-independent
+- Direct 用 `.partial` resume 机制，复用 50-state 结果（只跑 150 extra × 3 personas）
+
+### 进程安全性
+
+- PID 603803, PPID=1（init 接管），TTY=?，独立 SID
+- SSH 断开不影响；容器休眠靠 `.partial` resume 接续
+- Log: `logs/exp2_overnight.log`
+
+### 预期产出（明早检查）
+
+| 文件 | 说明 |
+|---|---|
+| `outputs/eval_v29_direct_execution_200.json` | Masked Direct 200-state ✅ |
+| `outputs/eval_v29_oracle_200.json` | Full Query (Oracle) 200-state 🏃 |
+| `outputs/eval_v29_ideal_disclosed_200.json` | Ideal Disclosed 200-state ⏳ |
+
+### Recovery Rate 计算公式
+
+```
+Recovery Rate = (Method pass@1 - Direct pass@1) / (Full Query pass@1 - Direct pass@1) × 100%
+Δ vs Direct   = Method pass@1 - Direct pass@1
+```
+
+### 进度检查（2026-04-17 23:52，已跑 12h09m）
+
+PID 603803 still running。
+
+- **Direct Execution 200**: ✅ 完成（22:39）
+- **Oracle 200**: 🏃 48/200（~1.5min/sample，预计还要 3-4h）
+- **Ideal Disclosed 200**: ⏳ 待 Oracle 完成
+
+#### Direct Execution 200-state 结果
+
+| Persona | pass@1 | pass@5 |
+|---|:---:|:---:|
+| Novice-Learner | 11.5% (23/200) | 19.0% (38/200) |
+| Experienced-Engineer | 12.5% (25/200) | 17.5% (35/200) |
+| Busy-Developer | 13.0% (26/200) | 19.0% (38/200) |
+| **Overall** | **12.3%** (74/600) | **18.5%** (111/600) |
+
+**异常发现**：
+1. **Direct 200 (12.3%) >> Direct 50 (7.3%)**，gap +5%。50-state seed 可能抽到偏难 task
+2. **三 persona 不完全一致**（11.5/12.5/13.0）— 按理 Direct 不交互应完全相同，需查 `--direct_execution` 模式下 persona 是否漏进 prompt
+
+**对叙事影响**：DPO vs Direct 200-state gap = **+3.7%**（16.0 vs 12.3），比 50-state 时的 +8.7% 显著缩小。
+
+### Recovery 表（部分填好，待 Oracle/Ideal Disclosed）
+
+| Condition | pass@1 | pass@5 | Δ vs Direct | Recovery Rate |
+|---|:---:|:---:|:---:|:---:|
+| Masked Direct | 12.3% | 18.5% | -- | 0% |
+| Clarified (Overall) | 16.0% | 23.5% | +3.7% | TBD |
+| · Busy | 14.0% | 20.0% | +1.0% | TBD |
+| · Experienced | 15.5% | 25.0% | +3.0% | TBD |
+| · Novice | 18.5% | 25.5% | +7.0% | TBD |
+| Ideal Disclosed | TBD | TBD | TBD | TBD |
+| Full Query | TBD | TBD | TBD | 100% |
+
+每行 Δ 用对应 persona 的 Direct 做基准（Novice vs 11.5, Exp vs 12.5, Busy vs 13.0）。
+
+---
+
+## 23. Experiment 2: 信息恢复机制分析（2026-04-18）
+
+Full Query 完成 + 信息恢复相关性分析。
+
+### Full Query (Oracle 200) 完成
+
+- **pass@1 = 20.0%**, **pass@5 = 28.0%**（n=200, persona-independent 单跑）
+- 用作 OGR 计算的分母上限
+
+### Ideal Disclosed 进度
+
+凌晨 03:36 启动（PID 751556），目标 200（persona-independent，不是 600）。
+- 当前 86/200 (43%)，~1.6 min/conv（5 candidate × Llama 8B 本地推理）
+- 预计 09:00 前完成
+- `gpt-4o-mini` API 几乎不调用（single-turn execute 不进 user simulator）
+
+### Recovery 表（OGR 已计算）
+
+OGR = (method - direct) / (full_query - direct) × 100，per-persona 用各自 Direct 做分母。
+
+| Condition | pass@1 | pass@5 | Δ | OGR | Disc. |
+|---|:---:|:---:|:---:|:---:|:---:|
+| Masked Direct | 12.3% | 18.5% | -- | 0% | 0.00 |
+| Full Query | 20.0% | 28.0% | +7.7 | 100% | n/a |
+| TactfulLLM Overall | 16.0% | 23.5% | +3.7 | **48%** | 0.56 |
+| · Novice | 18.5% | 25.5% | +7.0 | **82%** | 0.89 |
+| · Experienced | 15.5% | 25.0% | +3.0 | **40%** | 0.78 |
+| · Busy | 14.0% | 20.0% | +1.0 | **14%** | 0.00 |
+| Ideal Disclosed | partial 86/200 | -- | -- | -- | 1.00 |
+
+### Eval bug 修复 + disclosure 信息回填
+
+发现 `evaluate_multi_turn_persona.py` 的 turn_data 构造（行 379, 785）漏记 `disclosed_items`，无法直接算 per-conversation disclosure_rate。
+- **修复**：两处加 `"disclosed_items": user_reaction.get("meta", {}).get("disclosed_items", {})`
+- **存量回填**：`scripts/replay_disclosure.py` 用 simulator 确定性 `get_disclosure_info()` 重放，避免 5h 重跑
+- **产出**：`data/analysis/disclosure_per_conversation.csv`（600 rows: state_id, persona, n_masked, n_disclosed, disclosure_rate, n_clarify_turns, n_answered_clarifies, pass1, pass5）
+
+### Disclosure rate by persona（验证设计意图）
+
+| Persona | mean disclosure_rate | 解释 |
+|---|:---:|---|
+| Novice-Learner | 0.886 | expertise=low（1 item/turn），多轮累积常饱和 |
+| Experienced-Engineer | 0.780 | expertise=mid（3 items/turn），中等恢复 |
+| Busy-Developer | 0.000 | DPO policy 学会 Execute，从不进 clarify 路径 |
+
+### Recovery → Success 相关性（`scripts/analyze_disclosure_recovery.py`）
+
+- **Pooled Spearman ρ = +0.088, p = 0.032**（弱但显著，被 persona confounding 稀释）
+- **Within-Experienced ρ = +0.202, p = 0.004**（唯一有 dynamic range 的子集，干净 mechanism 证据）
+- Within-Novice ρ = +0.041, p = 0.57（饱和）
+- Busy 全 0 → degenerate
+- **Logistic regression** `pass1 ~ disclosure_rate + C(persona)`：disclosure_rate coef = +0.901, 95% CI [-0.19, +1.99], p = 0.106（控制 persona 后边际不显著）
+
+### 可视化决策
+
+**不放**散点 / pooled bin 图：
+- Pooled bin pass@1 = [14.2%, 11.1%, 7.5%, 19.0%]，**非单调**（persona composition artifact：低 bin 全是 Busy，中 bin 是 Exp 偶然低段）
+- 600 点散点视觉上是云团，ρ=+0.088 趋势线几乎看不出
+- Per-persona 三联画 2/3 退化（Busy 全 0、Novice 饱和），看似 cherry-pick
+
+**主图**：4-condition grouped bar（`scripts/plot_4condition_grouped.py` → `data/analysis/fig_recovery_4condition.png`）
+- 横轴 persona × 4 条柱（Direct / TactfulLLM / Ideal Disclosed / Full Query），TBD 用 hatch
+- 把 Recovery 表 visualize，Bounds → TactfulLLM → Ideals 视觉递进
+- Busy 那组四条贴齐反而强化"policy 选择不 recover"的故事
+
+**主表**：加 `Disc.` 列（mean disclosure rate）作为机制 evidence in-table，不需要单独图
+
+### 论文段落（最终版）
+
+主段落框架：
+1. 开篇两问并列：(i) clarification 恢复多少 mask 信息 (ii) 恢复是否转化为下游成功
+2. 三 reference conditions：Masked Direct (lower bound) / Ideal Disclosed (clarification ceiling) / Full Query (absolute ceiling)
+3. Hierarchy + DPO 隔离声明：TactfulLLM vs Ideal Disclosed isolates information recovery from policy adaptation
+
+具体 LaTeX 见论文草稿；caption 浓缩到 4 行内，OGR 解释用 "(per-persona)" 一笔带过。
+
+### 文件清单（新增）
+
+| 文件 | 说明 |
+|---|---|
+| `scripts/replay_disclosure.py` | 离线重放 disclosure，回填 600 行 csv |
+| `scripts/analyze_disclosure_recovery.py` | Spearman + logistic regression + bin 分析 |
+| `scripts/plot_4condition_grouped.py` | 4-condition grouped bar 主图 |
+| `data/analysis/disclosure_per_conversation.csv` | per-conv disclosure × pass 数据 |
+| `data/analysis/recovery_bins.csv` | bin 统计（含 Wilson CI） |
+| `data/analysis/fig_recovery_4condition.png` | Recovery 主图 |
