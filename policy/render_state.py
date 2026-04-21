@@ -33,15 +33,11 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 try:
-    from utils.compute_task_uncertainty import compute_task_uncertainty_from_state
+    from utils.compute_task_uncertainty import compute_state_uncertainty
 except ImportError:
     # 如果导入失败，使用fallback
-    def compute_task_uncertainty_from_state(state: Dict) -> float:
-        query = state.get("query", "")
-        # 简单的fallback计算
-        if not query:
-            return 0.2
-        return 0.5  # 默认值
+    def compute_state_uncertainty(state: Dict) -> float:
+        return 0.5
 
 
 def render_state(state: Dict, persona: Dict = None, ablation_mode: str = None) -> str:
@@ -104,23 +100,13 @@ def render_state(state: Dict, persona: Dict = None, ablation_mode: str = None) -
         persona_patience = "mid"
         persona_expertise = "mid"
     
-    # 提取初始query（如果query包含对话历史，只使用原始部分）
-    # task_uncertainty应该基于初始query计算，不会动态更新
-    initial_query = query
-    if "[Assistant]:" in query or "[User]:" in query:
-        # 如果query包含对话历史，只提取原始部分（第一个[Assistant]:或[User]:之前的内容）
-        lines = query.split("\n")
-        initial_lines = []
-        for line in lines:
-            if line.strip().startswith("[Assistant]:") or line.strip().startswith("[User]:"):
-                break
-            initial_lines.append(line)
-        initial_query = "\n".join(initial_lines).strip()
-    
-    # 基于初始query计算task_uncertainty（决策时固定）
-    # 这样确保task_uncertainty有区分度，帮助模型判断，但不会在执行过程中改变
-    temp_state = {"query": initial_query}
-    task_uncertainty = compute_task_uncertainty_from_state(temp_state)
+    # v31: task_uncertainty is disclosure-based and DOES evolve across turns.
+    # U = (n_masked - n_disclosed) / MAX_MASKED (see utils/compute_task_uncertainty.py).
+    # As the user answers clarifying questions, disclosed_info grows and U drops.
+    # This is the single source of truth for both prompt display AND label
+    # generation (reward/compute_rewards.get_correct_action), so training and
+    # eval see identical numeric values.
+    task_uncertainty = compute_state_uncertainty(state)
     
     # 构建prompt - 使用清晰的格式，显式包含persona信息
     # 

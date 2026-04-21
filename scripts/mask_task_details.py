@@ -28,7 +28,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from utils.compute_task_uncertainty import compute_task_uncertainty_from_state
+from utils.compute_task_uncertainty import compute_state_uncertainty
 
 # 固定结构锚点
 ANCHOR_OUTPUT_START = "The function should output with:\n"
@@ -251,7 +251,11 @@ def process_tasks(
             stats["note_that"] += 1
 
         disclosure_rule = create_disclosure_rule(masked_content)
-        task_uncertainty = compute_task_uncertainty_from_state({"query": masked_prompt})
+        # v31: uncertainty is disclosure-based; pass a state that includes the
+        # just-built disclosure_rule so compute_state_uncertainty returns U.
+        task_uncertainty = compute_state_uncertainty(
+            {"query": masked_prompt, "disclosure_rule": disclosure_rule}
+        )
 
         masked_task = {
             "id":                       task["task_id"],

@@ -87,15 +87,58 @@ def compute_task_uncertainty(query: str) -> float:
 
 def compute_task_uncertainty_from_state(state: Dict) -> float:
     """
-    从state中提取query并计算task_uncertainty。
-    
+    从state中提取query并计算task_uncertainty（文本启发式，v29 遗留）。
+
     Args:
         state: 包含query字段的state字典
-        
+
     Returns:
         task_uncertainty: 0.0-1.0
     """
     query = state.get("query", "")
     return compute_task_uncertainty(query)
+
+
+# v31 canonical uncertainty: disclosure-based.
+# U = (n_masked_total - n_disclosed) / MAX_MASKED, saturated at 1.0.
+# MAX_MASKED is the observed upper bound across v29 states; keeps the value
+# normalized into [0, 1] while letting individual tasks differ at T0.
+MAX_MASKED = 5
+
+
+def compute_state_uncertainty(state: Dict, max_masked: int = MAX_MASKED) -> float:
+    """
+    v31 disclosure-based uncertainty.
+
+    U = max(0, n_masked_total - n_disclosed) / max_masked, clamped to 1.0.
+    Higher = more information still hidden = more reason to clarify.
+
+    Falls back to the text heuristic when state has no disclosure_rule
+    (e.g., non-masking domains), so render_state never crashes on legacy
+    states.
+
+    Args:
+        state: dict with optional "disclosure_rule" (masked_fields /
+               disclosed_info). If absent, falls back to query heuristic.
+        max_masked: normalization denominator.
+
+    Returns:
+        float in [0.0, 1.0].
+    """
+    dr = state.get("disclosure_rule") or {}
+    mf = dr.get("masked_fields") or {}
+    di = dr.get("disclosed_info") or {}
+
+    def _count(section):
+        return sum(len(v) for v in section.values() if isinstance(v, list))
+
+    n_masked = _count(mf)
+    if n_masked == 0:
+        # No masking info available → fall back to text heuristic.
+        return compute_task_uncertainty(state.get("query", ""))
+
+    n_disclosed = _count(di)
+    remaining = max(0, n_masked - n_disclosed)
+    return min(1.0, remaining / max_masked)
 
 

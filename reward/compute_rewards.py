@@ -62,6 +62,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from reward.compute import compute_task_score, compute_interrupt_cost, compute_interrupt_cost_v2, compute_clarification_bonus, total_reward
+from utils.compute_task_uncertainty import compute_state_uncertainty
 
 
 @dataclass
@@ -693,71 +694,40 @@ def rebalance_prefs_by_persona(
     return result
 
 
-def compute_disclosure_info(state: dict) -> tuple:
-    """Compute disclosure ratio and total masked items count.
+# v31 persona thresholds on disclosure-based uncertainty U ∈ [0, 1].
+# U high → info still hidden → more reason to Clarify.
+# U is discrete over {0.0, 0.2, 0.4, 0.6, 0.8, 1.0} (MAX_MASKED=5).
+# Thresholds are placed between distinct U levels so each bucket can
+# differentiate at least one persona pair:
+#   Novice > 0    → Clarify unless everything is disclosed (≈ v29 "always ask")
+#   Exp    > 0.3  → Clarify only if ≥ 2 items hidden (≈ v29, 2.4% flips)
+#   Busy   > 0.6  → Clarify only if ≥ 4 items hidden (new signal: on very
+#                    vague tasks, even Busy asks once at turn 0)
+V31_U_THRESHOLD = {
+    "Novice-Learner": 0.0,
+    "Experienced-Engineer": 0.3,
+    "Busy-Developer": 0.6,
+}
 
-    Returns (disclosure_ratio, n_masked_items).
-    disclosure_ratio is 0.0 if no masked fields exist.
+
+def get_correct_action(persona_name: str, uncertainty: float) -> Optional[str]:
+    """Return the behaviorally correct action for a persona at the given uncertainty.
+
+    v31: the label rule is pure (persona, uncertainty) — no dialogue_turn, no
+    disclosure_ratio, no n_masked_items. Uncertainty already encodes remaining
+    information deficit (see utils.compute_state_uncertainty), so turn drops
+    out of the decision. This gives the same persona different labels for
+    different tasks/turns instead of the v29 degenerate "Novice always clarify
+    for 3 turns" lookup.
+
+    Clarify if U > threshold, else Execute. Thresholds are per-persona so the
+    same U leads to different behavior across personas. Returns None for
+    unknown personas (caller falls back to reward-based ordering).
     """
-    dr = state.get("disclosure_rule", {})
-    mf = dr.get("masked_fields", {})
-    di = dr.get("disclosed_info", {})
-    total = sum(len(v) for v in mf.values() if isinstance(v, list))
-    if total == 0:
-        return 0.0, 0
-    disclosed = sum(len(v) for v in di.values() if isinstance(v, list))
-    return disclosed / total, total
-
-
-def get_correct_action(
-    persona_name: str,
-    dialogue_turn: int,
-    disclosure_ratio: Optional[float] = None,
-    n_masked_items: Optional[int] = None,
-) -> Optional[str]:
-    """Return the behaviorally correct action for a persona at a given dialogue turn.
-
-    Encodes persona design intent — used for behavior-first pair construction
-    so that preference direction is determined by persona policy, not reward magnitude.
-
-    - Busy-Developer:       Execute by default; Clarify at turn=0 only when task
-                            has high information deficit (n_masked_items >= 3)
-    - Novice-Learner:       Clarify while disclosure < 50% or turn < 2;
-                            Execute once enough info disclosed or turn >= 3
-    - Experienced-Engineer: Clarify at turn=0, Execute at turn>=1 (ask once, then act)
-
-    When disclosure_ratio is provided, Novice switches to Execute once enough masked
-    information has been disclosed (ratio >= 0.5 and turn >= 2).
-    This teaches the model "stop asking when you have enough info" rather than
-    the fixed "always clarify for N turns" rule.
-
-    When n_masked_items is provided, Busy may Clarify once at turn=0 for tasks
-    with high information deficit (>= 3 masked items), teaching the model
-    "even impatient users benefit from one critical question on complex tasks."
-
-    Returns None for unknown personas (caller falls back to reward-based ordering).
-    """
-    if persona_name == "Busy-Developer":
-        # High information deficit: even Busy benefits from 1 clarification
-        if (dialogue_turn == 0
-                and n_masked_items is not None and n_masked_items >= 3):
-            return "Clarify"
-        return "Execute"
-    elif persona_name == "Novice-Learner":
-        # Disclosure-aware: stop clarifying once enough info is disclosed.
-        # Note: disclosure_ratio at turn T reflects state BEFORE turn T's Q&A,
-        # so >=50% at turn T means the user has already answered ~half the items
-        # in prior turns — one more answer would bring it to ~67-75%.
-        # Threshold 0.5 + turn >= 2: Novice has asked 2+ rounds AND gathered
-        # at least half the info → time to Execute with what you have.
-        if (disclosure_ratio is not None and disclosure_ratio >= 0.5
-                and dialogue_turn >= 2):
-            return "Execute"
-        # Fallback: hard cap at turn 3 even if not enough disclosed
-        return "Clarify" if dialogue_turn < 3 else "Execute"
-    elif persona_name == "Experienced-Engineer":
-        return "Clarify" if dialogue_turn == 0 else "Execute"
-    return None
+    thr = V31_U_THRESHOLD.get(persona_name)
+    if thr is None:
+        return None
+    return "Clarify" if uncertainty > thr else "Execute"
 
 
 def compute_preferences(
@@ -935,12 +905,11 @@ def compute_preferences(
                         continue
 
                     # Behavior-first: chosen/rejected determined by persona design, not reward.
-                    # For each (persona, turn), we know which action is "correct" by design.
-                    # chosen = best trajectory that took the correct action
-                    # rejected = best trajectory that took the incorrect action
-                    dialogue_turn_here = best_turn0_1["state"].get("dialogue_turn", 0)
-                    dr_here, n_items_here = compute_disclosure_info(best_turn0_1["state"])
-                    correct_action = get_correct_action(persona_name, dialogue_turn_here, dr_here, n_items_here)
+                    # v31: label rule is (persona, uncertainty). Uncertainty is the
+                    # disclosure-based state value; it evolves across turns as the
+                    # user reveals masked information.
+                    u_here = compute_state_uncertainty(best_turn0_1["state"])
+                    correct_action = get_correct_action(persona_name, u_here)
 
                     if correct_action and correct_action in action_best:
                         other_actions = [a for a in action_best if a != correct_action]
@@ -1008,10 +977,11 @@ def compute_preferences(
                             if ct.get("interrupt_cost", 0) >= 0.8:
                                 continue
 
-                            # v30: Check disclosure — if info is fully disclosed,
-                            # this Clarify is wasteful; skip it as a chosen example.
-                            ct_dr, ct_n_items = compute_disclosure_info(ct.get("state", {}))
-                            ct_correct = get_correct_action("Novice-Learner", ct_turn, ct_dr, ct_n_items)
+                            # v31: uncertainty evolves per turn. If the current
+                            # turn's U is below Novice threshold, this Clarify is
+                            # wasteful; skip it as a chosen example.
+                            ct_u = compute_state_uncertainty(ct.get("state", {}))
+                            ct_correct = get_correct_action("Novice-Learner", ct_u)
                             if ct_correct == "Execute":
                                 continue  # Don't teach "keep asking when you already know everything"
 
@@ -1123,9 +1093,8 @@ def compute_preferences(
                     continue
                 # Behavior-first: persona design determines chosen action at fork turn.
                 fork_persona_name = (mainline_clarify.get("persona") or {}).get("name", "")
-                fork_dialogue_turn = fork_at - 1
-                fork_dr, fork_n_items = compute_disclosure_info(mainline_clarify.get("state", {}))
-                fork_correct_action = get_correct_action(fork_persona_name, fork_dialogue_turn, fork_dr, fork_n_items)
+                fork_u = compute_state_uncertainty(mainline_clarify.get("state", {}))
+                fork_correct_action = get_correct_action(fork_persona_name, fork_u)
                 if fork_correct_action == "Clarify":
                     chosen_t, rejected_t = mainline_clarify, fork_turn
                     chosen_a, rejected_a = "Clarify", "Execute"

@@ -23,7 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from simulator import PERSONAS, react
-from utils.compute_task_uncertainty import compute_task_uncertainty_from_state
+from utils.compute_task_uncertainty import compute_state_uncertainty
 
 
 def set_global_seed(seed: int) -> None:
@@ -175,9 +175,8 @@ def synth_states(domain: str, n: int) -> List[Dict]:
     for i in range(n):
         # Generate initial state (dialogue_turn=0 for first turn)
         query = "帮我写个 Python 爬虫" if domain == "coding" else "帮我规划今天的待办"
-        # Compute task_uncertainty from query
-        temp_state = {"query": query}
-        task_uncertainty = compute_task_uncertainty_from_state(temp_state)
+        # Synthetic quick-test states have no disclosure_rule → text heuristic fallback.
+        task_uncertainty = compute_state_uncertainty({"query": query})
         
         samples.append(
             {
@@ -242,14 +241,14 @@ def load_states_from_dataset(dataset_path: Path, domain: str, limit: Optional[in
             original_id = row.get("id", f"ds-{i}")
             state_id = original_id
         
-        # Compute task_uncertainty if not provided
+        # Compute task_uncertainty if not provided.
+        # v31: prefer disclosure-based U when disclosure_rule is present on row;
+        # compute_state_uncertainty handles the fallback internally.
         query = row["query"]
         if "task_uncertainty" in row:
             task_uncertainty = float(row["task_uncertainty"])
         else:
-            # Compute from query if not provided
-            temp_state = {"query": query}
-            task_uncertainty = compute_task_uncertainty_from_state(temp_state)
+            task_uncertainty = compute_state_uncertainty(row)
         
         # Support both "test" (BigCodeBench) and "convcodeworld_tests" field names
         tests = row.get("convcodeworld_tests") or row.get("test")
