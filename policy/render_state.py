@@ -127,6 +127,8 @@ def render_state(state: Dict, persona: Dict = None, ablation_mode: str = None) -
     # 格式设计让LLM容易理解：
     # - persona: 用户类型、耐心度、专业水平（关键：让模型学会persona-aware策略）
     # - task_uncertainty: 0.0-1.0，值越高表示越不确定（需要更多澄清）
+    #   [2026-04-22 修正] 之前 compute_task_uncertainty 内部返回的是 clarity，
+    #   此处显示的数字方向与变量名相反。已翻正，现在数值与语义一致。
     # - dialogue_turn: 当前对话轮次，帮助模型判断是否应该继续澄清
     # - prev_reject: 上一轮是否被拒绝，帮助模型判断用户耐心
     # - query: 用户的请求（可能包含对话历史）

@@ -1,85 +1,88 @@
 """
-计算task_uncertainty（任务不确定性/清晰度）
+计算task_uncertainty（任务不确定性）
 
-根据输入（query）进行打分，评估任务的清晰度。
+基于query文本的启发式评估任务不确定性。
 返回值范围：0.0-1.0
-- 0.0-0.3: 非常不清晰，需要多个澄清问题（HIGH action）
-- 0.3-0.7: 中等清晰度，可能需要一个澄清问题（MID action）
-- 0.7-1.0: 非常清晰，可以直接生成代码（LOW action）
+- 0.0-0.3: 非常清晰，可以直接生成代码
+- 0.3-0.7: 中等不确定性，可能需要澄清
+- 0.7-1.0: 非常不清晰，需要多个澄清问题
+
+[2026-04-22 修正] v29 版本内部逻辑实际是 clarity（与函数名相反），
+下游 reward 代码的语义注释（"高 uncertainty → prefer Clarify"）一直
+在反向运行。此版翻正：低 U = 清晰，高 U = 不确定。
 """
 from typing import Dict
 
 
 def compute_task_uncertainty(query: str) -> float:
     """
-    基于query文本的启发式规则评估任务不确定性/清晰度。
-    
-    注意：这是single-step RL (contextual bandit)问题，task_uncertainty在决策时固定。
-    如果query包含对话历史，应该只使用原始部分（由render_state处理）。
-    
+    基于query文本的启发式规则评估任务不确定性。
+
+    语义：返回值越大表示越不确定 / 需要越多澄清。
+
     Args:
         query: 用户的任务描述（应该只包含初始query，不包含对话历史）
-        
+
     Returns:
-        task_uncertainty: 0.0-1.0，值越小表示越不清晰（不确定性越高）
+        task_uncertainty: 0.0-1.0，值越大表示越不确定。
     """
     if not query or len(query.strip()) == 0:
-        return 0.2  # 空query，非常不清晰
-    
+        return 0.8  # 空query，非常不确定
+
     query_lower = query.lower()
-    uncertainty = 0.5  # 默认值
-    
+    # 启发式先算 clarity-style 得分，最后翻转为 uncertainty。
+    # 保持原有加减号与因子，只在返回时 1 - x，便于 diff/回溯。
+    clarity = 0.5
+
     # 1. 长度检查
     query_len = len(query)
     if 200 <= query_len <= 1500:
-        uncertainty += 0.1  # 合适的长度，更清晰
+        clarity += 0.1  # 合适的长度，更清晰
     elif query_len < 100:
-        uncertainty -= 0.2  # 太短，可能不清晰
+        clarity -= 0.2  # 太短，可能不清晰
     elif query_len > 3000:
-        uncertainty -= 0.1  # 太长，可能包含太多信息，不够聚焦
-    
+        clarity -= 0.1  # 太长，可能包含太多信息，不够聚焦
+
     # 2. 问号检查（包含问号可能表示不清晰）
     question_count = query.count("?")
     if question_count > 0:
-        uncertainty -= 0.1 * min(question_count, 3)
-    
+        clarity -= 0.1 * min(question_count, 3)
+
     # 3. 模糊词检查
-    ambiguous_words = ["maybe", "perhaps", "could", "might", "uncertain", "not sure", "not clear", "unclear"]
+    ambiguous_words = ["maybe", "perhaps", "could", "might", "uncertain",
+                       "not sure", "not clear", "unclear"]
     ambiguous_count = sum(1 for word in ambiguous_words if word in query_lower)
     if ambiguous_count > 0:
-        uncertainty -= 0.15 * min(ambiguous_count, 2)
-    
+        clarity -= 0.15 * min(ambiguous_count, 2)
+
     # 4. 具体性检查（包含技术细节表示更清晰）
     specific_indicators = [
-        "def ", "function", "import ", "class ",  # 代码相关
-        "should output", "should return", "should raise",  # 输出规范
-        "test", "test case", "example",  # 测试相关
-        "parameter", "argument", "input", "output",  # 参数相关
-        "error", "exception", "traceback",  # 错误信息（通常表示问题明确）
+        "def ", "function", "import ", "class ",
+        "should output", "should return", "should raise",
+        "test", "test case", "example",
+        "parameter", "argument", "input", "output",
+        "error", "exception", "traceback",
     ]
-    specific_count = sum(1 for indicator in specific_indicators if indicator in query_lower)
+    specific_count = sum(1 for ind in specific_indicators if ind in query_lower)
     if specific_count >= 3:
-        uncertainty += 0.2  # 非常具体
+        clarity += 0.2
     elif specific_count >= 1:
-        uncertainty += 0.1  # 有一定具体性
-    
-    # 5. 完整性检查
-    # 包含错误信息通常表示任务更清晰（用户知道问题在哪里）
+        clarity += 0.1
+
+    # 5. 错误信息 / traceback 通常意味着问题很明确
     if "error" in query_lower or "traceback" in query_lower or "exception" in query_lower:
-        uncertainty += 0.1
-    
-    # 6. 包含测试用例或示例
+        clarity += 0.1
+
+    # 6. 测试用例 / 示例
     if "test" in query_lower and ("case" in query_lower or "example" in query_lower):
-        uncertainty += 0.1
-    
-    # 7. 包含明确的输入输出格式
+        clarity += 0.1
+
+    # 7. 明确输入输出格式
     if "input" in query_lower and "output" in query_lower:
-        uncertainty += 0.1
-    
-    # 确保返回值在0.0-1.0范围内
-    uncertainty = max(0.0, min(1.0, uncertainty))
-    
-    return uncertainty
+        clarity += 0.1
+
+    clarity = max(0.0, min(1.0, clarity))
+    return 1.0 - clarity
 
 
 def compute_task_uncertainty_from_state(state: Dict) -> float:
