@@ -6,6 +6,44 @@
 
 ## 2026-04-21
 
+### 88. Canonical 覆盖 re-audit — Base LLM 其实已完整（修正 #82、#87）
+
+用户追问"你确定吗"后重查，推翻昨日结论：
+
+**Base LLM canonical-200 已完整** — 不需要补跑。
+
+实际覆盖（zero overlap between 3 files）：
+
+| 文件 | (state, persona) pairs | canonical 内 |
+|---|---|---|
+| `eval_v29_base_llama_50test.json` | 150 | 150 |
+| `eval_v29_base_150extra.json.partial` | 324 | 324 |
+| `eval_v29_base_150extra_remaining.json` | 126 | 126 |
+| **合计（去重）** | **600 唯一** | **600 = 200 state × 3 persona** |
+
+之前 #82/#87 写 "Base LLM 缺 107" 是审计时只合并了老 20-seed 文件（3 match）+ 50test（50）+ 150extra_remaining（42） = 95，漏算了 `_150extra.json.partial` 里的 324 对——那个 `.partial` 后缀骗过我，以为是损坏/不完整文件。实际 partial 仅仅是当时断点续跑的命名约定，数据完整。
+
+**修正覆盖表**：
+
+| 方法 | canonical-200 | 缺 |
+|---|---|---|
+| Direct | 200/200 ✓ | 0 |
+| Oracle | 200/200 ✓ | 0 |
+| Ideal Disclosed v2 | 200/200 ✓ | 0 |
+| TactfulLLM | 200/200 ✓ | 0 |
+| **Base LLM** | **200/200 ✓** | **0** |
+| Clarify-first | 50/200 | **150** |
+| Prompt-only | 50/200 | **150** |
+
+**修正补跑 queue（删 Base LLM）**：
+- Clarify-first 450 trials × ~100s ≈ 12.5h
+- Prompt-only 450 trials × ~135s ≈ 17h
+- 并行 ~17h，串行 ~30h（非 5h）
+
+**时长估算大幅上调原因**：之前按 ~50s/trial 估的，但 Ideal Disclosed v2 实测 ~90s/trial 也就是 pass@5 (5 candidate × Llama 8B 本地推理) 主导成本，Clarify turn 边际便宜。
+
+**待整理**：Base LLM 的 3 文件建议合并为单一 `eval_v29_base_llama_200.json`，读表更方便。
+
 ### 82. Canonical test set 审计 + Exp1/Exp2 表格不一致排查
 
 **起因**：用户看到 Experiment 1 主表（"200 test tasks"）和 Experiment 2 matched 表（"151 matched seeds"）数字不一致（如 Direct Execution：7.3% vs 14.1%，差 2×），问"是不是同一个测试集"。
