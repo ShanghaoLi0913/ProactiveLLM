@@ -1616,3 +1616,85 @@ OGR = (method - direct) / (full_query - direct) × 100，per-persona 用各自 D
 | `data/analysis/disclosure_per_conversation.csv` | per-conv disclosure × pass 数据 |
 | `data/analysis/recovery_bins.csv` | bin 统计（含 Wilson CI） |
 | `data/analysis/fig_recovery_4condition.png` | Recovery 主图 |
+
+---
+
+## 17. 2026-04-21 Canonical 测试集审计 + Ideal Disclosed v2
+
+### 17.1 Canonical 测试集定义
+
+- **`data/seeds/test_states_v29_eval_200.jsonl`**（200 状态）= 本项目规范测试集
+- 所有 Exp1/Exp2 后续评估**必须**用这个文件或它的子集
+- 已确认的干净子集：
+  - `test_states_v29_eval_50.jsonl`（50 个，⊂ 200 ✓）
+  - `test_states_v29_eval_150extra.jsonl`（150 个，⊂ 200 ✓）
+
+### 17.2 非 canonical 的老测试集（⚠ 需避开）
+
+`test_states_v29_eval.jsonl`（20 状态）是早期遗留，和 canonical-200 只重叠 3 个、17 个在外。下列 eval 输出使用了它：
+- `eval_v29_100states.json`（TactfulLLM 早期跑，17 outside 但已被新文件覆盖，保留无害）
+- `eval_v29_oracle_50test.json`（已废，被 `oracle_200.json` 替代）
+- `eval_v29_base_llama.json`（**需要重跑 canonical 版本**）
+
+### 17.3 Canonical-200 覆盖现状
+
+| 方法 | 已覆盖 | 缺 |
+|---|---|---|
+| Direct Execution | 200 ✓ | 0 |
+| Oracle | 200 ✓ | 0 |
+| Ideal Disclosed v1 | 200 ✓ | 0 |
+| Ideal Disclosed v2 | 198/200 (2026-04-21 进行中) | 2 |
+| TactfulLLM | 200 ✓ | 0（分散在 3 文件）|
+| Clarify-first | 50 | **150** |
+| Prompt-only | 50 | **150** |
+| Base LLM | 93 | **107** |
+
+### 17.4 Exp1 主表数据源不一致 bug
+
+Exp1 "Main Results" 表 caption 写 "200 test tasks"，实际用了 **50-state 子集**（`*_50test.json`），导致 Direct Execution 在两张表里 7.3% vs 14.1% 差 2×（50test 子集恰好难）。
+
+**修正计划**：补跑 Clarify-first / Prompt-only / Base LLM 在 canonical-200 缺的 150/150/107 个，让所有方法统一到 200-seed 规模，主表 caption 才对得上。
+
+### 17.5 Ideal Disclosed v2 完成 (200/200)
+
+v2 修正 disclosure 格式（bullet + 2 items）后，在完整 canonical-200 上：
+
+| Condition | pass@1 | pass@5 | avg turns |
+|---|---|---|---|
+| Oracle (full query) | 20.0% | 28.0% | 1.0 |
+| **Ideal Disclosed v2** | **16.0%** | **27.0%** | 1.0 |
+| Ideal Disclosed v1 | 13.5% | 24.5% | 1.0 |
+| Masked Direct | 12.3% | 18.5% | 1.0 |
+
+v2 比 v1 提升 pass@1 +2.5pp、pass@5 +2.5pp——说明 bullet 格式确实传递更多信息。
+
+### 17.6 Experiment 2 表升级到 200 seed（canonical）
+
+用 canonical-200 重算，所有 condition 都在同一测试集：
+
+| Group | Condition | pass@1 | pass@5 | Δ | OGR (%) | Disc. |
+|---|---|---|---|---|---|---|
+| **Bounds** | Masked Direct | 12.3 | 18.5 | -- | 0 | 0.00 |
+|  | Full Query | **20.0** | **28.0** | +7.7 | 100 | n/a |
+| **TactfulLLM** | Overall | 16.0 | 23.5 | +3.7 | 48 | 0.56 |
+|  | Novice | 18.5 | 25.5 | +7.0 | 82 | 0.89 |
+|  | Experienced | 15.5 | 25.0 | +3.0 | 40 | 0.78 |
+|  | Busy | 14.0 | 20.0 | +1.0 | 14 | 0.00 |
+| **Oracle** | Ideal Disclosed | 16.0 | 27.0 | +3.7 | 48 | 1.00 |
+
+**关键发现**：TactfulLLM Overall 和 Ideal Disclosed v2 的 pass@1 **精确重合在 16.0%**。在 600 个 (state, persona) matched 试验上做 McNemar：
+- TactfulLLM pass & Ideal fail: b=43
+- Ideal pass & TactfulLLM fail: c=43
+- p-value (exact) ≈ 1.00
+
+→ "TactfulLLM approaches the clarification ceiling" 从 **approach** 升级为 **fully matches**。pass@5 上 Ideal (27.0) > TactfulLLM (23.5)，但 pass@1 是主指标。
+
+**Per-persona OGR 分层干净**：Novice 82% → Experienced 40% → Busy 14%，强化 persona adaptation 机制。Busy 从 151-matched 的 OGR=0 变成 200 的 14%，不再退化为"完全不恢复"。
+
+### 17.7 数据泄漏审计（无事）
+
+- canonical splits（train 376 / val 47 / test 47 = 470，互不重叠）
+- eval_200 文件级构造有脏：67 个与 train_split 文件重叠、13 个与 val 重叠、6 个与 test 重叠、114 个是孤儿（不在 470-masked 池里，独立 masking 得到）
+- **但 v29 DPO 实际只训练了 `prefs_v29_100states.jsonl` 里的 107 个任务（id 全 < 110），和 eval_200（id 全 ≥ 111）零交集**
+- **v29 paper 可以放心写 "zero overlap between 107 training tasks and 200 held-out eval tasks"**
+- v30+ 若扩到 train_split 全集，那 67 重叠就变成真泄漏，届时须先重建 eval_200

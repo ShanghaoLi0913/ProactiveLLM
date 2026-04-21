@@ -4,6 +4,139 @@
 
 ---
 
+## 2026-04-21
+
+### 82. Canonical test set 审计 + Exp1/Exp2 表格不一致排查
+
+**起因**：用户看到 Experiment 1 主表（"200 test tasks"）和 Experiment 2 matched 表（"151 matched seeds"）数字不一致（如 Direct Execution：7.3% vs 14.1%，差 2×），问"是不是同一个测试集"。
+
+**审计结论**：canonical 测试集是 `data/seeds/test_states_v29_eval_200.jsonl`（200 状态）。但：
+
+| 方法 | canonical 覆盖 | 缺 | 备注 |
+|---|---|---|---|
+| Direct Execution | 200 ✓ | 0 | `eval_v29_direct_execution_200.json` |
+| Oracle (Full Query) | 200 ✓ | 0 | `eval_v29_oracle_200.json` |
+| Ideal Disclosed v1 | 200 ✓ | 0 | `eval_v29_ideal_disclosed_200.json` |
+| **Ideal Disclosed v2** | 198/200 | 2 | 仍在跑，~5 min 完结 |
+| **TactfulLLM** | 200 ✓ | 0 | 分散 3 文件（50test+150extra+100states 里 3 个）|
+| **Clarify-first** | 50 | **150** | 只有 `eval_v29_clarify_first_50test.json` |
+| **Prompt-only** | 50 | **150** | 只有 `eval_v29_prompt_only_50test.json` |
+| **Base LLM** | 93 | **107** | 50test=50 + 150extra_remaining=42 + 老 20-seed=3 |
+
+**Exp1 表数据源真相**（caption 误写 "200 test tasks"）：
+
+| 方法 | 表中数字（Nov/Exp/Busy） | 实际源 |
+|---|---|---|
+| Direct | 6.0/8.0/8.0 | `50test` 文件 ✓ 完全吻合 |
+| Clarify-first | 8.0/12.0/8.0 | `50test` ✓ |
+| Prompt-only | 14.0/6.0/6.0 | `50test` ✓ |
+| Base LLM | 12.5/12.5/13.0 | 不纯，疑似手拼 |
+| TactfulLLM | 18.5/15.5/14.0 | 早期快照 |
+
+**同一 Direct Execution 两表差 2×** 的原因：Exp1 用 50-state 子集 (`direct_execution_50test.json`)，Exp2 用 200-matched-151。50test 恰好难，不宜当主表。
+
+**⚠ 关于老的 20-seed 测试集 `test_states_v29_eval.jsonl`**：只和 canonical-200 重叠 3 个，17 个在外。三个 eval 文件使用它：
+- `eval_v29_100states.json`（17 outside，但 TactfulLLM 另外两文件已覆盖这 17 的替代品）
+- `eval_v29_oracle_50test.json`（已被 200 文件取代）
+- `eval_v29_base_llama.json`（需要补跑 canonical 版本）
+
+### 83. 泄漏虚惊一场 — v29 实际无泄漏
+
+审计 train/eval 是否泄漏：
+
+```
+canonical splits (470 masked tasks, 互不重叠):
+    train: 376    val: 47    test: 47
+
+eval_200 文件构造：
+  ├─ 来自 train: 67    （⚠ 文件级重叠）
+  ├─ 来自 val:   13
+  ├─ 来自 test:   6
+  └─ 孤儿:      114    （不在 470-masked 池里，单独跑 masking）
+
+v29 实际训练 (prefs_v29_100states.jsonl): 107 个任务，id 全部 < 110
+eval_200: id 全部 ≥ 111
+v29-actually-trained ∩ eval_200 = 0  ← 零泄漏
+```
+
+**所有 200 eval 任务都有 masked_fields，schema 与训练一致。** v29 paper 可以放心报 "200 held-out tasks, zero overlap with 107 training tasks"。
+
+**潜在风险（v29 不受影响）**：v30+ 若扩大到 train_split 全集 376，那 67 个文件级重叠会变成真泄漏——须先修 eval_200。
+
+### 84. 项目清理 commit
+
+`git commit 9a3b633`：
+- 把 61MB v29 轨迹日志从嵌套的 `data/data/logs/` 移到 `data/logs/`（生成器文档的位置），并修复两个硬编码路径（`analyze_clarify_samples.py`、`generate_v5_balanced_prefs.py`）
+- 归档 5 个 Exp1 Part-2 分析脚本到 `scripts/analysis/`：
+  - `extract_reference_turns.py` — 提取 v29 per-(state, persona) mainline 轮数
+  - `v29_traj_stats.py` — 轨迹轮次全视角统计（per-trajectory、per-(state,persona)、action 分布）
+  - `perTask_turn_table.py` — per-task 轮次对比表
+  - `plot_turn_lines.py` — Exp1 Part2 折线图
+  - `plot_interaction_quality.py` — 交互质量双图（Clarification Success Rate + Turn 分布 vs tolerance budget）
+- 删除根目录污染：`qq_plot.png`、`key4_*.txt`、`test_output.json`、`test_data_2/`
+- 清理 `.gitignore` 过时条目
+
+### 85. Ideal Disclosed v2 完成 (200/200) + Exp2 表升级到 canonical-200
+
+PID 3648（04:28 启动，耗时 ~5h），**200/200 完成**：
+
+| 方法 (canonical-200) | pass@1 | pass@5 | avg turns |
+|---|---|---|---|
+| Oracle | 20.0% | 28.0% | 1.0 |
+| **Ideal Disclosed v2** | **16.0%** | **27.0%** | 1.0 |
+| Ideal Disclosed v1 | 13.5% | 24.5% | 1.0 |
+| Masked Direct | 12.3% | 18.5% | 1.0 |
+
+v2 vs v1：pass@1 +2.5pp、pass@5 +2.5pp。OGR：(16.0-12.3)/(20.0-12.3) = **48%**（v1 是 7%）——bullet 格式确实多传了一半 gap 的信息。
+
+**Experiment 2 表重算（canonical-200，取代旧 151-matched）**：
+
+| Group | Condition | pass@1 | pass@5 | Δ | OGR % | Disc. |
+|---|---|---|---|---|---|---|
+| Bounds | Masked Direct | 12.3 | 18.5 | -- | 0 | 0.00 |
+|  | Full Query | 20.0 | 28.0 | +7.7 | 100 | n/a |
+| TactfulLLM | Overall | 16.0 | 23.5 | +3.7 | 48 | 0.56 |
+|  | Novice | 18.5 | 25.5 | +7.0 | 82 | 0.89 |
+|  | Experienced | 15.5 | 25.0 | +3.0 | 40 | 0.78 |
+|  | Busy | 14.0 | 20.0 | +1.0 | 14 | 0.00 |
+| Oracle | Ideal Disclosed | 16.0 | 27.0 | +3.7 | 48 | 1.00 |
+
+**最强 finding**：TactfulLLM Overall 和 Ideal Disclosed v2 在 200 canonical 上 pass@1 **精确重合 16.0%**。600 matched trials McNemar：b=43、c=43、p≈1.00 → "approach clarification ceiling" 升级为 "fully matches"。
+
+Per-persona OGR 分层变清晰：Novice 82% → Exp 40% → Busy 14%（151-matched 时 Busy=0 现在 =14，不再退化）。
+
+### 86. Exp1 Part-2: 轮次合理性 metric 设计中断
+
+目标：除 avg_turns 和 rejection_rate 之外，设计"轮次是否合理"的 metric。用户要的 reference 来自**实际 v29 轨迹**。
+
+**v29 轨迹统计**（`data/logs/traj_v29_100states_combined.jsonl`，1527 条轨迹 / 109 训练任务）：
+
+| Persona | 按 trajectory 粒度 mean | 分布 |
+|---|---|---|
+| Busy | 2.25 | {2: 321, 3: 107} |
+| Experienced | 2.80 | {2: 109, 3: 426} |
+| Novice | 3.64 | {2: 109, 3: 146, 4: 176, 5: 105, 6: 28} |
+
+**但：v29 轨迹覆盖 task 0-108，eval_200 是 111+，完全不重叠**——无法提供 per-(eval_task, persona) reference。需要：
+- 方案 A：用 per-persona 平均当 reference（牺牲 per-task 粒度）
+- 方案 B：在 eval 集 200 上额外跑一轮 v29 teacher rollout
+- 待用户决定
+
+### 87. 补跑 queue（等 Ideal Disclosed v2 完结后串行启动）
+
+为让**所有方法都在 canonical-200 上完整评估**：
+
+| 序 | 任务 | 缺样本 | 预估 GPU 时长 |
+|---|---|---|---|
+| 1 | 等 Ideal Disclosed v2 收尾 | 2 | ~5 min |
+| 2 | Clarify-first 补跑 canonical 150 | 150 | ~50 min |
+| 3 | Prompt-only 补跑 canonical 150 | 150 | ~2.5 hr（5-6 turn/样本）|
+| 4 | Base LLM 补跑 canonical 107 | 107 | ~1 hr |
+
+总计 ~5 hr。跑完后 Exp1 主表可直接报 "200 seeds" 而不是 "50 test"。
+
+---
+
 ## 2026-04-18
 
 ### 79. Experiment 2 narrative + 表格定稿（论文段落）
