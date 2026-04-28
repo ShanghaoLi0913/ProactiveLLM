@@ -1,269 +1,222 @@
-# TactfulLLM 论文实验设计
+# TactfulLLM Experiment Design
 
-> Target: NeurIPS 2026 (Deadline: 2026-05-06)
-> Last updated: 2026-04-13
+> Target: NeurIPS 2026 (deadline 2026-05-06). Last updated 2026-04-25.
+>
+> 这个文档只讲 **final plan + why**。执行进度、调试记录、失败尝试在 `work_log.md` 和各 `v*_experiment_log.md` 里。
 
 ---
 
 ## Overview
 
-| Experiment | Core Question | New Eval Needed? |
-|---|---|---|
-| Exp 1: Main Performance | TactfulLLM vs baselines, 谁的 trade-off 最好？ | Baselines 需跑 |
-| Exp 2: Recovery Analysis | Clarification 恢复了多少被 mask 掉的信息？ | Full Query baseline 需跑 |
-| Exp 3: Persona Sensitivity | 模型是否真正理解 persona 并据此调整行为？ | Cross-persona swap 需跑 |
+4 个实验,每个回答一个独立问题,互不重复。
+
+| § | Experiment | 回答什么 | 为什么一定要做 | 状态 |
+|---|---|---|---|---|
+| 5.1 | Main Performance | TactfulLLM vs baselines 的 pass@1 / turns 取舍 | Headline claim | ✓ Runs done, 表待整 |
+| 5.2 | Recovery Analysis | Clarification 真的恢复 masked 信息了吗? | 证明 gain 来自 info recovery 而非 policy artifact | ✓ |
+| 5.3 | Generalization (OOD) | 零训练换 benchmark,行为还成立吗? | 挡 "overfit to BigCodeBench masking" 质疑 | **Pending (4/25-28)** |
+| 5.4 | Ablation | Persona 和 Uncertainty 两个信号各做了多少工? | 证明两个信号都必要 | ✓ |
+
+### 明确不做(附理由)
+
+| 砍掉 | 理由 |
+|---|---|
+| Qwen backbone | 时间不够。单 backbone + generalization(§5.3)比双 backbone 更回应 reviewer concern |
+| Cross-Persona Swap (原 §5.3 方案,4/16 砍) | 要翻倍 eval 成本,信号反而弱。Ablation 对 "哪个信号起作用" 的回答更直接 |
+| HumanEval | 和 BigCodeBench 同 domain(general Python utility),只有 1 个可 mask 字段(删示例),generalization claim 太弱 |
+| RECODE-H | 8B floor effect(论文自己的数字:GPT-5 L0=6.0%,DeepSeek-V3.1 L0=5.1%)会压死 method 差异;且 paradigm 不对等(他们的 multi-turn 是 code-debug feedback,不是 spec clarification) |
+| APPS-Competition / LiveCodeBench-hard / ClassEval / BigCodeBench-Hard | 要么 8B 地板崩,要么同分布只能叫 difficulty generalization |
 
 ---
 
 ## Shared Setup
 
-### Backbones
-- Llama-3.1-8B-Instruct (primary)
-- Qwen2.5-7B-Instruct (secondary, if time permits)
-
-### Test Set
-- 200 BigCodeBench states (50 existing + 150 extra)
-- 与训练 109 states 零重叠
-- 每个 state 评估 3 personas = 600 组对话
-
-### User Simulator
-- gpt-4o-mini (与训练轨迹一致)
-
-### Code Evaluation
-- BigCodeBench test cases, pass@1 / pass@5
+| | |
+|---|---|
+| Backbone | Llama-3.1-8B-Instruct |
+| Test set | `data/seeds/test_states_v29_eval_200.jsonl` — 200 canonical states,和 107 训练 states **零重叠**(4/21 verified) |
+| Personas | Novice-Learner / Experienced-Engineer / Busy-Developer(覆盖 tolerance × expertise 矩阵) |
+| User simulator | gpt-4o-mini(和训练轨迹一致) |
+| Code eval | BigCodeBench test cases, pass@1 / pass@5 |
 
 ---
 
-## Experiment 1: Main Task Performance
+## §5.1 Main Performance
 
 ### Research Question
-TactfulLLM 能否在 task success 和 user interruption 之间取得比 baselines 更好的 trade-off？
+TactfulLLM 在 pass@1 和 avg_turns 的 trade-off 上是否优于 baselines?
 
-### Methods
+### 5 个 conditions — 每个 ablate 一个轴
 
-| Method | Description | Training | Clarify Strategy |
-|---|---|---|---|
-| **TactfulLLM-DPO** (ours) | Persona-aware DPO | 500 pairs, QLoRA | Learned: persona-dependent |
-| **Direct Execution** | Masked query 直接生成代码 | None | Never clarify |
-| **Prompt-only** | System prompt 描述 persona，指示何时 clarify | None | Prompted |
-| **Always-Clarify** | 固定先问 K 轮再执行 | None | Fixed K turns |
-| **Base LLM** | Base Llama, no LoRA, no persona instruction | None | Model default |
+| Method | Ablates | Clarify 策略 |
+|---|---|---|
+| **TactfulLLM-DPO** (ours) | — | Learned, persona-conditioned |
+| Direct Execution | Clarification | 从不问 |
+| Prompt-only | Training | Persona 进 system prompt,无训练 |
+| Always-Clarify (K=1) | Learned policy | 固定先问 1 轮 |
+| Base LLM | Persona + training | 原版 Llama |
+
+这 5 个组合分别挡掉 reviewer "不用 clarify 行不行 / prompt 就够了吧 / 固定问一轮更简单 / LoRA 有用吗" 的四种反问。
 
 ### Metrics
-
-**Primary:**
-- **pass@1** — 首次代码生成通过率 (task success)
-- **Avg Clarification Turns** — 平均澄清轮数 (interruption cost)
-
-**Secondary:**
-- **pass@5** — top-5 代码通过率 (code quality ceiling)
-- **Clarify Rate** — clarify actions / total actions
-
-**Composite (三种方案都算，选效果最好的):**
-- **方案 A: Utility Score** — U = pass@1 - lambda * avg_turns, 画 lambda-sensitivity 曲线
-- **方案 B: Pareto Plot** — x=avg_turns, y=pass@1, 展示 Pareto frontier
-- **方案 C: Reward-based Utility** — 复用训练 reward 公式 (放 appendix)
-
-### Main Table (Overall, 不按 persona 拆)
-
-| Method | pass@1 | pass@5 | Avg Turns | Clarify% | Utility |
-|---|:---:|:---:|:---:|:---:|:---:|
-| TactfulLLM-DPO (ours) | | | | | |
-| Direct Execution | | | | | |
-| Prompt-only | | | | | |
-| Always-Clarify (K=2) | | | | | |
-| Base LLM | | | | | |
+- **Primary**:pass@1、Avg Clarification Turns
+- **Secondary**:pass@5、Clarify Rate
+- **Composite (主图)**:Pareto plot `x=avg_turns, y=pass@1`,看谁在 frontier
+- **Appendix**:λ-sensitivity 曲线 `U = pass@1 − λ · turns` — 给想看 scalar 的读者
 
 ### Figures
+1. **Pareto plot** — 一 method 一点
+2. **Success vs turn budget** — K ∈ [1, 6],截断对话到最多 K 轮(K 时 force Execute),重算 pass@1。数据从 Exp 1 复用,**不用重跑**。故事:TactfulLLM 的曲线平滑,赢在 "在对的时间问" 而非 "问得多"
+3. λ-sensitivity(appendix)
 
-**Figure 1: Pareto Plot**
-- x=avg_turns, y=pass@1, 每个 method 一个点
-- 展示谁在 Pareto frontier 上
-
-**Figure 2: Lambda-Sensitivity Curve**
-- x=lambda, y=utility, 每个 method 一条线
-- 展示在大多数合理 lambda 下 DPO 都赢
-
-**Figure 3: Success vs Turns Budget Curve (Efficiency Curve)**
-- x = turn budget (1, 2, 3, 4, 5, 6), y = pass@1
-- 每个 method 一条线
-- 含义：如果只允许最多 K 轮对话，各方法的 pass@1 是多少
-- 做法：对每个 method，截断到 turn budget K（超过 K 轮的对话在第 K 轮强制 Execute），统计 pass@1
-- 讲的故事：
-  - Direct Execution: 水平线（不 clarify，turns 无关）
-  - Always-Clarify: 在 K=固定轮 处突然跳升
-  - TactfulLLM: 曲线更平滑，early turns 就有收益（因为会根据 persona 选择最佳 clarify 时机）
-  - "我们不是靠多问赢的，是靠在正确时机问赢的"
-- 数据来源：从 Exp 1 评估结果中按 turn 截断重新计算，无需额外跑实验
-
-### Statistical Tests
-
-对 Exp 1 主表中所有 method 两两对比：
-- **Fisher's exact test** on pass@1 (200 states, binary pass/fail)
-- **Bootstrap confidence interval** (1000 resamples) for pass@1 差异
-- 主表加星号标注 significance: * p<0.05, ** p<0.01, *** p<0.001
-- Power analysis 已确认 200 states 可达 p~0.001 (见 v29_experiment_log.md §13.1)
-
-### GPU Cost Estimate
-- Direct Execution: ~6h (每 state 1 轮 Execute)
-- Prompt-only: ~20h (类似 DPO 评估)
-- Always-Clarify: ~20h
-- Base LLM: ~22h (50-state 已完成, 150-extra 待跑)
+### Statistical tests
+Pairwise Fisher exact on pass@1(200 states)+ bootstrap CI(1000 resamples)。Power analysis 已确认 200 states 能到 p ≈ 0.001(`v29_experiment_log.md §13.1`)。
 
 ---
 
-## Experiment 2: Information Recovery Analysis
+## §5.2 Recovery Analysis
 
 ### Research Question
-Clarification 能恢复多少因 masking 丢失的信息？恢复量与 clarification 轮次的关系？
+Clarification 实际恢复了多少 masked 信息?恢复量如何随轮数变化?
 
 ### Design
+**代码生成器固定 Base Llama(单轮 Execute),唯一变量 = 输入信息量**。
 
-固定代码生成器为 **Base Llama**（控制变量，唯一变化是输入信息量）。
-
-| Condition | Input | 说明 |
+| Condition | Input | 作用 |
 |---|---|---|
-| Full Query | 完整 instruct_prompt（原始自然 prose） | Task upper reference |
-| Masked + Ideal Disclosed | masked query + 原始 spec（bullet list，显式 "Additional information from clarification" 段） | Clarification ceiling |
-| Masked + Clarified (Novice) | masked query + 6 轮 Clarify 获得的信息 | 多轮实际恢复 |
-| Masked + Clarified (Experienced) | masked query + 1-2 轮 Clarify 获得的信息 | 少轮实际恢复 |
-| Masked + Clarified (Busy) | masked query + 0 轮 Clarify | = Masked Direct |
-| Masked Direct | masked query, 不 Clarify | 下界：零信息恢复 |
+| Full Query | 未 mask `instruct_prompt` | 上界 |
+| Ideal Disclosed v2 | masked query + bullet list 原始 spec | Clarification ceiling |
+| TactfulLLM Clarified (per persona) | masked + 学到的 clarify | 实际恢复值 |
+| Masked Direct | masked query | 下界 |
 
-### Ideal Disclosed 格式（v2，2026-04-21 更新）
+### 为什么 Ideal Disclosed v2,不是 v1
+v1 用 `masked_fields`(含 `Return type:` 等人造标签)+ `"; "` 单行分号。实测 pass@1 < TactfulLLM Overall,**违反 ceiling 预期** — 原因不是信息缺失,是 eval prompt 格式不自然。
 
-原始 v1 实现用 `masked_fields`（v29 split 后的条目，含 `Return type:` 等人造标签）+ `"; "` 单行分号。实测 pass@1 低于 TactfulLLM Overall，违反 ceiling 预期。原因是 eval prompt 格式不够自然。
-
-v2 改用 **`disclosure_info.specification`（原始未切分的 BigCodeBench spec 文本）** + **bullet list**：
-
-```
-{masked_query_with_code_template}
-You should write self-contained code starting with:
-```python
-...
-```
-
-Additional information from clarification:
-Key requirements:
-- {original spec of output_format}
-- {original spec of validation_rules}
-- {original spec of note_that}
-```
-
-**与 paper 定义的对齐**：
-- "masked query is supplemented" ✓
-- "ground-truth values of all masked fields" ✓（disclosure_info.specification = 被 mask 的原始 ground-truth 文本）
-- "appended as a structured list" ✓（bullet list）
-- "clarification ceiling" ✓（100% disclosure rate）
-
-**与 Full Query 的区别**（仍保持可区分）：
-- 信息位置：代码模板**后** vs Full Query 代码模板**前**
-- 整合方式：两段式 "主 query + Additional information" vs Full Query 单段自然 prose
-- 元信息：`Additional information from clarification:` 明示为澄清结果
+v2 改用 `disclosure_info.specification`(原始 BigCodeBench spec 文本)+ bullet list + 明确的 `Additional information from clarification:` 表头。修正后:
+- v2 pass@1 = 16.0% **精确等于** TactfulLLM Overall(canonical-200,McNemar p ≈ 1.00)
+- 仍和 Full Query 可区分:信息在代码模板**之后**、明示为澄清结果,vs Full Query 代码模板**之前**的单段 prose
 
 ### Metrics
+pass@1、Δ vs Full、**OGR = (method − direct) / (full − direct) × 100%**、Disc. rate(disclosure 比例)。
 
-- **pass@1** — 每个条件下的代码通过率
-- **Delta vs Full** — 与 Full Query 的差距
-- **Recovery Rate** — (Clarified - Direct) / (Full - Direct) * 100%
-
-### Main Table
-
-| Condition | pass@1 | Delta vs Full | Recovery Rate |
-|---|:---:|:---:|:---:|
-| Full Query (upper bound) | | — | 100% |
-| Masked + Ideal Disclosed | | | |
-| Masked + Clarified (Novice, ~6 turns) | | | |
-| Masked + Clarified (Experienced, ~2 turns) | | | |
-| Masked + Clarified (Busy, 0 turns) | | | |
-| Masked Direct (lower bound) | | — | 0% |
-
-### Data Source
-- Masked + Clarified 各 persona: 从 Exp 1 的 DPO 评估结果提取（无需额外跑）
-- Masked Direct: 从 Exp 1 的 Direct Execution baseline 提取（无需额外跑）
-- **Full Query: 需额外跑** — Base Llama + 200 unmasked states
-- Masked + Ideal Disclosed: 需额外跑或从 v29 Layer 2 数据推算
-
-### Cross-Experiment Connection (Exp 2 <-> Exp 1)
-
-将 Recovery Rate 与 Exp 1 的 downstream task success 关联分析：
-- 画 scatter plot: x = Recovery Rate, y = pass@1 improvement over Direct
-- 每个 persona 一个点（或每个 state 一个点）
-- 叙事: "We further correlate recovery rate with downstream task success to understand when additional interaction is beneficial."
-- 期望发现: Recovery Rate 与 pass@1 improvement 正相关，但存在边际递减（后几轮 clarify 恢复信息多但 pass@1 提升小）
-- 这给 reviewer 展示 cross-experiment reasoning，而非三个孤立实验
-
-### GPU Cost Estimate
-- Full Query baseline: ~6h (每 state 1 轮 Execute, no clarify)
-- Masked + Ideal Disclosed: ~6h (同上)
-- 其他条件: 复用 Exp 1 数据, 0h
+### Cross-experiment link (Exp 2 → Exp 1)
+Scatter:x=recovery rate,y=pass@1 improvement over Direct,每 persona 一点。预期正相关 + 高 disclosure 边际递减。**给 reviewer 一个 cross-experiment 故事,而非三个孤立 table。**
 
 ---
 
-## Ablation Study (替代原 Exp 3)
-
-> 2026-04-16 决定：Exp 3 Cross-Persona Swap 砍掉，改为 Ablation Study。
-> v30 disclosure-aware 尝试失败（pass@1 全面崩盘），回退到 v29 代码。
-> Ablation 改为验证两个 input signal 的贡献：Persona 和 Task Uncertainty。
+## §5.3 Generalization to Out-of-Distribution Tasks
 
 ### Research Question
-TactfulLLM 的 persona-conditioned 和 task-conditioned 决策信号各自贡献多少？
+**零额外训练**,TactfulLLM 的 persona-aware clarification 在另一个 code domain 上是否仍然有效?
 
-### Design
+### 为什么一定要做
+§5.1 和 §5.2 训练和评测全在 BigCodeBench。审稿人一定会写:
+> "Are the gains an artifact of the BigCodeBench masking template? Does the clarify-execute behavior survive a domain shift?"
 
-保持 v29 DPO pairs 不变，只修改 `render_state.py` 中 prompt 格式，重训 + 评估：
+不跑这个实验就是把这个质疑主动让出去。
 
-| Variant | 改了什么 | Prompt 变化 | 训练成本 | 评估成本 |
-|---|---|---|:---:|:---:|
-| TactfulLLM (full) | — | 完整 prompt | 0 (已有) | 0 (已有) |
-| w/o Persona | 移除 `[User Profile]` 块 | 无 Type/Patience/Expertise | ~17min | ~7h (50-state) |
-| w/o Uncertainty | 移除 `Task Uncertainty` 行 | 无 uncertainty 数值 | ~17min | ~7h (50-state) |
+### 为什么选 DS-1000(benchmark 对比)
 
-### Implementation
-- `render_state.py` 加 `ablation_mode` 参数：`"no_persona"` / `"no_uncertainty"`
-- 通过 `ABLATION_MODE` 环境变量传入训练和评估脚本
-- 代码已实现（在 v30 commit 后 revert，需重新添加）
+| 候选 | 否决理由 |
+|---|---|
+| HumanEval + 删示例 mask | 和 BigCodeBench 同是 Python utility domain(**weak domain shift**),只有 1 个 maskable 字段 |
+| **RECODE-H** | (a) **8B 地板崩**:论文自己的 Table 2,GPT-5 L0=6.0%,DeepSeek-V3.1 L0=5.1%,L4 最高 21% — 我们的 8B 大概率 0-3%,floor effect 吞所有 method 差异。(b) **Paradigm 不对等**:他们的 multi-turn 是 code-debugging feedback(L0-L4 hierarchy),不是 spec clarification,我们的 masking + persona 协议套不进去 |
+| APPS-Competition / LiveCodeBench-hard / ClassEval | 同 8B 地板问题 |
+| BigCodeBench-Hard | 同分布,只能叫 difficulty generalization,挡不住 domain 质疑 |
+| **DS-1000** ✓ | **Strong domain shift**(data science: pandas/numpy/scipy/…)+ 8B pass@1 20-28%(有信号)+ 天然多个 maskable 字段 |
 
-### Metrics
-- pass@1, pass@5, Avg Turns, Rejection Rate, OGR
+### Design(零训练)
+- TactfulLLM-Llama (v29) 权重不变
+- 对 DS-1000 problem description 应用同构 masking 协议
+- 同一套 eval pipeline,同一套指标
 
-### 期望结果
-- w/o Persona: 三个 persona 行为趋同（无法区分用户类型），Avg Turns 偏离理想值
-- w/o Uncertainty: 模型无法感知任务复杂度，对简单/复杂任务采用相同策略
+**Conditions — 只跑 3 个,minimal viable table**:
 
-### 叙事
-"Calibrated proactivity depends on both user-conditioned (persona) and
-task-conditioned (uncertainty) decision signals."
+| Condition | 次数 |
+|---|:---:|
+| Direct Execution | 200 |
+| TactfulLLM v29 | 200 × 3 personas = 600 |
+| Oracle (Full Query) | 200 |
+
+共 1000 conversations,单 GPU ~15-20h。不跑 Clarify-first / Prompt-only(nice-to-have,非 must-have)。
+
+### Subset
+全量 1000 超预算。**分层采样 200 个**(按库占比,seed=42):
+Pandas 60 / NumPy 45 / Matplotlib 30 / Sklearn 25 / SciPy 20 / PyTorch 15 / TensorFlow 5。
+200 和主实验规模一致,统计功效足够。
+
+### Masking 字段(对齐 BigCodeBench 风格)
+
+| 字段 | BigCodeBench 对应 | DS-1000 样例 |
+|---|---|---|
+| `expected_output_shape` | output_format | "DataFrame with columns [...]" / "shape (N, 3) array" |
+| `expected_library_api` | (新增) | "using pandas.groupby" |
+| `input_constraints` | input_constraints | "assume x non-negative" |
+| `edge_case_behavior` | validation_rules(可选) | "return None on empty input" |
+
+DS-1000 是自然 prose,regex 不稳。用 **gpt-4o-mini LLM-assisted span extraction** + **20 条人工抽检 gate**,再全量。
+
+### Success criteria
+两条都满足 → strong generalization:
+1. Direct vs Oracle ≥ 5pp(masking 在 OOD 上有信息量)
+2. TactfulLLM vs Direct ≥ 3pp 且 **OGR ≥ 30%**(主实验 Overall 48%)
+
+若再满足:
+3. Per-persona turns 分化保留(Busy < Exp < Novice)
+
+若 (3) 不成立但 (1)+(2) 成立:prose 坦承 "clarification skill transfers; behavioral differentiation weakens under OOD" — 仍可写。
 
 ---
 
-## Timeline (updated 2026-04-16)
+## §5.4 Ablation
 
-| Date | Task | Status |
-|---|---|---|
-| 4/10 - 4/12 | v29: 轨迹生成 + DPO 训练 + 50-state 评估 | ✅ |
-| 4/12 - 4/14 | 200-state 扩大评估 (DPO + Base) | ✅ |
-| 4/14 - 4/15 | Exp 1 baselines: Prompt-only, Direct, Clarify-first | ✅ |
-| 4/15 | Exp 2: Oracle + Ideal Disclosed 实现 | 🏃 |
-| 4/16 | v30 尝试 (disclosure-aware) → 失败，回退 v29 | ✅ (abandoned) |
-| **4/17** | **Ablation: w/o Persona + w/o Uncertainty 训练** | **Pending** |
-| 4/17 - 4/18 | Ablation 50-state 评估 | Pending |
-| 4/18 - 4/19 | Exp 2: Full Query + Ideal Disclosed 评估 | Pending |
-| 4/20 - 4/25 | Qwen backbone (masking → 轨迹 → DPO → 评估) | Pending |
-| 4/25 - 5/05 | 论文写作 + 补充实验 | Pending |
-| 5/06 | NeurIPS deadline | |
+### Research Question
+Persona(user signal)和 Uncertainty(task signal)两个输入信号各贡献多少?
+
+### Design
+保持 v29 DPO pairs 不变,只改 `render_state.py` 的 prompt,重训 + 评估。
+
+| Variant | Prompt 改动 |
+|---|---|
+| TactfulLLM (full) | Persona block + Uncertainty |
+| w/o Persona | 移除 `[User Profile]` |
+| w/o Uncertainty | 移除 `Task Uncertainty` |
+
+通过 `ABLATION_MODE` env var 传进训练和评估脚本。
+
+### Results(100-state,4/17 完成)
+- **w/o Persona** → turns ≈ 1.0(三 persona 分化完全消失),pass@1 14.0% → 11.0%
+- **w/o Uncertainty** → turns 8.0 / 2.6 / 1.0(分化在),pass@1 14.0% → 10.7%
+
+**解读**:Persona 控制 *何时问*,Uncertainty 控制 *问了有没有用*。
+
+### Narrative
+> Calibrated proactivity requires both user-conditioned (persona) and task-conditioned (uncertainty) decision signals.
+
+---
+
+## Timeline(剩余)
+
+| 日期 | 任务 |
+|---|---|
+| ✓ by 4/24 | §5.1 / §5.2 / §5.4 runs done(详见 `work_log.md`) |
+| **4/25** (今天,GPU 在跑 Qwen v31.4) | 下 DS-1000 + inspect 数据 + 起草 `scripts/ds1000_mask.py` |
+| 4/26 | Qwen 完毕 → LLM mask 200 条 + 20 条人工抽检 + eval adapter + 10-task dry run |
+| 4/27 – 4/28 am | DS-1000 eval 1000 conversations(~20h) |
+| 4/28 pm | 算 OGR + 建表 + figure |
+| 4/29 – 5/5 | 论文写作 + polish |
+| **5/6** | Submit |
 
 ---
 
 ## File References
 
-| File | Description |
+| File | Purpose |
 |---|---|
-| `docs/v29_experiment_log.md` | v29 详细实验记录 (masking, training, eval) |
+| `docs/v29_experiment_log.md` | v29 详细实验记录(masking / training / eval) |
+| `docs/v31_experiment_log.md` | v31 诊断 + Busy T1 Execute 分析 |
+| `docs/generalization_experiment_plan_20260423.md` | §5.3 的早期草稿(已被本文档合并) |
 | `docs/work_log.md` | 每日工作记录 |
-| `eval/evaluate_multi_turn_persona.py` | 多轮评估脚本 (已加增量写入+断点续跑) |
-| `models/v29_100states/` | DPO LoRA adapter |
-| `data/seeds/test_states_v29_eval_50.jsonl` | 50-state 测试集 |
-| `data/seeds/test_states_v29_eval_150extra.jsonl` | 150-extra 测试集 |
-| `outputs/eval_v29_100states_50test.json` | DPO 50-state 评估结果 |
-| `outputs/eval_v29_base_llama_50test.json` | Base 50-state 评估结果 |
+| `eval/evaluate_multi_turn_persona.py` | 多轮评估脚本(增量写入 + 断点续跑) |
+| `data/seeds/test_states_v29_eval_200.jsonl` | Canonical-200 测试集 |
+| `models/v29_100states/` | TactfulLLM DPO LoRA adapter |

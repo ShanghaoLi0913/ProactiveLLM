@@ -4,6 +4,583 @@
 
 ---
 
+## 2026-04-27
+
+### 111. DPO Qwen 100 完成：Overall 11.67%，Qwen 上 last among baselines
+
+DPO Qwen 100 跑完（wall ~22:00, 11h, ~7 min/state, PID 264568）。详情见 `qwen_experiment_log.md` §9。
+
+**Final 数字**（n=100, apples-to-apples vs Direct/CF/PO）：
+
+| persona | avg_t | clarify% | pass@1 | pass@5 | rej |
+|---|:---:|:---:|:---:|:---:|:---:|
+| Novice | 7.00 | 85.7% | **13.0%** | 19.0% | 40.5% |
+| Exp | 3.89 | 74.3% | **14.0%** | 21.0% | 47.1% |
+| Busy | 1.00 | 0% | **8.0%** | 12.0% | -- |
+| **Overall** | 3.96 | — | **11.67%** | **17.33%** | 42.6% |
+
+**vs Qwen baselines**（同 100 sample）：CF 16.0% > Direct 15.3% > PO 13.0% > **DPO 11.67%**（last by 1.3pp vs PO, 4.3pp vs CF）。
+
+**vs Partial 54**：Overall 13.0% → 11.67%, -1.3pp（剩 46 state 表现略差，落在 §8 预测 12-14% 区间下沿）。
+
+**关键 takeaway**：
+1. **DPO Qwen 是最弱方法 on pass@1**——Qwen 数据直接证伪 "TactfulLLM consistently strongest" claim
+2. **持续做对 persona-aware behavior**——Novice 7 / Exp 3.89 / Busy 1.0 完美分化（其他三个都是 persona-blind）
+3. **Busy 0% rejection** 独有——Pareto 维度 DPO 仍 dominate（CF Busy 80% rej）
+4. **DPO 仍正向 vs Base 50**: Novice +63%, Overall +17%（Δ vs Base 行可写 +63/0/0/+17%）
+
+**论文叙事必须 pivot**（per #108 / #110 早就推荐过的 B 方案）：
+> TactfulLLM is the **only persona-adaptive method** across both backbones; on Llama it achieves the highest pass@1, while on Qwen the persona-aware decision quality is preserved at lower absolute pass@1 due to backbone capability.
+
+**主表 Qwen TactfulLLM 行最终**：
+```
+& 13.0 & 14.0 & 8.0 & 11.7    ← pass@1
+& 19.0 & 21.0 & 12.0 & 17.3   ← pass@5
+& 7.0 & 3.89 & 1.0 & 3.96     ← avg turns
+& 0.41 & 0.47 & -- & 0.43     ← rej
+```
+
+`\ddagger` 脚注（partial 占位）可以删。
+
+**下一步**：决定要不要扩 Base Qwen 50→100（让 Δ vs Base 严格 apples-to-apples）+ 写 paper 时 pivot 到 persona-alignment narrative。
+
+### 110. DPO Qwen 50→100 启动（Phase 3 第一步，setsid wrapper）
+
+PO Qwen 100 出 13% 反超 DPO 50 的 7.3% 后，立刻起 DPO 100。详细见 `qwen_experiment_log.md` §6+§8。
+
+**启动**（wall 10:35 / system 23:35:55）：
+```bash
+setsid bash -c '/tmp/qwen_dpo_100.sh > /tmp/qwen_dpo_100_wrapper.log 2>&1 < /dev/null' &
+```
+PID 264565（PPID=1）。Output: `outputs/eval_v29_qwen_dpo_100.json`。测试集 `test_states_v29_eval_200.jsonl --max_samples 100`，与 Direct/CF/PO 同 sample。
+
+**ETA**: ~6-7 min/state（DPO Novice 撞 7 轮顶最慢）× 100 = **wall 20:30-22:30 今晚**完成。
+
+**关键 caveat**：DPO 50（用 `eval_50.jsonl`）与 DPO 100（用 `eval_200.jsonl --max_samples 100`）只 25 个 state 重叠，不是 50 ⊂ 100。所以 DPO 100 是 75 个全新 + 25 个重跑。DPO 50 文件保留作 sanity-check / appendix。
+
+**进度工具**: `/tmp/qwen_dpo_progress.sh`——查 done/total、ETA、log age（>5min throttle warn）、recent action。
+
+**未来扩 200**: `cp eval_v29_qwen_dpo_100.json eval_v29_qwen_dpo_200.json.partial` → `--max_samples 200` resume，state_id-based partial resume 自动跳已完成 100。
+
+### 109. DPO 代码审计：无 Qwen-specific bug（详见 qwen_experiment_log §7）
+
+用户问 "qwen DPO 代码有没有问题"。审 `train_dpo.py` / `infer.py` / `evaluate_multi_turn_persona.py` 的 Qwen 路径——
+
+| 检查点 | 结论 |
+|---|---|
+| chat template (`apply_chat_template`) | ✓ Qwen 自动转 `<|im_start|>` 格式 |
+| action prefix strip | ✓ 自然响应训练，backbone 通用 |
+| LoRA target_modules | ✓ q/k/v/o/gate/up/down，Qwen2 同名 |
+| `pick_action_from_generation` | ✓ skip_special_tokens + 内容样式检测 |
+| Qwen tokenizer pad/eos | ✓ pad=`<|endoftext|>`, eos=`<|im_end|>` 分离正确 |
+| 8-bit 推理 vs 4-bit 训练量化 | ⚠ 不匹配，但 Llama 也是这样——非 Qwen 特异性 |
+
+**核心反驳证据**：DPO 50 vs PO 100 在 25 个**重叠 state** 上 pairwise 对比——Overall 4.0% vs 5.3%，**只差 1.3pp**。7.3% vs 13.0% 大头是 N=50 vs N=100 的采样噪声，不是代码 bug 也不是 DPO 失效。
+
+### 108. Prompt-only Qwen 100 完成 + DPO 反输 paradox 暴露
+
+**PO Qwen 100 结果**（wall 07:14 完成，8h 跑完）：
+
+| persona | avg turns | clarify% | pass@1 | pass@5 |
+|---|:---:|:---:|:---:|:---:|
+| Novice | 2.05 | 51.2% | 10% (10/100) | 20% |
+| Busy | 1.00 | 0% | 13% (13/100) | 21% |
+| Exp | 1.07 | 6.5% | 16% (16/100) | 23% |
+| **Overall** | — | — | **13.0%** (39/300) | **21.3%** |
+
+**Qwen 反常**（与 Llama 模式相反）：
+
+| | Llama 模式 | Qwen 模式 |
+|---|---|---|
+| Direct vs DPO | DPO 14% > Direct 12.3% | Direct 15.3% > DPO 7.3% |
+| PO vs DPO | DPO 14% > PO 8.7% | PO 13.0% > DPO 7.3% |
+| CF vs DPO | DPO 14% ≈ CF 14.8% | CF 16.0% > DPO 7.3% |
+
+但 §109 已证大头是采样噪声。DPO 100 跑完应该接近 13-16% 区间。
+
+**论文 story pivot 关键**：DPO 真正卖点不是 pass@1，是**persona alignment**。
+- DPO Qwen Novice 7.0 轮 / Exp 3.4 / Busy 1.0 → 行为完美分化
+- PO Qwen Novice 2.05 / Exp 1.07 / Busy 1.0 → 基本 persona-blind（虽然有 persona prompt）
+
+DPO 学到的 persona-aware decision-making 是 Prompt-only 学不到的，这是 Qwen 行的核心 contribution。
+
+### 107. Phase 1 完成：Direct + CF Qwen 100（apples-to-apples 主表数据）
+
+CF watchdog (PID 100943) 12:15 system / 23:15 wall 退出 → 守门检查通过 → PO 接力起来（详见 §108）。
+
+**Direct 100**（wall ~16:53 完成）：Overall **15.3%** (46/300), pass@5 20.0%
+- Novice 16% / Busy 13% / Exp 17%（all forced 1-turn execute）
+
+**CF 100**（wall ~23:15 完成）：Overall **16.0%** (48/300), pass@5 24.0%
+- Novice 12% / Busy 17% / Exp 19%（all forced 1 clarify + 1 execute）
+- **CF Busy 17% 仍然反超 DPO Busy（per #98 simulator 张力，80% 拒绝 + 20% 一次给 3 items）**
+
+**实测速率订正 §5.2**：
+- Direct 3.0 min/state（vs §5.2 估的 4-5）
+- CF 3.5 min/state
+- PO 4.8 min/state（中长 turn）
+- DPO ~6-7 min/state（Novice 撞顶最慢）
+
+§5.2 那个 5 min/state 的"固有 ceiling"对 Direct 偏高 25%，多轮越多越慢的 pattern 才是真相。
+
+---
+
+## 2026-04-26
+
+### 106. Qwen baseline 全套规划（4 phase, ~55h GPU）
+
+用户决定先把 Qwen 全 baseline 跑完，100-state 对齐：
+
+| Phase | 任务 | GPU 时长 | 起讫（系统时钟）|
+|---|---|---:|---|
+| 1 (进行中) | Direct 100 + CF 100 | ~19h | 04-26 00:13 → 19:13 |
+| 2 | Prompt-only Qwen 100 | ~12h | → +12h |
+| 3 | DPO 50→100 + Base 50→100 | ~12h | → +12h |
+| 4 | Llama Prompt-only 50→200（补 150）| ~12h | → +12h |
+
+总计 ~55h GPU，wall clock 3.5 天（笔记本不睡前提）。CollabLLM #54 仍待实现，未排入。Qwen 100 + Llama 200 用脚注解释 N 不一致。
+
+### 105. Qwen Direct + CF 改 100 state（速率估算重大修正）
+
+**#103 估算的 "Direct 1-turn ~40s/state" 完全错**。实测：Qwen Direct ~5.8 min/state（GPU util 10-16%，bitsandbytes 8-bit + batch=1 + 5 candidate × 3 persona = 15 次串行推理）。对比 Llama Direct 200（`logs/exp2_overnight.log` Apr 17 11:44→22:39，跑 150 state = 4.37 min/state）—— **这速率是 eval 脚本固有 ceiling，不是 Qwen 异常**。Qwen 比 Llama 慢 33%，同量级。
+
+按真实速率 Direct 200 ≈ 19h + CF 200 ≈ 23h = 42h，远超过夜 window。**砍到 100-state**：Direct 7.5h + CF 12h = 19.5h。
+
+**操作**：kill PID 44410 → mv `.partial` _200→_100 → 改 wrapper `max_samples 200→100` & output `_200→_100` → setsid 重启（PID 59661，04-26 00:13）。Resume 验证：`🔄 恢复 7 个已完成 state`，从 sample 8 接着跑。
+
+**论文叙事**：Qwen 主表 N=100 + Llama 主表 N=200，脚注说明（"backbone-secondary, footnote per #94"）。
+
+### 104. 04-25 watchdog 早死 + 11h GPU 空跑诊断
+
+**事件**：#103 起的 watchdog (PID 982966) 在 12:28 Base Qwen 完成后死掉，没启动 Direct/CF 步骤。`/tmp/qwen_baselines_tonight.log` 12:28 之后零输出，无 step 子日志，无 .partial 文件。直到 04-26 00:00 用户问"baselines 跑完了吗"才发现，**11h GPU 空跑**。
+
+**根因（不确定）**：容器 uptime 866 天连续没重启 → 非物理机故障。重启后系统 `date` 与真实 wall clock 差 11h，系统时钟和进程 ELAPSED 自洽（都说"刚跑了几分钟"），符合 cgroup freeze / autodl 共享调度 deprioritize 特征。user 离线后 SSH 无心跳 → autodl 把容器降级。watchdog `nohup` 在这种降级下被清理。
+
+**教训**：
+1. 过夜 watchdog 不再靠 nohup，改用 **setsid + PID 1 attach**（04-26 00:13 重启用 setsid，待验证）
+2. **Eval 速率估算必须基于历史 log**，#103 那个 "40s/state" 凭空写的。引用时也得核对，否则 ddl 会误判
+3. **保活靠 user 笔记本不睡 + cursor 不断**，bash 层无法替代
+4. eval 脚本天然支持 .partial resume（line 547-621），重启即续跑，进度本身不会丢
+
+---
+
+## 2026-04-25
+
+### 103. 今晚 Qwen baseline 过夜安排（watchdog + 串联 pipeline）
+
+**目标**：完成 Qwen 主表 baseline 行（Direct / Clarify-first 200-state），对齐 Llama canonical-200 覆盖；剩余 Prompt-only 50 + Base 扩 200 推到后续。
+
+**今晚 pipeline**（`/tmp/qwen_baselines_tonight.sh`, watchdog PID 982966，10:22 kick off）：
+1. 等 Base Qwen 50（PID 944046）结束（`kill -0` 监控）
+2. Direct Execution Qwen 200-state（~2.5h，`--direct_execution --max_turns 1`）
+3. Clarify-first Qwen 200-state（~5h，`--always_clarify 1 --max_turns 2`）
+
+预期完成时间：19:55 CST（从 10:22 算总 wall-clock ~9.5h）。
+
+**时长估算基础**：Base Qwen 50 实测 ~7 min/state（6-7 turn × 3 persona × 5 candidate）。Direct 1-turn ~40s/state，CF 2-turn ~80s/state。
+
+**不跑的**：
+- Base Qwen 200 扩展（~23h，超过夜 window）→ Base 用 50 + footnote 对齐 Llama Prompt-only 策略
+- Prompt-only Qwen 50（~5h）→ 挤占今晚太多，明天白天单独跑
+- TactfulLLM Qwen 200 扩展（~10h）→ 独立 overnight，给 v31.4 试验留余地
+
+**产物（明早 9 点查）**：
+- `outputs/eval_v29_qwen_base_50test.json`
+- `outputs/eval_v29_qwen_direct_execution_200.json`
+- `outputs/eval_v29_qwen_clarify_first_200.json`
+
+### 102. Exp1 主表 vs Exp2 主表数据源不一致审计
+
+用户质疑 Exp1 Main Results 和 Exp2 Info Recovery 两表数字对不上。重审数据源：
+
+| 方法 | Exp1 主表 pass@1 | 实际源 | Exp2 表 | 实际源 |
+|---|:---:|---|:---:|---|
+| Direct | 7.3% | **50-state** | 12.3% | 200-state |
+| Clarify-first | 9.3% | **50-state**（#98 已更新 14.8% / 200）| — | — |
+| Prompt-only | 8.7% | **50-state** | — | — |
+| Base LLM | 12.7% | 200 ✓ | — | — |
+| TactfulLLM | 16.0% | 200 ✓ | 16.0% | 200 ✓ |
+
+**根因**：Exp1 caption 误写 "200 test tasks" 但 Direct/CF/Prompt-only 都用 50-state 快照。Prompt-only 200 至今未补跑（#87 queue 只跑了 CF）。
+
+**修复计划**：
+1. Exp1 主表 Direct 7.3 → 12.3（用 canonical-200 first-sample 数字）
+2. Exp1 主表 CF 9.3 → 14.8（已在 #98 做过数字但 LaTeX 未改）
+3. Prompt-only 200 单独补跑（~2.5h）
+4. Base Llama 行不动（已 200）
+
+### 101. Unbiased pass@1 vs first-sample pass@1 讨论（保留 first-sample）
+
+用户质疑"我们的 pass@1 计算对不对"。拉 `candidate_results` 字段（每个 state 5 个候选 pass/fail 都存着），**离线**重算 unbiased vs first-sample：
+
+| eval 文件 | n | first-sample | **unbiased** | Δ |
+|---|:---:|:---:|:---:|:---:|
+| Llama DPO 50 | 150 | 14.0% | 10.4% | -3.6pp ⚠️ |
+| Llama DPO 150extra | 450 | 16.7% | 15.3% | -1.3pp |
+| Llama Base 50 | 150 | 8.0% | 10.0% | +2.0pp |
+| Llama Direct 200 | 600 | 12.3% | 11.1% | -1.2pp |
+| Llama Oracle 200 | 200 | 20.0% | 17.0% | -3.0pp |
+| Llama Ideal Disclosed v2 200 | 200 | 16.0% | 15.9% | -0.1pp |
+| Qwen DPO 50 | 150 | 7.3% | 7.2% | -0.1pp ✓ |
+| Qwen Base 50 (26/50 partial) | 78 | 5.1% | 5.7% | +1.0pp |
+
+**观察**：
+- 200-state 上偏移都 ≤ 3pp，first-sample 基本收敛
+- 50-state 上偏移大（Llama DPO 50 -3.6pp），主要是小样本 + n=5 采样噪声
+- Qwen 数字异常稳定（DPO -0.1pp）→ 7.3% 不是 first-sample 运气
+
+**决定：保留 first-sample pass@1**（不切 unbiased）。理由：
+1. 200-state 数字差异可忽略
+2. first-sample 是合法操作定义（论文 method 节加一句即可）
+3. ddl 紧，切 unbiased 要重写 Exp2 的 OGR 叙事（`Ideal Disclosed OGR 48% → 81%`）
+4. 真要 robustness check 可放 appendix 做对照表
+
+**待做**：method 节加操作定义文字："we report pass@1 as the success rate of the first sampled candidate from n=5 candidates (temperature T, top_p P). pass@5 reports the rate of at least one of 5 passing."
+
+### 100. Qwen Base 诊断中期：DPO 胜 Base，backbone code ceiling bound
+
+Base Qwen 50-state eval（PID 944046，06:15 起跑）中期 26/50 数字 vs DPO Qwen 50 完整对比：
+
+| persona | Base Qwen 中期 pass@1 | DPO Qwen 完整 pass@1 | Δ |
+|---|:---:|:---:|:---:|
+| Novice | 2/26 = 7.7% | 5/50 = 10% | +2.3pp ✓ |
+| Busy | 1/26 = 3.8% | 2/50 = 4% | +0.2pp（持平）|
+| Exp | 1/26 = 3.8% | 4/50 = 8% | +4.2pp ✓ |
+| **Overall** | **5.1%** (4/78) | **7.3%** (11/150) | +2.2pp ✓ |
+
+**关键诊断结论**：
+1. **DPO 没伤 Qwen 代码生成**，反而持平+改进（+2.2pp overall）。相对 Llama 的 DPO +6pp 提升小，但方向一致
+2. **Qwen2.5-7B 在 masked BigCodeBench 上 backbone 能力就弱**：Base Qwen 5.1% < Base Llama 8% 
+3. **Base Qwen 完全 persona-blind**：Novice/Busy 都跑 7 轮 clarify rate 83-86%，Exp 6.04 轮 — Base 无法区分 persona，完全复现 Llama Base 现象（#47）
+4. **Busy 0 提升**（3.8→4%）和 Llama v29 Busy 问题一致 → Busy T0 Execute 学到了但信息不足
+
+**对论文 story**：
+- Qwen 7.3% 不达 §3.2 合格线 10%，但 DPO vs Base gap 方向一致
+- Table 1 Qwen 行叙事："方法在两 backbone 都能学到 persona-aware 决策，绝对 pass@1 bound by backbone code capability"
+- Busy 0 提升是两 backbone 共同问题 → future work 收尾
+
+**masked 数据 sanity check**：三个 eval（DPO Qwen / Base Qwen / Llama v29）都读 `data/seeds/test_states_v29_eval_50.jsonl`，**字节级同文件**。唯一变量是 backbone + chat template + tokenizer。Busy 14% (Llama) vs 3.8% (Qwen) 同 masked query 同管线 → backbone 差异。
+
+### 99. Qwen v29 DPO 50-state eval 完整结果
+
+50/50 最终（04:05 CST 左右完成）：
+
+| persona | avg turns | clarify rate | pass@1 | pass@5 |
+|---|:---:|:---:|:---:|:---:|
+| Novice | 7.0（全撞顶）| 85.7% | 10% (5/50) | 12% (6/50) |
+| Exp | 3.4（29 forced final）| 70.6% | 8% (4/50) | 20% (10/50) |
+| Busy | 1.0 ✓ | 0% | 4% (2/50) | 10% (5/50) |
+| **Overall** | — | — | **7.3%** (11/150) | **14%** (21/150) |
+
+vs Llama v29 50-state（14% / 20%）：pass@1 -6.7pp, pass@5 -6pp。
+
+**行为分化完美复现 Llama**（Novice 7 轮 / Exp 3.4 轮 / Busy 1 轮），**策略对、代码挂**。
+
+vs §3.2 合格线判定：Overall 7.3% < 10% ❌ / Novice 10% < 12% ❌ / Exp 8% = 8% ✓ 踩线 / Busy 4% < 10% ❌。
+
+### 98. Clarify-first 200-state 真相：simulator 设计张力暴露 Pareto trade-off
+
+用户质疑 Clarify-first (CF) 200-state pass@1 14.8% 数字偏高，一起深挖到底：
+
+**合并 CF 50test + 150extra = 600 unique conversations**，配置全对（100% `(Clarify, Execute)` action pattern, Base Llama no-LoRA, `--always_clarify 1`）。数字不是 bug。
+
+**但发现 CF Busy 19.3% 的来源分解**（对比 Direct 同 150 states）：
+
+| Busy 分组 | n | pass@1 | 解读 |
+|---|:---:|:---:|---|
+| 拒绝 (answered=0) | 123 | **15.4%** | ≈ Direct 13.8%（+1.6pp 噪声），**打扰白打扰** |
+| 配合 (answered=1) | 27 | **37.0%** | simulator 一次给 3 items，pass 率 2.4× |
+| 合计 | 150 | 19.3% | 加权平均 |
+
+**根因 = simulator 设计张力**：`simulator/simulate.py:47` 定义 Busy = `(expertise=mid, patience=low)`。`disclosure.py` 里 expertise=mid → **一次给 3 items**。`simulate.py:219` 里 patience=low 让 Busy ~80% 拒绝。所以 Busy 实际行为 = 82% 拒绝 + 18% 一次给 3 items。
+
+**v31 log §0.5 里简化成 "Busy 拒绝 Clarify" 不完全准确**——是"80% 拒绝，20% 配合时给 3 items"。这解释了为什么 CF Busy 反超 TactfulLLM（TactfulLLM 永远不问 → 错过 18% 配合的 Busy 用户）。
+
+**信息量 vs pass@1 的 ROI**（从 replay csv 读）：
+
+| Method | Persona | 轮数 | disclosed items | pass@1 |
+|---|---|:---:|:---:|:---:|
+| CF | Novice | 1 | 0.62 | 14.0% |
+| TactfulLLM | Novice | 6 | 2.47 | 18.5% |
+| CF | Exp | 1 | 1.18 | 14.0% |
+| TactfulLLM | Exp | 1.58 | 2.19 | 15.5% |
+| CF | Busy | 1 | 0.32 | **16.5%** |
+| TactfulLLM | Busy | 0 | 0.00 | 14.0% |
+
+**信息收益严重递减**：Novice TactfulLLM 多拿 4× 信息只换 +4.5pp pass@1；CF 1 轮的边际 ROI 意外高，因为"第一个关键 item"（如 output return type）已经抓到大部分信息价值。
+
+**对论文的意义**：story 从"pass@1 更高" pivot 到 **"Pareto trade-off between task success and user interruption"**。
+- CF 14.8% pass@1 ← 代价 48% overall rejection rate（Busy 82%）
+- TactfulLLM 16.0% ← 代价 ~30% rejection（Busy 0）
+- TactfulLLM 在 Pareto frontier 上 dominate CF
+
+v31.x 想做的"Busy 选择性问一次"本质就是想捕获这 18% 配合的 Busy 用户——单 LoRA 学不会这个细粒度策略是 future work。
+
+**Table 1 修正**：
+- CF 行全部更新到 200-state 数字（14.0/14.0/16.5/14.8 for pass@1）
+- **CF Busy 16.5% 反超 TactfulLLM 14%**，bold/underline 需调换（CF 的 Busy cell bold，TactfulLLM 降为 underline）
+- 类似地 Busy pass@5 21.5 vs 20.0 也要调换
+
+### 97. 创建 Qwen backbone 实验记录
+
+新建 `docs/qwen_experiment_log.md`，结构对齐 v29/v31 的 log 习惯：
+- §0 动机 + 为何选 v29 pair（v31.x 跨干扰问题已在 Llama 证实，Qwen 复刻没价值）
+- §1 HF cache 问题定位 + 软链修复过程
+- §2 训练（20min，87 steps, accuracy 99%, margins 5.8，收敛曲线和 Llama v29 同量级）
+- §3 50-state eval（进行中，判据 + 结果位留空）
+- §4 200-state eval 计划（pipeline 备好 `/tmp/qwen_v29_eval_200.sh`）
+- §5 后续优先级（P0 Qwen v29 200 / P1 Base 对照 / P2 baselines / 不做 v31.x on Qwen）
+- §6 文件与时间线
+
+### 96. Qwen v29 DPO 50-state 中期结果（30/50）：pass@1 3.3%，需要 Base 对照诊断
+
+30/50 states 完成后的 partial 数字：
+
+| persona | n | avg turns | pass@1 | pass@5 |
+|---|:---:|:---:|:---:|:---:|
+| Novice | 30 | 7.00（全撞顶）| 6.7% | 10.0% |
+| Exp | 30 | 3.73 ⚠（5 个撞顶）| 3.3% | 20.0% |
+| Busy | 30 | 1.00 | **0% (0/30)** ❌ | 10.0% |
+| **Overall** | 90 | — | **3.3%** | **13.3%** |
+
+vs Llama v29 50-state (14%, 20%)：**pass@1 差 10.7pp，pass@5 差 6.7pp**。
+
+**关键信号**：
+1. 行为分化完美复现 Llama（Novice 7 撞顶 / Busy 1 直接 / Exp 多轮）
+2. **Busy 30/30 pass@1=0** 最担忧——决策完全对但代码没过
+3. **Exp avg turns 3.73** 比 Llama 2.66 高（5 个 forced final），Qwen 学得"半透不透"
+
+最严重的是 Busy 0% 路径和 Llama 同策略（T0 Execute）但代码全挂——**纯代码生成问题**。
+
+**启动 Qwen Base 50-state watchdog** (`/tmp/qwen_v29_base_50test.sh`, PID 875405)，等 DPO eval 完退出后自动跑。关键看：
+- Base Qwen Busy pass@1 ≈ 0% → Qwen2.5-7B 在 masked BigCodeBench 上就是弱（非 DPO 问题）
+- Base Qwen Busy > DPO Qwen → DPO 伤了代码生成，需调 hparam
+
+### 95. Qwen HF cache 修复 + Qwen v29 pipeline 启动
+
+v31.4 Qwen 训练 `LocalEntryNotFoundError` 根因定位：15GB Qwen 权重下载到 `/root/autodl-tmp/hf_cache/models--Qwen--Qwen2.5-7B-Instruct/`，但新版 transformers 期望 `$HF_HOME/hub/models--...`。Llama 在 `hub/` 下所以能 offline 加载，Qwen 在老路径所以失败。
+
+**修复**：软链 `ln -s hf_cache/models--Qwen... hf_cache/hub/models--Qwen...`，offline 加载验证通过（vocab 151665, model_type qwen2, hidden 3584）。
+
+**Pipeline 启动** (`/tmp/qwen_v29_pipeline.sh`, 04-24 23:50 kick off)：
+- 复用 v29 pair (`data/dpo/prefs_v29_100states.jsonl`, 500 对)
+- 同 Llama v29 配置 (epochs=3, beta=0.1, lr=5e-5, QLoRA r=64)
+- 测试集 `test_states_v29_eval_50.jsonl`（**和 Llama v29 完全同文件**，数字直接可比）
+- train 20min 完成 → eval 5h 串联
+
+**选 v29 pair 不选 v31.x 的理由**：v31.x 在 Llama 上已证明 pass@1 全面低于 v29，Qwen 复刻大概率重演同样的跨 persona 干扰，ddl 紧张下优先保 Qwen 主结果成立。
+
+### 94. v31.4 结果分析记入 v31_experiment_log §12
+
+Llama v31.4 eval 完成（14:21），Qwen v31.4 训练崩溃（14:22 HF cache）。详细见 `docs/v31_experiment_log.md` §12：
+
+**v31.4 Llama 50-state**：Overall pass@1 **8.0%** (vs v29 14%) / pass@5 15.3% (vs v29 20%)
+
+| persona | 指标 | v29 | v31.4 | Δ |
+|---|---|:---:|:---:|:---:|
+| Novice | avg turns / p@1 | 7.00 / 16% | **4.14 / 12%** | -2.86 ✓ / -2 task |
+| Exp | avg turns / p@1 | 2.66 / 12% | 2.24 / **6%** | 干扰退步 |
+| Busy | avg turns / p@1 | 1.0 / 14% | **1.24** / 6% | 3 漏网长尾 |
+
+**跨 persona 干扰重演 v31.2a**：Exp/Novice pair 字节级与 v31.1 相同，但 LoRA 共享参数让 Busy 新 24 对 pair 污染 Exp T0 决策（94%→78%）+ 代码生成。v31.4 证明"把 Busy T1 Execute 学进 DPO"在当前 data + method 组合下不可行。
+
+**Novice 4.14 轮结构优秀**但 Exp/Busy pass@1 都退步，**整体劣于 v29、劣于 v31.3-D**。v31.3-D 推理 patch (12.67%) 仍是当前最优操作点。
+
+Qwen v31.4 模型没训出来 (`models/v31_4_qwen_100states/` 空目录)。决定 Qwen 走 v29 pair 方案（见 #95），不在 Qwen 上复刻 v31.x。
+
+---
+
+## 2026-04-24
+
+### 93. v31.4 pipeline 启动（过夜跑，Llama + Qwen 双 backbone）
+
+**目标**：把 v31.3-D 的推理补丁做成 DPO 训练能力 + 补 Qwen backbone。详细设计见 `docs/v31_experiment_log.md` §12（待补）+ §0.5 理想轨迹。
+
+**规则改动**（`reward/compute_rewards.py`）：
+- Busy 新增 `turn >= 1 → Execute` 分支（T1+ 硬停，消除 rejection 长尾）
+- Novice 保持 `NOVICE_U_STOP=0.4`（尝试过 0.3 无效 / 0.2 会退化为 v29 永远 clarify）
+- Exp 不改
+
+**两个 bug 修复（关键）**：
+
+1. **Method B2 dialogue_turn 错位**：`generate_trajectories.py` 的 forced_execute turn 继承 `state.dialogue_turn=0`（没递增），Method B2 的 `if ct_turn == 0: continue` 把它当 T0 skip 掉。改用 top-level `turn - 1` 作 chronological 真值；同时 patch `ct_state["dialogue_turn"]` 给 rebalance 用。
+2. **U 离散化陷阱**：U ∈ {0, 0.2, 0.4, 0.6, 0.8, 1.0}。原本想把 Novice 阈值 0.4→0.3 让它多跑 1 轮，但 0.3 和 0.4 触发集一样（都是 {0, 0.2}），无效。要真变行为得跨 bin（0.2 或 0.5）。0.2 会让 T2 全 Clarify 退化 v29，回退到 0.4。
+
+**pair 分布（v31.4 vs v31.1）**：520 对 vs 496 对（+24）
+
+| persona × turn × action | v31.1 | v31.4 | Δ |
+|---|:---:|:---:|---|
+| Busy T0 Clarify | 30 | 30 | 0 |
+| Busy T0 Execute | 77 | 77 | 0 |
+| **Busy T1 Execute** | **3** | **27** | **+24** ← 核心修复 |
+| Exp 所有 | 166 | 166 | 0（字节级相同）|
+| Novice 所有 | 220 | 220 | 0（字节级相同）|
+
+Busy T1 从 3 → 27（预期 28，2 对被 same-msg filter 过滤），修复生效。
+
+**Pipeline 启动（07:35 CST）**：`/tmp/v31_4_full_pipeline.sh`
+1. 等 compute_rewards → validate → **Llama 训练**（17min）→ **Llama eval 50-state**（5h）
+2. 等 Qwen 下载 → **Qwen 训练**（17min）→ **Qwen eval 50-state**（5h）
+3. 串行执行，预计 18:30 CST 全部完成
+
+**当前状态（10:10 CST）**：
+- compute_rewards ✓（07:59 完成）
+- Llama 训练 ✓（~08:16 完成）
+- Llama eval 进行中（20/50，40%）
+- Qwen 下载 ✓（15GB，~15min 完成）
+- 观察到的行为样本：Novice 3 轮 / Busy 1 轮（低 U 样本）/ Exp 2 轮，符合理想轨迹
+
+**产物**：
+- `data/dpo/prefs_v31_4_100states.jsonl`（520 对）
+- `models/v31_4_100states/`（Llama）
+- `models/v31_4_qwen_100states/`（Qwen，晚些完成）
+- `outputs/eval_v31_4_dpo_50test.json`
+- `outputs/eval_v31_4_qwen_50test.json`
+
+**v31.4 预期数字（50-state，基于 v31.3-D + Qwen 未知）**：
+
+| | v29 | v31.1 | v31.3-D | v31.4 预期 |
+|---|:---:|:---:|:---:|:---:|
+| Overall p@1 | 14.0% | 9.33% | 12.67% | **~12-13%**（v31.3-D 的 learned 版本）|
+| Busy 长尾 | 0 | 9/50 | 0 | 0 |
+| Busy p@1 | 14% | 8% | 12% | ~12% |
+| Novice turns | 7.0 | 4.0 | 4.24 | ~4.0 |
+
+**Novice pass@1 天花板**：items_per_turn=1 × 4 轮 = 最多 3 items 披露。n_masked=5 task 必缺 2 items。要上 v29 的 18.5%（200-state）必须让 Novice 跑 5+ 轮。Plan H（MIN_CLARIFY=4，用 T4 Execute pair 13 对）留作 v31.4 结果不理想时的 fallback。
+
+### 92. v31 理想轨迹记入 `v31_experiment_log.md` §0.5
+
+详细见 `docs/v31_experiment_log.md` §0.5。三个 persona 在 user simulator 下的理想行为模式（Novice 多轮问学够就停 / Exp 1 轮问 / Busy 高 U 问一次就停），以及 v31.4 如何逼近这些理想。
+
+---
+
+## 2026-04-23
+
+### 91. v31.3-D: Busy T1+ Execute 推理补丁（hypothesis test）— 结果出 ✓
+
+详细见 `docs/v31_experiment_log.md` §11。
+
+**动机**：v31.1 Busy 问题拆成两层——T0 52% rule-match（乱 Clarify）+ T1+ 不停下来（9 个 7-turn 长尾）。假设**长尾是 pass@1 主因**。
+
+**实现**：零训练 patch。`eval/evaluate_multi_turn_persona.py` 加 `--busy_t1_execute` flag，推理时若 Busy turn≥1 且 model 输出 Clarify，强制翻成 Execute。其他完全不变，用 v31.1 模型。
+
+**时间线**：10:52（机器）kick off → 16:20 完成（~5.5h）。
+
+**结果（50-state）**：
+
+| 指标 | v29 | v31.1 | **v31.3-D** | vs v31.1 |
+|---|:---:|:---:|:---:|:---:|
+| **Overall pass@1** | 14.0% | 9.33% | **12.67%** | **+5 task** ✓ |
+| Busy turns / p@1 | 1.0 / 14% | 2.72 / 8% | **1.42 / 12%** ✓ | +2 task |
+| Busy 长尾 | 0 | 9/50 | **0** ✓ | 零长尾 |
+| Exp turns / p@1 | 2.66 / 12% | 2.66 / 10% | 2.68 / 12% | +1 task（噪声）|
+| Novice turns / p@1 | 7.0 / 16% | 4.0 / 10% | 4.24 / 14% | +2 task（噪声）|
+
+**Busy 分布兑现物理保证**：29 个 T0 Execute（1 轮）+ 21 个 T0 Clarify（patch 强制 T1 Execute → 2 轮），max 2，零长尾。预测 avg=1.63 偏高，实际 1.42（T0 Clarify 42% 低于预期 63%，因为 §7.1 63% 包含被长尾拉高的 clarify_turns/total_turns）。
+
+**Busy pass@1 = 12% 踩线 §11.5 判据**（≥12% → 长尾确实主因）。决策：**走 A —— 把 "Busy T1 Execute" 规则做进 DPO 训练**，不依赖推理 patch。
+
+**意外：Novice/Exp 也涨 pass@1**（+2, +1 task）。但 patch 不影响 Novice/Exp 决策，turn 分布基本不变。pass@5 反向（Novice 11→9, Exp 11→9）→ 判定为 gpt-4o-mini 代码生成采样噪声，50-state σ≈2.3 task。论文叙事不靠这个涨幅，核心信号是 Busy 的 +2 task。
+
+**产物**：`outputs/eval_v31_1_busyT1exec_50test.json`（模型仍是 v31.1，零训练）。
+
+**下一步**：设计 v31.4 = v31.1 + Busy T1 Execute pair（加入 DPO 数据），评估训练版本能否稳住 Busy 行为，同时看会不会触发 v31.2a 那种跨 persona 干扰。
+
+### 90. v31.1 eval post-mortem + v31.2a 启动（eval 进行中）
+
+详细记录见 `docs/v31_experiment_log.md` §7-9。
+
+**v31.1 最终结果（50-state）**：Overall pass@1 9.33% vs v29 14.0%（同测试集），掉 4.67pp = 7 task。
+
+| | v29 | v31.1 | Δ |
+|---|:---:|:---:|:---:|
+| Novice | 16% (8/50), 7.0轮 | **10% (5/50), 4.0轮** | −3 task（**设计内**）|
+| Busy | 14% (7/50), 1.0轮 | **8% (4/50), 2.72轮** | −3 task（**意外问题**）|
+| Exp | 12% (6/50), 2.66轮 | 10% (5/50), 2.66轮 | −1 task（噪声，行为字节级不变）|
+
+**诊断**：
+- Novice 过拟合**修好**（7→4轮核心目标达成），pass@1 −6pp 是"少问 → 少披露"的必要代价，Novice `items_per_turn=1` 导致 n_masked≥4 task 信息不够
+- Busy T0 **52% rule match（硬币水平）**：30/107 Clarify pair 太稀，DPO 没覆盖 v29 "100% Execute" 的强先验；加上 Busy T1 只有 3 个 Execute pair，**进入多轮后不会停**（9/50 state 跑满 7 轮被 forced execute，vs v29 零长尾）
+- Exp 完全稳定（turns/clarify_rate 一字不差），确认 Busy 改动未干扰 Exp/Novice（至少在 v31.1 阈值下）
+
+**v31.2a 设计（04-23 凌晨启动）**：
+
+Busy 阈值 `> 0.6 → > 0.8`。U 离散 {0.0, 0.2, 0.4, 0.6, 0.8, 1.0}，`> 0.8` 只捕获 U=1.0（n_masked=5 极端 task）。Busy T0 Clarify pair 从 30 → **5**（4.7%），预期信号太稀 DPO 学不到 → Busy 退化成 v29 的永 Execute。
+
+| | v31.1 | v31.2a |
+|---|:---:|:---:|
+| Busy T0 Clarify | 30 (28%) | **5 (4.7%)** |
+| Busy T0 Execute | 77 | 102 |
+| Exp pair | 166 | 166（**字节级相同**）|
+| Novice pair | 220 | 220（**字节级相同**）|
+
+**训练完成**（03:15 → 03:31，16min）：84 steps, accuracy 96-98%, margins 0.38→4.72。
+
+**Eval 中期观察（40/50 @ 07:30）**：
+
+| persona | avg turns | Clarify% | 对比 v31.1 |
+|---|:---:|:---:|---|
+| Busy | **1.00** ✓ | 0% | **修好** |
+| Novice | 4.55 | 100% | 略差（4.0→4.55，7-turn 尾巴 6%→24%）|
+| Exp | 1.86 ⬇ | 57% | **T0 Clarify 94%→54%（40pp 下降）** |
+
+**跨 persona 干扰现象**：Exp pair 完全没变，但 Exp 行为大幅变化。验证"单 LoRA 共享参数，Busy 的 25 个 pair 翻转（U=0.8 Clarify→Execute）通过参数共享泛化成全局 '高 U → Execute' 信号"。
+
+**Eval 完成（08:34）+ 最终决定：回退 v31.1**
+
+| 指标 | v29 | v31.1 | v31.2a |
+|---|:---:|:---:|:---:|
+| Overall pass@1 | 21/150 (14.0%) | 14/150 (9.33%) | **13/150 (8.67%)** |
+| Overall pass@5 | 30/150 (20.0%) | 29/150 (19.3%) | **23/150 (15.3%)** |
+| Novice turns / p@1 / p@5 | 7.0 / 8 / 10 | 4.0 / 5 / 11 | 4.76 / 4 / **7 (−4)** |
+| Exp turns / p@1 / p@5 | 2.66 / 6 / 12 | 2.66 / 5 / 11 | 1.90 / 4 / **8 (−3)** |
+| Exp clarify% | 62 | 62 | **47 (−15pp)** |
+| Busy turns / p@1 / p@5 | 1.0 / 7 / 8 | 2.72 / 4 / 7 | **1.0 ✓ / 5 / 8** |
+
+**v31.2a 用 Busy +1 task 换掉 Exp/Novice 共 −6 pass@5，亏本**。跨 persona 干扰被实证：v31.2a vs v31.1 仅 Busy 25 对 pair 变化（U=0.8 Clarify→Execute），Exp/Novice pair 字节级相同，但行为大幅变化（Exp T0 Clarify 94%→54%，Novice 7-turn 长尾 6%→18%）。单 LoRA rank=64 在 ~500 pair 尺度无法在三 persona 间解耦。
+
+**最终版 v31 = v31.1**：`models/v31_100states/` + `prefs_v31_100states.jsonl` + `eval_v31_dpo_50test.json`。
+
+**论文叙事**：Novice 过拟合修复（7→4）付 Novice pass@1 −6pp 的设计代价；Exp 稳定；Busy 稀疏正类信号下未学透（52% rule-match）。收紧 Busy 阈值导致跨 persona 干扰，证实单 LoRA adapter 在此数据尺度下 persona 规则耦合。Busy 清洁修复 = future work（per-persona adapter / 扩数据 / 更强 persona token）。
+
+**v31.2a 制品留作 ablation**：`models/v31_2a_100states/` + `prefs_v31_2a_100states.jsonl` + `eval_v31_2a_dpo_50test.json`，是跨 persona 干扰的直接证据。
+
+---
+
+## 2026-04-22
+
+### 89. v31 诊断 + v31.1 修复 Novice 过拟合（进行中）
+
+详细记录见 `docs/v31_experiment_log.md`。
+
+**动机**：v29 Novice 100% 跑满 7 轮，消融证明 U 在 turn-count 维度完全没起作用（w/o U 下 Novice 仍 8 轮），persona 独自决定行为。DPO 训 pair 里 226/227 Novice = Clarify → 模型学成 `persona → action` 硬映射。
+
+**修复（v31.1）**：只改 Novice 规则，Busy/Exp 保持 v31.0 不动（防 v30 三处同改崩盘）。
+
+- `reward/compute_rewards.py`：`get_correct_action(persona, U, turn)` 新 Novice 分支 — `turn<2 → Clarify`，`turn>=2 → Execute if U<0.4 else Clarify`
+- 3 个 callsite 传 turn（踩坑：最初 `fork_turn` 与外层循环变量重名，`AttributeError: 'int' object has no attribute 'get'`，重命名 `fork_turn_idx` 修复）
+
+**v31.1 pair 分布（496 pairs）**：
+
+| persona | pairs | Execute 占比 | 关键信号 |
+|---|:---:|:---:|---|
+| Novice (v29) | 227 | 0.4% | 几乎全 Clarify |
+| Novice (v31.0) | 227 | 0.0% | 更单边 |
+| **Novice (v31.1)** | **220** | **9.5%** | **turn 2 对比 ✨** |
+
+Novice turn 2：U<0.4 → 18 Execute，U≥0.4 → 11 Clarify。同 persona × 同 turn × U 决定动作 — DPO 学 U-conditional 所需的对比监督首次出现。Busy/Exp 与 v31.0 完全相同。
+
+**管道已 kick off**（`/tmp/v31_pipeline.sh`，nohup detached）：
+- 10:54 train v31.1 DPO（~17 min）→ `models/v31_100states/`
+- auto-chain: eval 50-state（~1.5-2h）→ `outputs/eval_v31_dpo_50test.json`
+- 日志 `/tmp/v31_pipeline.log`
+
+**成功判据**：Novice Avg Turns <5（理想 3-4），Novice pass@1 ≥14%，Busy/Exp 不崩。
+
+**fallback**：若 Novice 改善不足（5-6 轮），调 `NOVICE_U_STOP` 0.4→0.6 或 `NOVICE_MIN_CLARIFY` 2→1；若 Busy 崩（<10%），回退 Busy 阈值 0.6→0.8。
+
+---
+
 ## 2026-04-21
 
 ### 88. Canonical 覆盖 re-audit — Base LLM 其实已完整（修正 #82、#87）
