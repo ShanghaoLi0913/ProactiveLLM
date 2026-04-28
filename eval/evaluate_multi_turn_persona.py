@@ -404,6 +404,7 @@ def evaluate_multi_turn_conversation(
     always_clarify: Optional[int] = None,
     oracle: bool = False,
     ideal_disclosed: bool = False,
+    busy_t1_execute: bool = False,
 ):
     """Evaluate model's multi-turn behavior with different personas.
 
@@ -753,7 +754,11 @@ def evaluate_multi_turn_conversation(
                         model,
                         current_state["persona"],
                     )
-                
+
+                # v31.3 D: post-hoc Busy T1+ Execute patch (validates long-tail hypothesis)
+                if busy_t1_execute and persona_name == "Busy-Developer" and turn >= 1 and action == "Clarify":
+                    action = "Execute"
+
                 # Generate assistant message
                 if action == "Execute":
                     turn_data = _build_execute_turn_data(
@@ -986,6 +991,12 @@ if __name__ == "__main__":
         action="store_true",
         help="Ideal Disclosed upper bound: masked query + all masked_fields disclosed at once, single-turn Execute.",
     )
+    parser.add_argument(
+        "--busy_t1_execute",
+        action="store_true",
+        help="Post-hoc patch: force Busy-Developer to Execute at turn>=1 regardless of model decision. "
+             "Tests the hypothesis that v31.1 Busy pass@1 loss is driven by the 7-turn long tail.",
+    )
 
     args = parser.parse_args()
 
@@ -1018,4 +1029,5 @@ if __name__ == "__main__":
         always_clarify=args.always_clarify,
         oracle=args.oracle,
         ideal_disclosed=args.ideal_disclosed,
+        busy_t1_execute=args.busy_t1_execute,
     )

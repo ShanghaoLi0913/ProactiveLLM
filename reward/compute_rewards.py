@@ -701,29 +701,43 @@ def rebalance_prefs_by_persona(
 # differentiate at least one persona pair:
 #   Novice > 0    → Clarify unless everything is disclosed (≈ v29 "always ask")
 #   Exp    > 0.3  → Clarify only if ≥ 2 items hidden (≈ v29, 2.4% flips)
-#   Busy   > 0.6  → Clarify only if ≥ 4 items hidden (new signal: on very
-#                    vague tasks, even Busy asks once at turn 0)
+#   Busy   > 0.6  → Clarify only if ≥ 4 items hidden at T0, but force Execute
+#                    from T1+ to kill rejection long-tail (v31.4: bakes the
+#                    v31.3-D inference patch into DPO training; 9/50 Busy
+#                    conversations hit max_turns in v31.1 due to rejection
+#                    spirals under patience=low simulator).
 V31_U_THRESHOLD = {
-    "Novice-Learner": 0.0,
     "Experienced-Engineer": 0.3,
     "Busy-Developer": 0.6,
 }
 
+NOVICE_U_STOP = 0.4      # v31.4: keep at 0.4 (same as v31.1). Attempted 0.2
+                         #   but that removes the U=0.2 bucket as an Execute
+                         #   trigger at T2, killing the 18 T2-Execute pairs
+                         #   that teach "stop when info sufficient." Result
+                         #   would regress to v29's always-Clarify-until-max.
+NOVICE_MIN_CLARIFY = 2   # Novice always Clarifies for the first this-many turns
 
-def get_correct_action(persona_name: str, uncertainty: float) -> Optional[str]:
-    """Return the behaviorally correct action for a persona at the given uncertainty.
 
-    v31: the label rule is pure (persona, uncertainty) — no dialogue_turn, no
-    disclosure_ratio, no n_masked_items. Uncertainty already encodes remaining
-    information deficit (see utils.compute_state_uncertainty), so turn drops
-    out of the decision. This gives the same persona different labels for
-    different tasks/turns instead of the v29 degenerate "Novice always clarify
-    for 3 turns" lookup.
+def get_correct_action(
+    persona_name: str, uncertainty: float, turn: int = 0
+) -> Optional[str]:
+    """Return the behaviorally correct action for a persona at the given state.
 
-    Clarify if U > threshold, else Execute. Thresholds are per-persona so the
-    same U leads to different behavior across personas. Returns None for
-    unknown personas (caller falls back to reward-based ordering).
+    v31.4 rules:
+      - Novice: turn<2 Clarify; turn>=2 Execute if U<0.3 else Clarify
+      - Busy:   turn>=1 Execute (forced stop); turn=0 U>0.6 Clarify else Execute
+      - Exp:    U>0.3 Clarify else Execute (unchanged)
     """
+    if persona_name == "Novice-Learner":
+        if turn < NOVICE_MIN_CLARIFY:
+            return "Clarify"
+        return "Execute" if uncertainty < NOVICE_U_STOP else "Clarify"
+    if persona_name == "Busy-Developer":
+        if turn >= 1:
+            return "Execute"
+        thr = V31_U_THRESHOLD["Busy-Developer"]
+        return "Clarify" if uncertainty > thr else "Execute"
     thr = V31_U_THRESHOLD.get(persona_name)
     if thr is None:
         return None
@@ -909,7 +923,8 @@ def compute_preferences(
                     # disclosure-based state value; it evolves across turns as the
                     # user reveals masked information.
                     u_here = compute_state_uncertainty(best_turn0_1["state"])
-                    correct_action = get_correct_action(persona_name, u_here)
+                    turn_here = best_turn0_1["state"].get("dialogue_turn", 0)
+                    correct_action = get_correct_action(persona_name, u_here, turn_here)
 
                     if correct_action and correct_action in action_best:
                         other_actions = [a for a in action_best if a != correct_action]
@@ -981,7 +996,7 @@ def compute_preferences(
                             # turn's U is below Novice threshold, this Clarify is
                             # wasteful; skip it as a chosen example.
                             ct_u = compute_state_uncertainty(ct.get("state", {}))
-                            ct_correct = get_correct_action("Novice-Learner", ct_u)
+                            ct_correct = get_correct_action("Novice-Learner", ct_u, ct_turn)
                             if ct_correct == "Execute":
                                 continue  # Don't teach "keep asking when you already know everything"
 
@@ -1021,12 +1036,18 @@ def compute_preferences(
                         clarify_traj_id = chosen_traj["trajectory_id"]
                         execute_turn0 = rejected_turn0  # the Execute-at-T0 response
 
+                        # Sort by top-level 1-indexed "turn" (chronological) instead of
+                        # state.dialogue_turn, because generate_trajectories.py stores
+                        # state.dialogue_turn=0 for forced_execute turns (the state is
+                        # copied from the last decision point without incrementing).
+                        # The top-level "turn" field is reliably 1-indexed chronological.
                         full_clarify_turns = sorted(
                             traj_turns_dict.get(clarify_traj_id, []),
-                            key=lambda x: x["state"].get("dialogue_turn", 0),
+                            key=lambda x: x.get("turn", 0),
                         )
                         for ct in full_clarify_turns:
-                            ct_turn = ct["state"].get("dialogue_turn", 0)
+                            # Convert 1-indexed top.turn to 0-indexed dialogue turn.
+                            ct_turn = max(0, ct.get("turn", 0) - 1)
                             if ct_turn == 0:
                                 continue  # already handled above
                             # For Busy turn 1+: chosen=Execute (stop asking)
@@ -1038,9 +1059,17 @@ def compute_preferences(
                             ct_reward = ct.get("total_reward", chosen_traj["reward"])
                             exe_reward = rejected_traj["reward"]
 
+                            # Patch state.dialogue_turn to the corrected chronological
+                            # turn (works around generate_trajectories.py bug where
+                            # forced_execute turns inherit state.dialogue_turn=0).
+                            # Otherwise rebalance groups this pair under turn=0 and
+                            # silently drops it against the real T0 Clarify pair.
+                            ct_state = dict(ct["state"])
+                            ct_state["dialogue_turn"] = ct_turn
+
                             # Busy turn 1: Execute is chosen, Clarify is rejected
                             prefs.append({
-                                "state": ct["state"],
+                                "state": ct_state,
                                 "persona": ct.get("persona", chosen_turn0.get("persona", {})),
                                 "chosen_action": "Execute",
                                 "rejected_action": "Clarify",
@@ -1094,7 +1123,8 @@ def compute_preferences(
                 # Behavior-first: persona design determines chosen action at fork turn.
                 fork_persona_name = (mainline_clarify.get("persona") or {}).get("name", "")
                 fork_u = compute_state_uncertainty(mainline_clarify.get("state", {}))
-                fork_correct_action = get_correct_action(fork_persona_name, fork_u)
+                fork_turn_idx = mainline_clarify.get("state", {}).get("dialogue_turn", fork_at)
+                fork_correct_action = get_correct_action(fork_persona_name, fork_u, fork_turn_idx)
                 if fork_correct_action == "Clarify":
                     chosen_t, rejected_t = mainline_clarify, fork_turn
                     chosen_a, rejected_a = "Clarify", "Execute"
