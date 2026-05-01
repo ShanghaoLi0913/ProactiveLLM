@@ -6,6 +6,57 @@
 
 ## 2026-05-02
 
+### 146. 起 Llama N=200 全 pipeline + Qwen PO 收尾（Option D 启动）
+
+23:25 北京（10:25 芝加哥）3 卡并行起 Llama N=200：
+- GPU 0: Llama v33 SFT+DPO N=200（~25h，瓶颈）
+- GPU 1 chain: Qwen PO rem-100 (5h) → Llama Base N=200 v2 (~10h)
+- GPU 2: Llama PO N=200 v2 (~12h)
+
+ETA: Llama DPO 明早 ~09:30 AM 芝加哥 May 2 完，其他更早。
+
+新加 `scripts/wrappers/progress_3chains.sh` 给 3 chain 一键 snapshot。
+
+### 145. Qwen N=200 method 比较 honest 分析 — 修订 paper claim
+
+跟用户讨论 "为什么 CF 看起来比 TactfulLLM 好" 后，做严谨 paired analysis 发现之前 over-claiming：
+
+**事实**：
+- CF 15.7 > TactfulLLM 15.2 > Direct 14.7（pass@1, N=200）
+- 全部 method-method McNemar **不显著**（χ² < 3.84, p > 0.05）
+- 只 Novice TactfulLLM vs CF χ²=3.68, p≈0.055 borderline
+
+**Power 分析**：N=200/persona 给 SE≈2.5pp，detect threshold ≈ 6-7pp。观察到的 1-3pp 差距**全在 noise 内不可分辨**。需要 N=600+/persona 才能 detect 2pp 差。
+
+**自己 over-claim 的纠错**：
+- 之前我说 "TactfulLLM Execute-T0 LoRA 不损 (18.7% = Direct)" + "turn-1 Execute LoRA 损 5pp" → 其实是不同 state 子集比较，**不是 apples-to-apples**
+- 同 state McNemar：DPO=6, CF=11 wins, χ²=0.94 不显著
+- 用户 push back 后纠正
+
+**Busy 内部分裂（描述性）**：TactfulLLM 200 个 Busy sample 按它自己 turn-0 决策分两组：
+- Execute-T0 (n=91): 18.7% pass ⭐ 三 method 中 Busy 最高
+- Clarify-T0 (n=109): 9.2% pass — 最低
+- "当它选不 clarify 时是最强的，当它选 clarify 时是最差的"
+- 但 91 vs 109 内部分组 significance 没正式 test
+
+**未验证的候选机制**（标记 hypothesis 不当 claim 写）：
+1. LoRA alignment tax on turn-1 Execute（chosen pairs trajectory 偏离 Qwen 自然分布）
+2. Busy oracle 拒答率训练/测试不一致
+3. Pure sample variance（最简单解释）
+
+⚠️ N=200 数据**无法在三个解释间分辨**。等 Llama N=200 cross-backbone reproduce 看是否有真 effect。
+
+**修订 paper claim**：
+- ❌ "TactfulLLM achieves best accuracy"（事实是 CF 略高）
+- ❌ "DPO refinement improves over CF"（McNemar 不显著）
+- ❌ "LoRA alignment tax explains Exp/Busy underperformance"（机制未证）
+- ✅ "TactfulLLM matches baselines on accuracy (within statistical noise)"
+- ✅ "TactfulLLM exhibits persona-conditional interaction depth (Nov 7.99 / Exp 2.42 / Busy 1.55 vs CF flat 2.0)"
+- ✅ "On Novice, TactfulLLM 18.0% vs CF 13.0% (borderline χ²=3.68, p≈0.055)"
+- ✅ "Cross-persona behavior split is primary contribution; accuracy parity is secondary"
+
+**记入 sft_then_dpo_v33.md** "May 2 honest 分析" 段，包括完整 McNemar 表 + Power 分析 + 候选机制 + 修订 claim。
+
 ### 144. Qwen baseline N=200 合并完成 — sanity 全过 + 关键 pass@5 finding 浮现
 
 3 个 baseline（Direct/CF/Base）remaining-100 全部跑完，一夜无 freeze（freeze_monitor host_uptime 3683→37343 单调增 9.3h）。`scripts/merge_baselines_200.py` 合并 first-100 patched + remaining-100 ft：
