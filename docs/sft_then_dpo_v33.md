@@ -89,6 +89,106 @@ SFT 跨过 KL gap:
 
 ## 📍 当前进度（2026-05-02）
 
+### May 2 — Qwen N=200 method 比较的 honest 分析（重要 finding）
+
+跟 baseline N=200 数字 lock 后做 paired comparison，发现**之前的 "TactfulLLM 是最优 method" 主张站不住**。
+
+#### Qwen N=200 final accuracy 排名
+
+| Method | pass@1 | pass@5 | avg_turn |
+|---|---|---|---|
+| 🥇 Clarify-First | **15.7** | **23.2** | 2.00 |
+| 🥈 TactfulLLM | 15.2 | 23.0 | 3.99 |
+| 🥉 Direct | 14.7 | 18.3 | 1.00 |
+| Prompt-Only (N=100) | 13.0 | – | – |
+| Base | 11.0 | 18.0 | 1.00 |
+
+**CF accuracy 略胜 TactfulLLM** — 0.5pp pass@1, 0.2pp pass@5。
+
+#### McNemar paired tests（N=200, χ²>3.84 显著）
+
+```
+TactfulLLM vs CF      ALL: χ²=0.07  Nov: 3.68  Exp: 1.88  Busy: 1.23
+TactfulLLM vs Direct  ALL: χ²=0.06  Nov: 1.24  Exp: 0.41  Busy: 0.07
+CF vs Direct          ALL: χ²=0.57  Nov: 0.27  Exp: 0.45  Busy: 1.78
+```
+
+**全部 method-method pairwise 都不显著（p > 0.05）**。最接近显著的是 TactfulLLM vs CF on Novice (χ²=3.68, p≈0.055，临界)。
+
+#### 为什么 N=200 detect 不出差距？— Power 分析
+
+```
+Discordant rate ≈ 10%（600 trials 中 60 discordant pairs）
+Detect Δ=1pp need 1285 per persona（6.4× 现有 N）
+Detect Δ=2pp need 643 per persona（3.2× 现有 N）
+Detect Δ=5pp need 257 per persona（1.3× 现有 N）
+
+per-persona binomial SE at N=200, p≈0.15: ≈2.5pp
+detect threshold @ 95% confidence: |Δ| ≥ 7pp
+```
+
+**N=200/persona 只能 detect 6-7pp 以上的差**。我们看到的 1-3pp 差距全在不可分辨区间内。
+
+#### Per-persona pattern（descriptive，非 statistical claim）
+
+| Persona | TactfulLLM | CF | Direct | Δ TactfulLLM-CF |
+|---|---|---|---|---|
+| Novice | 18.0 | 13.0 | 14.5 | **+5.0pp** ✓ |
+| Exp | 14.0 | 18.0 | 16.0 | -4.0pp ✗ |
+| Busy | 13.5 | 16.0 | 13.5 | -2.5pp ✗ |
+
+观察到的 pattern：
+- Novice 上 TactfulLLM 显著（borderline）赢 CF — 跟理论一致（multi-turn clarify 在合作 persona 上有用）
+- Exp/Busy 上 TactfulLLM 略输 CF — 跟理论矛盾（更灵活的 method 不应该输给 hardcoded baseline）
+
+#### Busy 上 TactfulLLM 内部分裂（描述性）
+
+把 TactfulLLM 200 个 Busy sample 按它自己的 turn-0 决策分两组：
+
+| TactfulLLM Busy 决策 | n | pass@1 |
+|---|---|---|
+| Execute-T0（不 clarify）| 91 | **18.7%** ⭐ 三 method 中最高 |
+| Clarify-T0（决定 clarify）| 109 | 9.2% 三 method 中最低 |
+
+**当 TactfulLLM 选不 clarify 时，Busy 上击败所有 baseline。当它选 clarify 时，比所有 baseline 都差**。
+**这是描述性观察，但 N=91/109 内部分组的 pass 差是否 significant 没正式 test。**
+
+#### 推测的机制（**未验证**，N=200 不足以 confirm）
+
+候选解释（按 plausibility）：
+
+1. **LoRA "alignment tax" on turn-1 Execute**：DPO 训练 chosen pairs 都是 Clarify→Execute，turn-1 的 Execute style 偏离 Qwen 自然分布。Turn-0 Execute (Busy 不 clarify case) LoRA 不损 (18.7% = Direct 13.5%? 实际略高)，turn-1 Execute 损 5pp。**但 same-state McNemar 不显著，可能是 noise**。
+
+2. **Busy oracle 拒答率不匹配训练分布**：训练数据 oracle 给 Busy 的 patience 跟 eval oracle 不一致 → DPO 学到的 clarify policy 在 eval 上 over-fire。
+
+3. **Pure sample variance**：N=200 给 SE ≈ 3.5pp，看到的 2-5pp 差全在噪声内，不需要 mechanism 解释。
+
+⚠️ **N=200 数据无法在这三个解释间分辨。**Llama N=200 跑完后看是否 reproduce 类似 pattern：
+- 如果 Llama 上 TactfulLLM > CF on Exp/Busy → Qwen 4pp 是 noise
+- 如果两 backbone 一致 CF > TactfulLLM on Exp/Busy → 真 effect，机制需要更深入实验（如 disable LoRA on turn-1 Execute）
+
+#### 修订的 paper claim（去掉 over-claiming）
+
+❌ **不能写**：
+- "TactfulLLM achieves best accuracy on Qwen"
+- "DPO refinement improves over CF baseline"
+- "LoRA alignment tax explains Exp/Busy underperformance"（machinery 未证）
+
+✅ **可以写**（statistically defensible）：
+- "TactfulLLM matches Direct/CF baselines on aggregate accuracy (15.2 vs 14.7 vs 15.7, all McNemar p > 0.5)"
+- "TactfulLLM exhibits persona-conditional interaction depth: Novice 7.99-turn / Exp 2.42-turn / Busy 1.55-turn vs CF's flat 2.0-turn"
+- "On Novice persona, TactfulLLM achieves 18.0% vs CF's 13.0% (5pp lift, McNemar χ²=3.68, p≈0.055 borderline)"
+- "Cross-persona behavior split is the primary contribution; accuracy parity is the secondary finding"
+
+#### 教训（method 角度）
+
+1. N=100/200 paper-grade comparison 不够，detect 不出 1-3pp 差距
+2. CF 是 surprisingly strong baseline — 强制 1 clarify + base-model 在 Qwen 上几乎打平 DPO trained model
+3. DPO 真正贡献是**学到 persona-conditional 行为**，不是 raw accuracy
+4. 任何 mechanism claim（如 alignment tax）需要 controlled ablation 才能 establish
+
+---
+
 ### May 2 更新 — Qwen 全 4 baseline 中 3 个补到 N=200 ✅
 
 3 个 baseline (Direct/CF/Base) remaining-100 一夜跑完无 freeze；`scripts/merge_baselines_200.py` 合并出 N=200 final。Sanity 全过：first-100 vs remaining-100 Δ ≤ 1.3pp（远小于 SE 3.5pp）。
