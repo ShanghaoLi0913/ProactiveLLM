@@ -1,0 +1,242 @@
+[
+  {
+    "state_idx": 0,
+    "persona": "Novice-Learner",
+    "text30": "Clarify\nWhat should be the format of the output numpy array? Should it contain integers or floats? Also, how do you want to handle the",
+    "text200_first300": "Clarify\nWhat should be the format of the output numpy array? Should it contain integers or floats? Also, how do you want to handle the sum of the numbers in the modified list if it's not an integer?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 0,
+    "persona": "Busy-Developer",
+    "text30": "Execute\n/Instruction: \n```python\nimport numpy as np\nimport random\n\ndef task_func(my_list):\n    my_list.append(random.randint(0",
+    "text200_first300": "Execute\n/Instruction: \n```python\nimport numpy as np\nimport random\n\ndef task_func(my_list):\n    my_list.append(random.randint(0, 100))\n    return np.random.rand(sum(my_list))\n```",
+    "starts_with_Clarify": false,
+    "starts_with_Execute": true,
+    "has_question_mark": false,
+    "has_code_marker": true
+  },
+  {
+    "state_idx": 0,
+    "persona": "Experienced-Engineer",
+    "text30": "Clarify\nWhat should be the data type of the elements in the returned numpy array? Should they be integers or floats?",
+    "text200_first300": "Clarify\nWhat should be the data type of the elements in the returned numpy array? Should they be integers or floats?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 1,
+    "persona": "Novice-Learner",
+    "text30": "Clarify\nSure! Let's break down what we need to do:\n\n1. **Compute the Average**: Calculate the average of each row in the",
+    "text200_first300": "Clarify\nSure! Let's break down what we need to do:\n\n1. **Compute the Average**: Calculate the average of each row in the DataFrame.\n2. **Plot Distribution**: Create a histogram or density plot of these averages.\n3. **Evaluate Normality**: Perform a normality test (e.g., Shapiro-Wilk test) on the ave",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 1,
+    "persona": "Busy-Developer",
+    "text30": "Execute\ncontiinue\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute",
+    "text200_first300": "Execute\ncontiinue\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nex",
+    "starts_with_Clarify": false,
+    "starts_with_Execute": true,
+    "has_question_mark": false,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 1,
+    "persona": "Experienced-Engineer",
+    "text30": "Clarify\nWhat specific normality test should be used (e.g., Shapiro-Wilk, Anderson-Darling)? Additionally, what format should the",
+    "text200_first300": "Clarify\nWhat specific normality test should be used (e.g., Shapiro-Wilk, Anderson-Darling)? Additionally, what format should the plot be saved in (e.g., PNG, PDF)?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 2,
+    "persona": "Novice-Learner",
+    "text30": "Clarify\nSure! What specific categories would you like to include in the DataFrame? Also, how many rows and columns do you want for the random",
+    "text200_first300": "Clarify\nSure! What specific categories would you like to include in the DataFrame? Also, how many rows and columns do you want for the random numerical data?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 2,
+    "persona": "Busy-Developer",
+    "text30": "Execute\ncontiinue\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute",
+    "text200_first300": "Execute\ncontiinue\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nexecute\nex",
+    "starts_with_Clarify": false,
+    "starts_with_Execute": true,
+    "has_question_mark": false,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 2,
+    "persona": "Experienced-Engineer",
+    "text30": "Clarify\nWhat specific categories should the stacked bar chart represent? Should they be predefined or generated randomly? Additionally, what is the expected output format for",
+    "text200_first300": "Clarify\nWhat specific categories should the stacked bar chart represent? Should they be predefined or generated randomly? Additionally, what is the expected output format for the DataFrame?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 3,
+    "persona": "Novice-Learner",
+    "text30": "Clarify\nWhat is the expected output format for the sorted DataFrame? Should it be returned directly or printed? Also, how should the function handle cases",
+    "text200_first300": "Clarify\nWhat is the expected output format for the sorted DataFrame? Should it be returned directly or printed? Also, how should the function handle cases where the specified column does not exist in the CSV file?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 3,
+    "persona": "Busy-Developer",
+    "text30": "Execute\n/Instruction: \n```python\nimport pandas as pd\nimport requests\nfrom io import StringIO\n\ndef task_func(csv_url, sort_by_column",
+    "text200_first300": "Execute\n/Instruction: \n```python\nimport pandas as pd\nimport requests\nfrom io import StringIO\n\ndef task_func(csv_url, sort_by_column=\"title\"):\n    response = requests.get(csv_url)\n    df = pd.read_csv(StringIO(response.text))\n    return df.sort_values(by=sort_by_column)\n```",
+    "starts_with_Clarify": false,
+    "starts_with_Execute": true,
+    "has_question_mark": false,
+    "has_code_marker": true
+  },
+  {
+    "state_idx": 3,
+    "persona": "Experienced-Engineer",
+    "text30": "Clarify\nWhat is the expected sorting order (ascending or descending) for the `sort_by_column`? Should the function handle cases where the specified",
+    "text200_first300": "Clarify\nWhat is the expected sorting order (ascending or descending) for the `sort_by_column`? Should the function handle cases where the specified column does not exist in the CSV file?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 4,
+    "persona": "Novice-Learner",
+    "text30": "Clarify\nWhat type of values do you want in the new column (e.g., integers, floats)? And how would you like to name the",
+    "text200_first300": "Clarify\nWhat type of values do you want in the new column (e.g., integers, floats)? And how would you like to name the new column?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 4,
+    "persona": "Busy-Developer",
+    "text30": "Execute\n/Instruction: \n```python\nimport pandas as pd\nimport numpy as np\n\ndef task_func(data, key, min_value, max_value",
+    "text200_first300": "Execute\n/Instruction: \n```python\nimport pandas as pd\nimport numpy as np\n\ndef task_func(data, key, min_value, max_value):\n    data[key] = np.random.uniform(min_value, max_value, size=len(data))\n    return data\n```",
+    "starts_with_Clarify": false,
+    "starts_with_Execute": true,
+    "has_question_mark": false,
+    "has_code_marker": true
+  },
+  {
+    "state_idx": 4,
+    "persona": "Experienced-Engineer",
+    "text30": "Clarify\nWhat specific type of random values do you want to generate for the new column (e.g., integers, floats)? Also, should the",
+    "text200_first300": "Clarify\nWhat specific type of random values do you want to generate for the new column (e.g., integers, floats)? Also, should the function return the modified DataFrame or modify it in place?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 5,
+    "persona": "Novice-Learner",
+    "text30": "Clarify\nClarify\nWhat format should the output be in (e.g., a list, a plot, etc.)?  \nShould the function",
+    "text200_first300": "Clarify\nClarify\nWhat format should the output be in (e.g., a list, a plot, etc.)?  \nShould the function handle cases where the lengths of `l1` and `l2` are not equal?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 5,
+    "persona": "Busy-Developer",
+    "text30": "Execute\n/Instruction: \n```python\nimport heapq\nimport math\nimport matplotlib.pyplot as plt\n\ndef task_func(l1, l2, N",
+    "text200_first300": "Execute\n/Instruction: \n```python\nimport heapq\nimport math\nimport matplotlib.pyplot as plt\n\ndef task_func(l1, l2, N=10):\n    differences = [math.sqrt((x - y) ** 2) for x, y in zip(l1, l2)]\n    top_diffs = heapq.nlargest(N, differences)\n    \n    plt.figure()\n    plt.plot(top_diffs)\n    plt.title('Top ",
+    "starts_with_Clarify": false,
+    "starts_with_Execute": true,
+    "has_question_mark": false,
+    "has_code_marker": true
+  },
+  {
+    "state_idx": 5,
+    "persona": "Experienced-Engineer",
+    "text30": "Clarify\nWhat format should the output be in (e.g., list, array, etc.)? Also, how should the plot be displayed (",
+    "text200_first300": "Clarify\nWhat format should the output be in (e.g., list, array, etc.)? Also, how should the plot be displayed (e.g., inline, in a separate window)?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 6,
+    "persona": "Novice-Learner",
+    "text30": "Clarify\nWhat is the specific URL pattern you want to use for matching the URLs? Also, do you want to include only certain types of URLs",
+    "text200_first300": "Clarify\nWhat is the specific URL pattern you want to use for matching the URLs? Also, do you want to include only certain types of URLs (e.g., HTTP, HTTPS) or any URL format?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 6,
+    "persona": "Busy-Developer",
+    "text30": "Execute\n/Instruction: \nExecute\n/Execute\n/Instruction: \nExecute\n/Execute\n/Instruction: \nExecute\n/Execute\n/Instruction: \nExecute",
+    "text200_first300": "Execute\n/Instruction: \nExecute\n/Execute\n/Instruction: \nExecute\n/Execute\n/Instruction: \nExecute\n/Execute\n/Instruction: \nExecute\n/Execute\n/Instruction: \nExecute\n/Execute\n/Instruction: \nExecute\n/Execute\n/Instruction: \nExecute\n/Execute\n/Instruction: \nExecute\n/Execute\n/Instruction: \nExecute\n/Execute\n/Ins",
+    "starts_with_Clarify": false,
+    "starts_with_Execute": true,
+    "has_question_mark": false,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 6,
+    "persona": "Experienced-Engineer",
+    "text30": "Clarify\nWhat is the specific URL pattern that should be used to match the URLs? Should the function handle cases where the input JSON string is invalid",
+    "text200_first300": "Clarify\nWhat is the specific URL pattern that should be used to match the URLs? Should the function handle cases where the input JSON string is invalid or missing?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 7,
+    "persona": "Novice-Learner",
+    "text30": "Clarify\nSure! To help you get started, can you provide the structure of the data (e.g., what columns are included) or a",
+    "text200_first300": "Clarify\nSure! To help you get started, can you provide the structure of the data (e.g., what columns are included) or a sample dataset? This will allow me to create a more accurate example for you.",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 7,
+    "persona": "Busy-Developer",
+    "text30": "Execute\n/Instruction: \nExecute\n/Execute\n/Instruction: \nExecute\n/Execute\n/Instruction: \nExecute\n/Execute\n/Instruction: \nExecute",
+    "text200_first300": "Execute\n/Instruction: \nExecute\n/Execute\n/Instruction: \nExecute\n/Execute\n/Instruction: \nExecute\n/Execute\n/Instruction: \nExecute\n/Execute\n/Instruction: \nExecute\n/Execute\n/Instruction: \nExecute\n/Execute\n/Instruction: \nExecute\n/Execute\n/Instruction: \nExecute\n/Execute\n/Instruction: \nExecute\n/Execute\n/Ins",
+    "starts_with_Clarify": false,
+    "starts_with_Execute": true,
+    "has_question_mark": false,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 7,
+    "persona": "Experienced-Engineer",
+    "text30": "Clarify\nWhat format is the input data (`data`) expected to be in? Is it a DataFrame, a list of dictionaries, or something else",
+    "text200_first300": "Clarify\nWhat format is the input data (`data`) expected to be in? Is it a DataFrame, a list of dictionaries, or something else? Additionally, what are the expected labels for the job distribution?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  }
+]

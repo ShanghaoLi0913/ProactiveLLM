@@ -1,0 +1,242 @@
+[
+  {
+    "state_idx": 0,
+    "persona": "Novice-Learner",
+    "text30": "Clarify\nWhat specific format or type of floating-point numbers do you want in the returned array? Should they be uniformly distributed, or do you have",
+    "text200_first300": "Clarify\nWhat specific format or type of floating-point numbers do you want in the returned array? Should they be uniformly distributed, or do you have any other requirements? \n\nAlso, do you want the function to return the modified list along with the numpy array, or just the numpy array?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 0,
+    "persona": "Busy-Developer",
+    "text30": "Execute\n```python\nimport numpy as np\nimport random\n\ndef task_func(my_list):\n    my_list.append(random.randint(0, 1",
+    "text200_first300": "Execute\n```python\nimport numpy as np\nimport random\n\ndef task_func(my_list):\n    my_list.append(random.randint(0, 100))\n    return np.random.rand(sum(my_list))\n```",
+    "starts_with_Clarify": false,
+    "starts_with_Execute": true,
+    "has_question_mark": false,
+    "has_code_marker": true
+  },
+  {
+    "state_idx": 0,
+    "persona": "Experienced-Engineer",
+    "text30": "Clarify\nWhat specific format or type of floating-point numbers do you want in the returned array? Should they be uniformly distributed, or do you have",
+    "text200_first300": "Clarify\nWhat specific format or type of floating-point numbers do you want in the returned array? Should they be uniformly distributed, or do you have any other requirements for their distribution? \n\nAlso, how should the function handle cases where the sum of the numbers in the modified list is zero",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 1,
+    "persona": "Novice-Learner",
+    "text30": "Clarify\nWhat specific format should the output plot be saved in (e.g., PNG, PDF)? Additionally, do you have any preferences for the",
+    "text200_first300": "Clarify\nWhat specific format should the output plot be saved in (e.g., PNG, PDF)? Additionally, do you have any preferences for the type of normality test to use?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 1,
+    "persona": "Busy-Developer",
+    "text30": "Execute\n```python\nimport pandas as pd\nimport seaborn as sns\nfrom scipy import stats\n\n# Constants\nCOLUMN_NAMES = ['A', '",
+    "text200_first300": "Execute\n```python\nimport pandas as pd\nimport seaborn as sns\nfrom scipy import stats\n\n# Constants\nCOLUMN_NAMES = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']\n\ndef task_func(data):\n    # Compute the average of each row\n    data['Average'] = data.mean(axis=1)\n    \n    # Plot the distribution of these avera",
+    "starts_with_Clarify": false,
+    "starts_with_Execute": true,
+    "has_question_mark": false,
+    "has_code_marker": true
+  },
+  {
+    "state_idx": 1,
+    "persona": "Experienced-Engineer",
+    "text30": "Clarify\nWhat specific type of plot do you want for the distribution of the averages (e.g., histogram, density plot)? Additionally, which normal",
+    "text200_first300": "Clarify\nWhat specific type of plot do you want for the distribution of the averages (e.g., histogram, density plot)? Additionally, which normality test should be used (e.g., Shapiro-Wilk, Anderson-Darling)?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 2,
+    "persona": "Novice-Learner",
+    "text30": "Clarify\nWhat specific categories do you want to include in the stacked bar chart? Also, how many categories would you like to have?",
+    "text200_first300": "Clarify\nWhat specific categories do you want to include in the stacked bar chart? Also, how many categories would you like to have?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 2,
+    "persona": "Busy-Developer",
+    "text30": "Execute\n```python\nimport numpy as np\nimport pandas as pd\nimport matplotlib.pyplot as plt\n\ndef task_func(rows=5, cols=",
+    "text200_first300": "Execute\n```python\nimport numpy as np\nimport pandas as pd\nimport matplotlib.pyplot as plt\n\ndef task_func(rows=5, cols=5):\n    data = np.random.rand(rows, cols)\n    df = pd.DataFrame(data, columns=[f'Category {i+1}' for i in range(cols)])\n    \n    df.plot(kind='bar', stacked=True)\n    plt.title('Stack",
+    "starts_with_Clarify": false,
+    "starts_with_Execute": true,
+    "has_question_mark": false,
+    "has_code_marker": true
+  },
+  {
+    "state_idx": 2,
+    "persona": "Experienced-Engineer",
+    "text30": "Clarify\nWhat specific categories do you want to include in the stacked bar chart? Additionally, how many categories would you like to have?",
+    "text200_first300": "Clarify\nWhat specific categories do you want to include in the stacked bar chart? Additionally, how many categories would you like to have?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 3,
+    "persona": "Novice-Learner",
+    "text30": "Clarify\nWhat is the expected output format for the sorted DataFrame? Should it be returned directly or printed? \n\nAre there any specific error handling requirements",
+    "text200_first300": "Clarify\nWhat is the expected output format for the sorted DataFrame? Should it be returned directly or printed? \n\nAre there any specific error handling requirements if the CSV URL is invalid or the sort_by_column does not exist in the DataFrame?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 3,
+    "persona": "Busy-Developer",
+    "text30": "Execute\n```python\nimport pandas as pd\nimport requests\nfrom io import StringIO\n\ndef task_func(csv_url, sort_by_column=\"title\"):",
+    "text200_first300": "Execute\n```python\nimport pandas as pd\nimport requests\nfrom io import StringIO\n\ndef task_func(csv_url, sort_by_column=\"title\"):\n    response = requests.get(csv_url)\n    df = pd.read_csv(StringIO(response.text))\n    return df.sort_values(by=sort_by_column)\n```",
+    "starts_with_Clarify": false,
+    "starts_with_Execute": true,
+    "has_question_mark": false,
+    "has_code_marker": true
+  },
+  {
+    "state_idx": 3,
+    "persona": "Experienced-Engineer",
+    "text30": "Clarify\nWhat is the expected sorting order (ascending or descending) for the `sort_by_column`? \n\nShould the function handle cases where the",
+    "text200_first300": "Clarify\nWhat is the expected sorting order (ascending or descending) for the `sort_by_column`? \n\nShould the function handle cases where the specified column does not exist in the CSV file?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 4,
+    "persona": "Novice-Learner",
+    "text30": "Clarify\nWhat specific type of random values do you want to generate for the new column (e.g., integers, floats)? Also, how would",
+    "text200_first300": "Clarify\nWhat specific type of random values do you want to generate for the new column (e.g., integers, floats)? Also, how would you like to name the new column?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 4,
+    "persona": "Busy-Developer",
+    "text30": "Execute\n```python\nimport pandas as pd\nimport numpy as np\n\ndef task_func(data, key, min_value, max_value):\n    data",
+    "text200_first300": "Execute\n```python\nimport pandas as pd\nimport numpy as np\n\ndef task_func(data, key, min_value, max_value):\n    data[key] = np.random.uniform(min_value, max_value, size=len(data))\n    return data\n```",
+    "starts_with_Clarify": false,
+    "starts_with_Execute": true,
+    "has_question_mark": false,
+    "has_code_marker": true
+  },
+  {
+    "state_idx": 4,
+    "persona": "Experienced-Engineer",
+    "text30": "Clarify\nWhat specific type of random values do you want to generate for the new column (e.g., integers, floats)? Additionally, should the",
+    "text200_first300": "Clarify\nWhat specific type of random values do you want to generate for the new column (e.g., integers, floats)? Additionally, should the function return the modified DataFrame or just update it in place?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 5,
+    "persona": "Novice-Learner",
+    "text30": "Clarify\nWhat specific format or type of output do you expect for the plotted values? Should it be a line plot, bar chart, or something",
+    "text200_first300": "Clarify\nWhat specific format or type of output do you expect for the plotted values? Should it be a line plot, bar chart, or something else? \n\nAlso, how should the function handle cases where the lengths of `l1` and `l2` are not equal?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 5,
+    "persona": "Busy-Developer",
+    "text30": "Execute\n```python\nimport heapq\nimport math\nimport matplotlib.pyplot as plt\n\ndef task_func(l1, l2, N=10",
+    "text200_first300": "Execute\n```python\nimport heapq\nimport math\nimport matplotlib.pyplot as plt\n\ndef task_func(l1, l2, N=10):\n    differences = [math.sqrt((x - y) ** 2) for x, y in zip(l1, l2)]\n    largest_differences = heapq.nlargest(N, differences)\n    \n    plt.plot(largest_differences)\n    plt.xlabel('Index')\n    plt",
+    "starts_with_Clarify": false,
+    "starts_with_Execute": true,
+    "has_question_mark": false,
+    "has_code_marker": true
+  },
+  {
+    "state_idx": 5,
+    "persona": "Experienced-Engineer",
+    "text30": "Clarify\nWhat specific format or style do you want for the plot (e.g., line plot, bar chart)? Additionally, should the function handle",
+    "text200_first300": "Clarify\nWhat specific format or style do you want for the plot (e.g., line plot, bar chart)? Additionally, should the function handle cases where the lengths of `l1` and `l2` are not equal?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 6,
+    "persona": "Novice-Learner",
+    "text30": "Clarify\nWhat is the specific URL pattern you want to use for matching URLs in the JSON string? Additionally, how do you want to handle cases",
+    "text200_first300": "Clarify\nWhat is the specific URL pattern you want to use for matching URLs in the JSON string? Additionally, how do you want to handle cases where there are more than `top_n` URLs?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 6,
+    "persona": "Busy-Developer",
+    "text30": "Execute\n```python\nimport re\nimport json\nfrom collections import Counter\n\ndef task_func(json_str, top_n=10):\n    url",
+    "text200_first300": "Execute\n```python\nimport re\nimport json\nfrom collections import Counter\n\ndef task_func(json_str, top_n=10):\n    url_pattern = r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\\\(\\\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+'\n    urls = re.findall(url_pattern, json_str)\n    url_counts = Counter(urls)\n    return dic",
+    "starts_with_Clarify": false,
+    "starts_with_Execute": true,
+    "has_question_mark": true,
+    "has_code_marker": true
+  },
+  {
+    "state_idx": 6,
+    "persona": "Experienced-Engineer",
+    "text30": "Clarify\nWhat is the specific URL pattern you want to use for matching URLs in the JSON string? Additionally, how should the function handle cases where",
+    "text200_first300": "Clarify\nWhat is the specific URL pattern you want to use for matching URLs in the JSON string? Additionally, how should the function handle cases where no URLs match the pattern?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 7,
+    "persona": "Novice-Learner",
+    "text30": "Clarify\nWhat format is the input data expected to be in (e.g., list of dictionaries, DataFrame)? Also, do you have any specific",
+    "text200_first300": "Clarify\nWhat format is the input data expected to be in (e.g., list of dictionaries, DataFrame)? Also, do you have any specific labels or colors for the pie chart segments?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 7,
+    "persona": "Busy-Developer",
+    "text30": "Execute\n```python\nimport pandas as pd\nimport matplotlib.pyplot as plt\n\ndef task_func(data):\n    df = pd.DataFrame(data)\n    job",
+    "text200_first300": "Execute\n```python\nimport pandas as pd\nimport matplotlib.pyplot as plt\n\ndef task_func(data):\n    df = pd.DataFrame(data)\n    job_distribution = df['job'].value_counts()\n    plt.figure(figsize=(8, 6))\n    plt.pie(job_distribution.values, labels=job_distribution.index, autopct='%1.1f%%', startangle=140",
+    "starts_with_Clarify": false,
+    "starts_with_Execute": true,
+    "has_question_mark": false,
+    "has_code_marker": true
+  },
+  {
+    "state_idx": 7,
+    "persona": "Experienced-Engineer",
+    "text30": "Clarify\nWhat specific format should the returned plot object be in (e.g., a file path, a display object, etc.)? Additionally,",
+    "text200_first300": "Clarify\nWhat specific format should the returned plot object be in (e.g., a file path, a display object, etc.)? Additionally, how should the function handle cases where the input data does not contain any job information?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  }
+]

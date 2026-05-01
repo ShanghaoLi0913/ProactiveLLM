@@ -1,0 +1,242 @@
+[
+  {
+    "state_idx": 0,
+    "persona": "Novice-Learner",
+    "text30": "Clarify\nWhat should be the format of the output array? Should it be a 1D array or 2D? Also, are there",
+    "text200_first300": "Clarify\nWhat should be the format of the output array? Should it be a 1D array or 2D? Also, are there any specific constraints for the random numbers (e.g., range, precision)?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 0,
+    "persona": "Busy-Developer",
+    "text30": "Execute\n```python\nimport numpy as np\nimport random\n\ndef task_func(my_list):\n    random_number = random.randint(0, 100",
+    "text200_first300": "Execute\n```python\nimport numpy as np\nimport random\n\ndef task_func(my_list):\n    random_number = random.randint(0, 100)\n    my_list.append(random_number)\n    total_sum = sum(my_list)\n    return np.random.rand(total_sum).astype(np.float64)\n```",
+    "starts_with_Clarify": false,
+    "starts_with_Execute": true,
+    "has_question_mark": false,
+    "has_code_marker": true
+  },
+  {
+    "state_idx": 0,
+    "persona": "Experienced-Engineer",
+    "text30": "Clarify\nWhat should be the format of the output array? Should it be a 1D array or 2D? Also, are there",
+    "text200_first300": "Clarify\nWhat should be the format of the output array? Should it be a 1D array or 2D? Also, are there any specific constraints on the random numbers generated?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 1,
+    "persona": "Novice-Learner",
+    "text30": "Clarify\nWhat format should the output be in for the DataFrame? Should the averages be returned as a new column, and if so, what should",
+    "text200_first300": "Clarify\nWhat format should the output be in for the DataFrame? Should the averages be returned as a new column, and if so, what should its name be? Also, what type of normality test would you like to use (e.g., Shapiro-Wilk, Anderson-Darling)?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 1,
+    "persona": "Busy-Developer",
+    "text30": "Execute\n```python\nimport pandas as pd\nimport seaborn as sns\nfrom scipy import stats\nimport matplotlib.pyplot as plt\n\nCOLUMN_NAMES = ['",
+    "text200_first300": "Execute\n```python\nimport pandas as pd\nimport seaborn as sns\nfrom scipy import stats\nimport matplotlib.pyplot as plt\n\nCOLUMN_NAMES = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']\n\ndef task_func(data):\n    averages = data.mean(axis=1)\n    data['Average'] = averages\n    \n    plt.figure(figsize=(10, 6))\n    ",
+    "starts_with_Clarify": false,
+    "starts_with_Execute": true,
+    "has_question_mark": false,
+    "has_code_marker": true
+  },
+  {
+    "state_idx": 1,
+    "persona": "Experienced-Engineer",
+    "text30": "Clarify\nWhat format should the output DataFrame have for the additional column of averages? Should it include any specific structure or just a simple column name?",
+    "text200_first300": "Clarify\nWhat format should the output DataFrame have for the additional column of averages? Should it include any specific structure or just a simple column name? Additionally, what type of normality test would you like to use (e.g., Shapiro-Wilk, Anderson-Darling)?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 2,
+    "persona": "Novice-Learner",
+    "text30": "Clarify\nWhat format do you want the DataFrame to be in (e.g., integer values, float values)? Also, what specific categories do you",
+    "text200_first300": "Clarify\nWhat format do you want the DataFrame to be in (e.g., integer values, float values)? Also, what specific categories do you want for the stacked bar chart?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 2,
+    "persona": "Busy-Developer",
+    "text30": "Execute\n```python\nimport numpy as np\nimport pandas as pd\nimport matplotlib.pyplot as plt\n\ndef task_func(rows=5, cols=",
+    "text200_first300": "Execute\n```python\nimport numpy as np\nimport pandas as pd\nimport matplotlib.pyplot as plt\n\ndef task_func(rows=5, cols=5):\n    # Generate random numerical data\n    data = np.random.rand(rows, cols)\n    \n    # Create a DataFrame\n    df = pd.DataFrame(data, columns=[f'Category {i}' for i in range(cols)]",
+    "starts_with_Clarify": false,
+    "starts_with_Execute": true,
+    "has_question_mark": false,
+    "has_code_marker": true
+  },
+  {
+    "state_idx": 2,
+    "persona": "Experienced-Engineer",
+    "text30": "Clarify\nWhat format should the DataFrame have? Should the numerical data be integers or floats? Also, what specific categories do you want for the stacked",
+    "text200_first300": "Clarify\nWhat format should the DataFrame have? Should the numerical data be integers or floats? Also, what specific categories do you want for the stacked bar chart?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 3,
+    "persona": "Novice-Learner",
+    "text30": "Clarify\nWhat should be the return type of the function? Should it return just the DataFrame or include any additional information? Also, what should handle",
+    "text200_first300": "Clarify\nWhat should be the return type of the function? Should it return just the DataFrame or include any additional information? Also, what should handle cases where the CSV file is invalid or the column does not exist?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 3,
+    "persona": "Busy-Developer",
+    "text30": "Execute\n```python\nimport pandas as pd\nimport requests\nfrom io import StringIO\n\ndef task_func(csv_url, sort_by_column=\"title\"):",
+    "text200_first300": "Execute\n```python\nimport pandas as pd\nimport requests\nfrom io import StringIO\n\ndef task_func(csv_url, sort_by_column=\"title\"):\n    response = requests.get(csv_url)\n    df = pd.read_csv(StringIO(response.text))\n    return df.sort_values(by=sort_by_column)\n```",
+    "starts_with_Clarify": false,
+    "starts_with_Execute": true,
+    "has_question_mark": false,
+    "has_code_marker": true
+  },
+  {
+    "state_idx": 3,
+    "persona": "Experienced-Engineer",
+    "text30": "Clarify\nWhat should be the return type of the function? Should it return just the sorted DataFrame, or include any error handling?",
+    "text200_first300": "Clarify\nWhat should be the return type of the function? Should it return just the sorted DataFrame, or include any error handling?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 4,
+    "persona": "Novice-Learner",
+    "text30": "Clarify\nWhat type of values do you want in the new column (e.g., integers, floats, strings)? Also, how many rows should",
+    "text200_first300": "Clarify\nWhat type of values do you want in the new column (e.g., integers, floats, strings)? Also, how many rows should the DataFrame have?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 4,
+    "persona": "Busy-Developer",
+    "text30": "Execute\n```python\nimport pandas as pd\nimport numpy as np\n\ndef task_func(data, key, min_value, max_value):\n    data",
+    "text200_first300": "Execute\n```python\nimport pandas as pd\nimport numpy as np\n\ndef task_func(data, key, min_value, max_value):\n    data[key] = np.random.randint(min_value, max_value, size=len(data))\n    return data\n```",
+    "starts_with_Clarify": false,
+    "starts_with_Execute": true,
+    "has_question_mark": false,
+    "has_code_marker": true
+  },
+  {
+    "state_idx": 4,
+    "persona": "Experienced-Engineer",
+    "text30": "Clarify\nWhat type of values should be generated for the new column (e.g., integers, floats, strings)? Also, what is the expected",
+    "text200_first300": "Clarify\nWhat type of values should be generated for the new column (e.g., integers, floats, strings)? Also, what is the expected format for the random values (e.g., uniform distribution, normal distribution)?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 5,
+    "persona": "Novice-Learner",
+    "text30": "Clarify\nWhat format should the output be in? Should the function return the Axes object, or just display the plot? Also, what type of",
+    "text200_first300": "Clarify\nWhat format should the output be in? Should the function return the Axes object, or just display the plot? Also, what type of validation should be done for the input lists (e.g., handling empty lists or lists of different lengths)?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 5,
+    "persona": "Busy-Developer",
+    "text30": "Execute\n```python\nimport heapq\nimport math\nimport matplotlib.pyplot as plt\n\ndef task_func(l1, l2, N=10):",
+    "text200_first300": "Execute\n```python\nimport heapq\nimport math\nimport matplotlib.pyplot as plt\n\ndef task_func(l1, l2, N=10):\n    if len(l1)!= len(l2):\n        raise ValueError(\"Lists must be of the same length\")\n    \n    differences = [abs(a - b) for a, b in zip(l1, l2)]\n    squared_diffs = [d ** 2 for d in differences",
+    "starts_with_Clarify": false,
+    "starts_with_Execute": true,
+    "has_question_mark": false,
+    "has_code_marker": true
+  },
+  {
+    "state_idx": 5,
+    "persona": "Experienced-Engineer",
+    "text30": "Clarify\nWhat format should the output be in? Should the function return the Axes object directly, or is there a specific return type expected? Also",
+    "text200_first300": "Clarify\nWhat format should the output be in? Should the function return the Axes object directly, or is there a specific return type expected? Also, are there any specific validation rules for the input lists (e.g., handling empty lists)?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 6,
+    "persona": "Novice-Learner",
+    "text30": "Clarify\nWhat format should the output dictionary have? Should it include only the top N URLs or all URLs? Also, what is the specific URL",
+    "text200_first300": "Clarify\nWhat format should the output dictionary have? Should it include only the top N URLs or all URLs? Also, what is the specific URL pattern you'd like to use for extraction?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 6,
+    "persona": "Busy-Developer",
+    "text30": "Execute\n```python\nimport re\nimport json\nfrom collections import Counter\n\ndef task_func(json_str, top_n=10):\n    try:",
+    "text200_first300": "Execute\n```python\nimport re\nimport json\nfrom collections import Counter\n\ndef task_func(json_str, top_n=10):\n    try:\n        data = json.loads(json_str)\n    except json.JSONDecodeError:\n        return {}\n    \n    url_pattern = r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\\\(\\\\),]|(?:%[0-9a-fA-F][0-9a",
+    "starts_with_Clarify": false,
+    "starts_with_Execute": true,
+    "has_question_mark": true,
+    "has_code_marker": true
+  },
+  {
+    "state_idx": 6,
+    "persona": "Experienced-Engineer",
+    "text30": "Clarify\nWhat specific URL pattern should be used for matching URLs? Also, what should be the format of the output dictionary? Should it include only",
+    "text200_first300": "Clarify\nWhat specific URL pattern should be used for matching URLs? Also, what should be the format of the output dictionary? Should it include only the top N URLs or all URLs?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 7,
+    "persona": "Novice-Learner",
+    "text30": "Clarify\nWhat format should the output be in? Should the pie chart include labels, titles, or any specific colors? Also, what type of",
+    "text200_first300": "Clarify\nWhat format should the output be in? Should the pie chart include labels, titles, or any specific colors? Also, what type of data is in the input? Is it a DataFrame with job titles as columns?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  },
+  {
+    "state_idx": 7,
+    "persona": "Busy-Developer",
+    "text30": "Execute\n```python\nimport pandas as pd\nimport matplotlib.pyplot as plt\n\ndef task_func(data):\n    df = pd.DataFrame(data)\n    labels",
+    "text200_first300": "Execute\n```python\nimport pandas as pd\nimport matplotlib.pyplot as plt\n\ndef task_func(data):\n    df = pd.DataFrame(data)\n    labels = df['Job'].unique()\n    sizes = df['Job'].value_counts()\n    \n    plt.figure(figsize=(10, 6))\n    plt.pie(sizes, labels=labels, autopct='%1.1f%%')\n    plt.title('Job Di",
+    "starts_with_Clarify": false,
+    "starts_with_Execute": true,
+    "has_question_mark": false,
+    "has_code_marker": true
+  },
+  {
+    "state_idx": 7,
+    "persona": "Experienced-Engineer",
+    "text30": "Clarify\nWhat format should the output of the pie chart be? Should it be a specific type of plot object, like a matplotlib axes object,",
+    "text200_first300": "Clarify\nWhat format should the output of the pie chart be? Should it be a specific type of plot object, like a matplotlib axes object, or just the figure? Also, what is the structure of the input data? Is it a DataFrame with job titles as columns?",
+    "starts_with_Clarify": true,
+    "starts_with_Execute": false,
+    "has_question_mark": true,
+    "has_code_marker": false
+  }
+]
