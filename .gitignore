@@ -59,11 +59,25 @@ scripts/run_experiment.sh
 scripts/activate_env.sh
 
 # BigCodeBench task execution pollution (root-level junk from eval runs)
+# These dirs/files are created by BCB tasks executing scratch I/O.
 /*.png
 /*.csv
+/*.json
+/*.txt.json
 key4_*.txt
 Untitled
 split_aa
+
+# BCB-created scratch dirs at repo root
+/d/
+/dst/
+/destination/
+/downloads/
+/ftp/
+/invalid_directory/
+/s/
+/source/
+/src/
 
 # Temporary test files
 *.txt
