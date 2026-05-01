@@ -1,0 +1,242 @@
+[
+  {
+    "state_id": "idx_0",
+    "persona": "Novice-Learner",
+    "n_masked": 3,
+    "text30": "Of course! Let's break down what you need to do step-by-step.\n\n1. **Import necessary libraries**: We need `numpy` for generating",
+    "text200": "Of course! Let's break down what you need to do step-by-step.\n\n1. **Import necessary libraries**: We need `numpy` for generating random floating-point numbers and `random` for generating a random integer.\n2. **Modify the list**: Append a random integer between 0 and 100 to the given list.\n3. **Generate a numpy array**: Create an array of random floating-point numbers whose size is equal to the sum of the numbers in the modified list.\n\nHere\u2019s how you can write the function:\n\n```python\nimport numpy as np\nimport random\n\ndef task_func(my_list):\n    # Step 1: Append a random integer between 0 and 100 to the list\n    my_list.append(random.randint(0, 100))\n    \n    # Step 2: Calculate the sum of the numbers in the modified list\n    total_sum = sum(my_list)\n    \n    # Step 3: Generate a numpy array of random",
+    "v1": "Clarify",
+    "v2": "Execute",
+    "agree": false
+  },
+  {
+    "state_id": "idx_0",
+    "persona": "Busy-Developer",
+    "n_masked": 3,
+    "text30": "```python\nimport numpy as np\nimport random\ndef task_func(my_list):\n    my_list.append(random.randint(0, 100",
+    "text200": "```python\nimport numpy as np\nimport random\ndef task_func(my_list):\n    my_list.append(random.randint(0, 100))\n    return np.random.rand(sum(my_list))\n```",
+    "v1": "Execute",
+    "v2": "Execute",
+    "agree": true
+  },
+  {
+    "state_id": "idx_0",
+    "persona": "Experienced-Engineer",
+    "n_masked": 3,
+    "text30": "Sure! Below is the complete code that appends a randomly selected integer between 0 and 100 to the given list `my_list`,",
+    "text200": "Sure! Below is the complete code that appends a randomly selected integer between 0 and 100 to the given list `my_list`, and then returns a NumPy array of random floating-point numbers. The size of the returned array is equal to the sum of the numbers in the modified list.\n\n```python\nimport numpy as np\nimport random\n\ndef task_func(my_list):\n    # Append a random integer between 0 and 100 to the list\n    my_list.append(random.randint(0, 100))\n    \n    # Calculate the sum of the numbers in the modified list\n    total_sum = sum(my_list)\n    \n    # Generate a NumPy array of random floating-point numbers\n    random_array = np.random.rand(total_sum)\n    \n    return random_array\n\n# Example usage:\nmy_list = [1, 2, 3]\nresult = task_func(my_list)\nprint(result)\n```\n\nThis function first appends a random integer between",
+    "v1": "Clarify",
+    "v2": "Execute",
+    "agree": false
+  },
+  {
+    "state_id": "idx_1",
+    "persona": "Novice-Learner",
+    "n_masked": 3,
+    "text30": "Sure! Let's break down the task into smaller steps and write the code step-by-step. We'll start by importing the necessary libraries, defining the",
+    "text200": "Sure! Let's break down the task into smaller steps and write the code step-by-step. We'll start by importing the necessary libraries, defining the constants, and then implementing the function `task_func`.\n\nHere\u2019s how we can do it:\n\n1. **Import Libraries**: We need `pandas` for data manipulation, `seaborn` for plotting, and `scipy.stats` for statistical tests.\n2. **Define Constants**: We have predefined column names.\n3. **Implement the Function**: This function will process the dataset, compute the average of each row, plot the distribution of these averages, and evaluate their normality using a normality test (like the Shapiro-Wilk test).\n\nLet's start with the code:\n\n```python\nimport pandas as pd\nimport seaborn as sns\nfrom scipy import stats\n\n# Constants\nCOLUMN_NAMES = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']\n\ndef task_func(data",
+    "v1": "Clarify",
+    "v2": "Execute",
+    "agree": false
+  },
+  {
+    "state_id": "idx_1",
+    "persona": "Busy-Developer",
+    "n_masked": 3,
+    "text30": "```python\nimport pandas as pd\nimport seaborn as sns\nfrom scipy import stats\n\nCOLUMN_NAMES = ['A', 'B', 'C',",
+    "text200": "```python\nimport pandas as pd\nimport seaborn as sns\nfrom scipy import stats\n\nCOLUMN_NAMES = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']\n\ndef task_func(data):\n    # Ensure data is a DataFrame\n    if not isinstance(data, pd.DataFrame):\n        raise ValueError(\"Input data must be a pandas DataFrame\")\n    \n    # Compute the average of each row\n    data['Average'] = data.mean(axis=1)\n    \n    # Plot the distribution of these averages\n    sns.histplot(data['Average'], kde=True)\n    plt.title('Distribution of Row Averages')\n    plt.show()\n    \n    # Evaluate normality using Shapiro-Wilk test\n    stat, p_value = stats.shapiro(data['Average'])\n    \n    return data['Average'], plt.gcf(), p_value\n```",
+    "v1": "Execute",
+    "v2": "Execute",
+    "agree": true
+  },
+  {
+    "state_id": "idx_1",
+    "persona": "Experienced-Engineer",
+    "n_masked": 3,
+    "text30": "Sure! Below is the complete Python function that processes a given dataset to compute the average of each row, plots the distribution of these averages, and evaluates",
+    "text200": "Sure! Below is the complete Python function that processes a given dataset to compute the average of each row, plots the distribution of these averages, and evaluates their normality using the Shapiro-Wilk test. The function returns the DataFrame with an additional column containing the row averages, the plot of the distribution, and the p-value from the normality test.\n\n```python\nimport pandas as pd\nimport seaborn as sns\nimport matplotlib.pyplot as plt\nfrom scipy import stats\n\n# Constants\nCOLUMN_NAMES = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']\n\ndef task_func(data):\n    \"\"\"\n    Processes a given dataset to compute the average of each row, plots the distribution of these averages,\n    and evaluates their normality. Returns the DataFrame with an additional column containing the row averages,\n    the plot of the distribution, and the p-value from the normality test.\n    \n    :param data: A pandas DataFrame containing the dataset.",
+    "v1": "Clarify",
+    "v2": "Execute",
+    "agree": false
+  },
+  {
+    "state_id": "idx_2",
+    "persona": "Novice-Learner",
+    "n_masked": 3,
+    "text30": "Sure! Let's break down the task into smaller steps to make it easier to understand. We'll create a DataFrame with random numerical data and then visualize",
+    "text200": "Sure! Let's break down the task into smaller steps to make it easier to understand. We'll create a DataFrame with random numerical data and then visualize this data using a stacked bar chart.\n\nHere\u2019s how we can do it:\n\n1. **Import necessary libraries**: We need `numpy` for generating random numbers and `pandas` for creating the DataFrame.\n2. **Create the DataFrame**: We will generate random numerical data and put it into a DataFrame.\n3. **Visualize the Data**: We will use a stacked bar chart to visualize the data.\n\nLet's start with the code:\n\n```python\nimport numpy as np\nimport pandas as pd\nimport matplotlib.pyplot as plt\n\ndef task_func(rows=5, cols=5):\n    \"\"\"\n    Generates a DataFrame with random numerical data and visualizes this data in a stacked bar chart.\n    \n    Parameters:\n    - rows: Number of categories (default is 5).\n    - cols: Number of subcategories per category (default is",
+    "v1": "Clarify",
+    "v2": "Execute",
+    "agree": false
+  },
+  {
+    "state_id": "idx_2",
+    "persona": "Busy-Developer",
+    "n_masked": 3,
+    "text30": "```python\nimport numpy as np\nimport pandas as pd\nimport matplotlib.pyplot as plt\ndef task_func(rows=5, cols=5):",
+    "text200": "```python\nimport numpy as np\nimport pandas as pd\nimport matplotlib.pyplot as plt\ndef task_func(rows=5, cols=5):\n    df = pd.DataFrame(np.random.rand(rows, cols), columns=[f'Category_{i+1}' for i in range(cols)])\n    df.plot(kind='bar', stacked=True)\n    plt.show()\n```",
+    "v1": "Execute",
+    "v2": "Execute",
+    "agree": true
+  },
+  {
+    "state_id": "idx_2",
+    "persona": "Experienced-Engineer",
+    "n_masked": 3,
+    "text30": "Sure! Below is the self-contained code that generates a DataFrame with random numerical data and visualizes this data in a stacked bar chart for specified categories.",
+    "text200": "Sure! Below is the self-contained code that generates a DataFrame with random numerical data and visualizes this data in a stacked bar chart for specified categories.\n\n```python\nimport numpy as np\nimport pandas as pd\nimport matplotlib.pyplot as plt\n\ndef task_func(rows=5, cols=5):\n    \"\"\"\n    Generates a DataFrame with random numerical data and visualizes this data in a stacked bar chart.\n\n    Parameters:\n    rows (int): Number of categories.\n    cols (int): Number of subcategories within each category.\n    \"\"\"\n    # Generate random data\n    np.random.seed(0)  # For reproducibility\n    data = np.random.rand(rows, cols)\n    \n    # Create categories and subcategories\n    categories = [f'Category {i+1}' for i in range(rows)]\n    subcategories = [f'Subcategory {j+1}' for j in range(cols)]\n    \n    # Create DataFrame\n    df = pd.DataFrame(data, index=c",
+    "v1": "Clarify",
+    "v2": "Execute",
+    "agree": false
+  },
+  {
+    "state_id": "idx_3",
+    "persona": "Novice-Learner",
+    "n_masked": 3,
+    "text30": "Sure! Let's break down the task into simple steps. We need to:\n\n1. Fetch the data from the given CSV URL.\n2. Load",
+    "text200": "Sure! Let's break down the task into simple steps. We need to:\n\n1. Fetch the data from the given CSV URL.\n2. Load the data into a pandas DataFrame.\n3. Sort the DataFrame based on the specified column.\n4. Return the sorted DataFrame.\n\nHere is the complete code for you:\n\n```python\nimport pandas as pd\nimport requests\nfrom io import StringIO\n\ndef task_func(csv_url, sort_by_column=\"title\"):\n    # Step 1: Fetch the data from the CSV URL\n    response = requests.get(csv_url)\n    \n    # Check if the request was successful\n    if response.status_code != 200:\n        print(f\"Failed to fetch data. Status code: {response.status_code}\")\n        return None\n    \n    # Step 2: Convert the CSV content to a string and load it into a DataFrame\n    csv_content = response.text\n    df = pd.read_csv(StringIO(csv_content))\n    \n    # Step 3:",
+    "v1": "Clarify",
+    "v2": "Execute",
+    "agree": false
+  },
+  {
+    "state_id": "idx_3",
+    "persona": "Busy-Developer",
+    "n_masked": 3,
+    "text30": "```python\nimport pandas as pd\nimport requests\nfrom io import StringIO\n\ndef task_func(csv_url, sort_by_column=\"title\"):\n    response",
+    "text200": "```python\nimport pandas as pd\nimport requests\nfrom io import StringIO\n\ndef task_func(csv_url, sort_by_column=\"title\"):\n    response = requests.get(csv_url)\n    df = pd.read_csv(StringIO(response.text))\n    df.sort_values(by=sort_by_column, inplace=True)\n    return df\n```",
+    "v1": "Execute",
+    "v2": "Execute",
+    "agree": true
+  },
+  {
+    "state_id": "idx_3",
+    "persona": "Experienced-Engineer",
+    "n_masked": 3,
+    "text30": "Sure! Below is the complete Python function that fetches data from a given CSV URL, reads it into a pandas DataFrame, and sorts it based on",
+    "text200": "Sure! Below is the complete Python function that fetches data from a given CSV URL, reads it into a pandas DataFrame, and sorts it based on the specified column. The function assumes that the CSV file has a header row.\n\n```python\nimport pandas as pd\nimport requests\nfrom io import StringIO\n\ndef task_func(csv_url, sort_by_column=\"title\"):\n    \"\"\"\n    Fetches data from a given CSV URL and returns a pandas DataFrame sorted based on the specified column.\n\n    :param csv_url: URL of the CSV file\n    :param sort_by_column: Column name to sort the DataFrame by (default is \"title\")\n    :return: Sorted pandas DataFrame\n    \"\"\"\n    # Fetch the content from the URL\n    response = requests.get(csv_url)\n    \n    # Check if the request was successful\n    if response.status_code != 200:\n        raise Exception(f\"Failed to fetch data from {csv_url}. Status code: {response.status_code}\")",
+    "v1": "Clarify",
+    "v2": "Execute",
+    "agree": false
+  },
+  {
+    "state_id": "idx_4",
+    "persona": "Novice-Learner",
+    "n_masked": 3,
+    "text30": "Of course! Let's break down the task into simple steps. We want to add a new column to your `data` DataFrame that contains random values",
+    "text200": "Of course! Let's break down the task into simple steps. We want to add a new column to your `data` DataFrame that contains random values between a specified minimum and maximum value.\n\nHere\u2019s how you can do it:\n\n1. Import the necessary libraries.\n2. Define the function `task_func` that takes the DataFrame (`data`), a key (which will be the name of the new column), and the range for the random values (minimum and maximum).\n3. Use `numpy` to generate random values within the specified range.\n4. Add this new column to the DataFrame.\n\nLet's write the complete code together:\n\n```python\nimport pandas as pd\nimport numpy as np\n\ndef task_func(data, key, min_value, max_value):\n    \"\"\"\n    Adds a new column with random values to the DataFrame.\n\n    Parameters:\n    - data: The DataFrame to which the new column will be added.\n    - key: The name of the new column.\n    - min",
+    "v1": "Clarify",
+    "v2": "Execute",
+    "agree": false
+  },
+  {
+    "state_id": "idx_4",
+    "persona": "Busy-Developer",
+    "n_masked": 3,
+    "text30": "```python\nimport pandas as pd\nimport numpy as np\ndef task_func(data, key, min_value, max_value):\n    data[key]",
+    "text200": "```python\nimport pandas as pd\nimport numpy as np\ndef task_func(data, key, min_value, max_value):\n    data[key] = np.random.uniform(min_value, max_value, size=len(data))\n    return data\n```",
+    "v1": "Execute",
+    "v2": "Execute",
+    "agree": true
+  },
+  {
+    "state_id": "idx_4",
+    "persona": "Experienced-Engineer",
+    "n_masked": 3,
+    "text30": "Sure! Below is the complete function that adds a new column with random values to the `data` DataFrame. The random values will be between `min",
+    "text200": "Sure! Below is the complete function that adds a new column with random values to the `data` DataFrame. The random values will be between `min_value` and `max_value`.\n\n```python\nimport pandas as pd\nimport numpy as np\n\ndef task_func(data, key, min_value, max_value):\n    \"\"\"\n    Adds a new column with random values to the data DataFrame.\n\n    Parameters:\n    - data (pd.DataFrame): The input DataFrame.\n    - key (str): The name of the new column.\n    - min_value (float): The minimum value for the random numbers.\n    - max_value (float): The maximum value for the random numbers.\n\n    Returns:\n    - pd.DataFrame: The DataFrame with the new column added.\n    \"\"\"\n    # Generate random values between min_value and max_value\n    random_values = np.random.uniform(min_value, max_value, size=len(data))\n    \n    # Add the new column to the DataFrame\n    data[key] = random_values",
+    "v1": "Clarify",
+    "v2": "Execute",
+    "agree": false
+  },
+  {
+    "state_id": "idx_5",
+    "persona": "Novice-Learner",
+    "n_masked": 3,
+    "text30": "Sure! Let's break down the task step-by-step to make it easier for you to understand and implement.\n\n### Step-by-Step Explanation\n\n1",
+    "text200": "Sure! Let's break down the task step-by-step to make it easier for you to understand and implement.\n\n### Step-by-Step Explanation\n\n1. **Input Parameters**:\n   - `l1` and `l2`: These are the two lists whose elements we will compare.\n   - `N`: This is the number of largest differences you want to find.\n\n2. **Calculate Differences**:\n   - We need to calculate the difference between corresponding elements in `l1` and `l2`.\n\n3. **Square and Square Root**:\n   - Square each difference.\n   - Take the square root of the squared differences.\n\n4. **Find the Largest Differences**:\n   - Use a heap to efficiently find the `N` largest differences.\n\n5. **Plotting**:\n   - Plot the `N` largest differences using `matplotlib`.\n\n### Code Implementation\n\nHere's the complete code:\n\n```python\nimport heapq\nimport math\nimport matplotlib.pyplot as plt\n\ndef task",
+    "v1": "Clarify",
+    "v2": "Execute",
+    "agree": false
+  },
+  {
+    "state_id": "idx_5",
+    "persona": "Busy-Developer",
+    "n_masked": 3,
+    "text30": "```python\nimport heapq\nimport math\nimport matplotlib.pyplot as plt\n\ndef task_func(l1, l2, N=10):",
+    "text200": "```python\nimport heapq\nimport math\nimport matplotlib.pyplot as plt\n\ndef task_func(l1, l2, N=10):\n    diffs = [math.sqrt((x - y) ** 2) for x, y in zip(l1, l2)]\n    top_diffs = heapq.nlargest(N, diffs)\n    plt.plot(top_diffs)\n    plt.show()\n    return plt.gca()\n```",
+    "v1": "Execute",
+    "v2": "Execute",
+    "agree": true
+  },
+  {
+    "state_id": "idx_5",
+    "persona": "Experienced-Engineer",
+    "n_masked": 3,
+    "text30": "Sure! Below is the complete Python function that performs the required operations. The function calculates the differences between corresponding elements in `l1` and `l",
+    "text200": "Sure! Below is the complete Python function that performs the required operations. The function calculates the differences between corresponding elements in `l1` and `l2`, squares these differences, takes the square root, and then returns the top `N` values plotted using `matplotlib`.\n\n```python\nimport heapq\nimport math\nimport matplotlib.pyplot as plt\n\ndef task_func(l1, l2, N=10):\n    # Ensure both lists have the same length\n    if len(l1) != len(l2):\n        raise ValueError(\"Both lists must have the same length.\")\n    \n    # Calculate the differences, square them, and take the square root\n    differences = [math.sqrt((x - y) ** 2) for x, y in zip(l1, l2)]\n    \n    # Find the N largest differences\n    largest_diffs = heapq.nlargest(N, differences)\n    \n    # Plot the differences\n    plt.figure()\n    plt.bar(range(1,",
+    "v1": "Clarify",
+    "v2": "Execute",
+    "agree": false
+  },
+  {
+    "state_id": "idx_6",
+    "persona": "Novice-Learner",
+    "n_masked": 3,
+    "text30": "Sure! Let's break down the task step-by-step. We need to extract all URLs from a string-serialized JSON dictionary that match a specific pattern",
+    "text200": "Sure! Let's break down the task step-by-step. We need to extract all URLs from a string-serialized JSON dictionary that match a specific pattern, count how many times each URL appears, and then return a dictionary with these counts.\n\nHere\u2019s how we can do it:\n\n1. **Parse the JSON String**: Convert the JSON string into a Python dictionary.\n2. **Extract URLs**: Use a regular expression to find all URLs in the dictionary values.\n3. **Count URLs**: Count the occurrences of each URL.\n4. **Return the Result**: Return a dictionary with URLs as keys and their counts as values.\n\nLet's write the code for this:\n\n```python\nimport re\nimport json\nfrom collections import Counter\n\ndef task_func(json_str, top_n=10):\n    # Step 1: Parse the JSON string into a Python dictionary\n    try:\n        data = json.loads(json_str)\n    except json.JSONDecodeError:\n        print(\"Invalid JSON string\")",
+    "v1": "Clarify",
+    "v2": "Execute",
+    "agree": false
+  },
+  {
+    "state_id": "idx_6",
+    "persona": "Busy-Developer",
+    "n_masked": 3,
+    "text30": "```python\nimport re\nimport json\nfrom collections import Counter\n\ndef task_func(json_str, top_n=10):\n    data = json",
+    "text200": "```python\nimport re\nimport json\nfrom collections import Counter\n\ndef task_func(json_str, top_n=10):\n    data = json.loads(json_str)\n    urls = re.findall(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\\\(\\\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', str(data))\n    url_counts = Counter(urls)\n    return dict(url_counts.most_common(top_n))\n```",
+    "v1": "Execute",
+    "v2": "Execute",
+    "agree": true
+  },
+  {
+    "state_id": "idx_6",
+    "persona": "Experienced-Engineer",
+    "n_masked": 3,
+    "text30": "Sure! Below is the Python function that extracts all URLs from a string-serialized JSON dictionary based on a specific URL pattern, counts their occurrences, and",
+    "text200": "Sure! Below is the Python function that extracts all URLs from a string-serialized JSON dictionary based on a specific URL pattern, counts their occurrences, and returns a dictionary with the URLs as keys and the count as values. The function also supports an optional `top_n` parameter to limit the result to the top N most frequent URLs.\n\n```python\nimport re\nimport json\nfrom collections import Counter\n\ndef task_func(json_str, top_n=10):\n    # Define a regex pattern for URLs (you can customize this pattern as needed)\n    url_pattern = re.compile(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\\\(\\\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+')\n    \n    # Parse the JSON string into a dictionary\n    data_dict = json.loads(json_str)\n    \n    # Extract all URLs from the dictionary\n    urls = []\n    for",
+    "v1": "Clarify",
+    "v2": "Execute",
+    "agree": false
+  },
+  {
+    "state_id": "idx_7",
+    "persona": "Novice-Learner",
+    "n_masked": 3,
+    "text30": "Of course! Let's break down the task into simple steps. We'll start by creating a function called `task_func` that takes a DataFrame `",
+    "text200": "Of course! Let's break down the task into simple steps. We'll start by creating a function called `task_func` that takes a DataFrame `data` as input. This DataFrame should contain the job distribution information.\n\nWe'll then use `matplotlib` to create a pie chart based on this data. Here\u2019s how you can do it:\n\n1. Import the necessary libraries.\n2. Define the function `task_func`.\n3. Inside the function, extract the job distribution from the DataFrame.\n4. Create a pie chart using `matplotlib`.\n5. Return the plot object (which is the figure object in this case).\n\nHere is the complete code:\n\n```python\nimport pandas as pd\nimport matplotlib.pyplot as plt\n\ndef task_func(data):\n    \"\"\"\n    This function takes a DataFrame 'data' and returns a pie chart showing the job distribution.\n    \n    Parameters:\n    - data (pd.DataFrame): A DataFrame containing job distribution information.\n    \n    Returns:\n    - fig (plt.Figure",
+    "v1": "Clarify",
+    "v2": "Execute",
+    "agree": false
+  },
+  {
+    "state_id": "idx_7",
+    "persona": "Busy-Developer",
+    "n_masked": 3,
+    "text30": "```python\nimport pandas as pd\nimport matplotlib.pyplot as plt\ndef task_func(data):\n    df = pd.DataFrame(data)\n    counts = df",
+    "text200": "```python\nimport pandas as pd\nimport matplotlib.pyplot as plt\ndef task_func(data):\n    df = pd.DataFrame(data)\n    counts = df['job'].value_counts()\n    plt.figure()\n    counts.plot.pie(autopct='%1.1f%%')\n    plt.title('Job Distribution')\n    return plt\n```",
+    "v1": "Execute",
+    "v2": "Execute",
+    "agree": true
+  },
+  {
+    "state_id": "idx_7",
+    "persona": "Experienced-Engineer",
+    "n_masked": 3,
+    "text30": "Sure! Below is a self-contained Python function that takes a DataFrame `data` as input, extracts the job distribution, and returns a pie chart as",
+    "text200": "Sure! Below is a self-contained Python function that takes a DataFrame `data` as input, extracts the job distribution, and returns a pie chart as a `matplotlib` plot object.\n\n```python\nimport pandas as pd\nimport matplotlib.pyplot as plt\n\ndef task_func(data):\n    \"\"\"\n    This function takes a DataFrame 'data' and returns a pie chart showing the job distribution.\n    \n    Parameters:\n    - data (pd.DataFrame): A DataFrame containing job information.\n    \n    Returns:\n    - fig (plt.Figure): The figure object containing the pie chart.\n    \"\"\"\n    # Ensure the 'job' column exists in the DataFrame\n    if 'job' not in data.columns:\n        raise ValueError(\"DataFrame must contain a 'job' column.\")\n    \n    # Count the occurrences of each job\n    job_counts = data['job'].value_counts()\n    \n    # Create the pie chart\n    fig, ax = plt.subplots()\n    ax.pie(job_counts.values, labels=job",
+    "v1": "Clarify",
+    "v2": "Execute",
+    "agree": false
+  }
+]

@@ -56,13 +56,18 @@ def pick_action_from_logits(tokenizer, next_token_logits: torch.Tensor) -> str:
     return pairs[best][0]
 
 
-def pick_action_from_generation(model, tokenizer, prompt: str, max_new_tokens: int = 30) -> str:
-    """Generate a short response and detect Clarify vs Execute from content style.
+def _pick_action_v1(model, tokenizer, prompt: str, max_new_tokens: int = 30) -> str:
+    """v1 (LEGACY): 30-token prefix-only classifier.
 
-    After stripping "Clarify\\n"/"Execute\\n" prefixes from training data, the model
-    learns to prefer natural responses: clarification questions (natural language) vs
-    code (starts with ```python / def / import). We detect the action from the style
-    of the generated text rather than looking for artificial keyword prefixes.
+    All Llama experiments (Base / Direct / CF / PO / TactfulLLM-Llama) used this
+    classifier. Preserved bit-exact for reproducibility.
+
+    Known brittleness: misclassifies code generations that begin with a
+    conversational preamble ("Sure! Let's break down...", "Of course! Here's...")
+    as Clarify, because the code block ```python only appears beyond the 30-token
+    window. This is benign on Llama-3.1-Instruct (writes code directly) but
+    systematically misreads Qwen2.5-Instruct outputs. Use v2 for any backbone
+    that produces conversational preambles.
     """
     inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
     inputs = {k: v.to(model.device) for k, v in inputs.items()}
@@ -75,12 +80,69 @@ def pick_action_from_generation(model, tokenizer, prompt: str, max_new_tokens: i
         )
     new_tokens = outputs[0][inputs["input_ids"].shape[1]:]
     generated = tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
-    # Code indicators → Execute
     code_starters = ("```", "def ", "import ", "from ", "class ", "#!", "#!/")
     if any(generated.startswith(s) for s in code_starters):
         return "Execute"
-    # Natural language → Clarify (questions, clarifications, acknowledgements)
     return "Clarify"
+
+
+def _pick_action_v2(model, tokenizer, prompt: str, max_new_tokens: int = 200) -> str:
+    """v2: 200-token full-text scan; robust to conversational code preambles.
+
+    Generates up to max_new_tokens and looks for code markers anywhere in the
+    output, not just at the prefix. Resolves the v1 brittleness on Qwen-style
+    outputs that begin with explanatory text before the code block.
+
+    Resolution order:
+      1. Code marker (```python, ```py, def, import) anywhere in output → Execute
+      2. v1 prefix-match (preserves the v1 verdict for any output v1 would
+         have correctly classified as Execute)
+      3. Question mark anywhere → Clarify
+      4. Default → Clarify
+    """
+    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
+    inputs = {k: v.to(model.device) for k, v in inputs.items()}
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
+        )
+    new_tokens = outputs[0][inputs["input_ids"].shape[1]:]
+    generated = tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+
+    code_anywhere = (
+        "```python", "```py\n", "```py ",
+        "\ndef ", "\nimport ", "\nfrom ",
+        "def task_func", "import numpy", "import pandas",
+    )
+    if any(m in generated for m in code_anywhere):
+        return "Execute"
+
+    code_starters = ("```", "def ", "import ", "from ", "class ", "#!", "#!/")
+    if any(generated.startswith(s) for s in code_starters):
+        return "Execute"
+
+    if "?" in generated:
+        return "Clarify"
+    return "Clarify"
+
+
+def pick_action_from_generation(model, tokenizer, prompt: str, max_new_tokens: int = 30) -> str:
+    """Dispatch to v1 (default, legacy) or v2 (full-text scan) classifier.
+
+    Selected by env var CLASSIFIER_VERSION (default "v1"). v1 preserves bit-exact
+    reproducibility of all Llama experiments; v2 is required for Qwen-family
+    backbones (and any model that emits conversational preambles before code).
+    See _pick_action_v1 / _pick_action_v2 docstrings.
+    """
+    import os
+    version = os.environ.get("CLASSIFIER_VERSION", "v1")
+    if version == "v2":
+        v2_max = max(max_new_tokens, 200)
+        return _pick_action_v2(model, tokenizer, prompt, max_new_tokens=v2_max)
+    return _pick_action_v1(model, tokenizer, prompt, max_new_tokens=max_new_tokens)
 
 
 def select_action(state_text: str, policy_model_dir: str, base_model: Optional[str] = None) -> str:

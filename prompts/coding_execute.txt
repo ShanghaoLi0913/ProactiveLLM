@@ -7,9 +7,14 @@ CRITICAL REQUIREMENTS:
 2. Do NOT include test code, print statements, or example usage in your response.
 3. Provide ONLY the function definition(s) needed to solve the task.
 4. Ensure the code is correct, complete, and passes all test cases.
+5. Always include all necessary import statements at the top of the code block before the function definition.
 
 Format your response as:
 ```python
+import <required_module_1>
+from <module> import <name>
+# ... (all imports needed)
+
 def function_name(...):
     # Your code here
 ```

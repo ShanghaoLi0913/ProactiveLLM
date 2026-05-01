@@ -352,7 +352,7 @@ def _build_execute_turn_data(
             current_state.get("domain", "coding"),
         )
         candidate_results.append({
-            "code": candidate_msg[:200] + "..." if len(candidate_msg) > 200 else candidate_msg,
+            "code": candidate_msg,
             "passed": candidate_completed,
         })
     pass_at_k_results = {}
@@ -374,8 +374,8 @@ def _build_execute_turn_data(
     turn_data = {
         "turn": turn,
         "action": "Execute",
-        "assistant_msg": assistant_msg[:200] + "..." if len(assistant_msg) > 200 else assistant_msg,
-        "user_reaction": user_reaction.get("user_reply", "")[:100] + "..." if len(user_reaction.get("user_reply", "")) > 100 else user_reaction.get("user_reply", ""),
+        "assistant_msg": assistant_msg,
+        "user_reaction": user_reaction.get("user_reply", ""),
         "answered_clarification": user_reaction.get("meta", {}).get("answered_clarification", 0),
         "disclosed_items": user_reaction.get("meta", {}).get("disclosed_items", {}),
         "forced_final_execute": forced_final_execute,
@@ -804,8 +804,8 @@ def evaluate_multi_turn_conversation(
                     turn_data = {
                         "turn": turn,
                         "action": action,
-                        "assistant_msg": assistant_msg[:200] + "..." if len(assistant_msg) > 200 else assistant_msg,
-                        "user_reaction": user_reaction.get("user_reply", "")[:100] + "..." if len(user_reaction.get("user_reply", "")) > 100 else user_reaction.get("user_reply", ""),
+                        "assistant_msg": assistant_msg,
+                        "user_reaction": user_reaction.get("user_reply", ""),
                         "answered_clarification": user_reaction.get("meta", {}).get("answered_clarification", 0),
                         "disclosed_items": user_reaction.get("meta", {}).get("disclosed_items", {}),
                         "forced_final_execute": False,

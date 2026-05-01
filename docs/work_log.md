@@ -4,6 +4,588 @@
 
 ---
 
+## 2026-05-01
+
+### 139. GPU 升级讨论：单 4090 → 双 4090（待决策）
+
+DDL 5 天，剩下：Qwen baseline (Direct/CF/Base/PO) 100→200 ≈68h 单卡 + 可能的 Llama 100/200。双卡价值在并行跑两个 eval（每个吃满单卡，不做 DDP），4 个 baseline 从 68h → 34h 省 1.5 天。权衡：迁移成本（容器重启、env 重装、§104 冻结风险）vs 是否真要补 baseline 到 200。等 N=200 vs baseline N=100 比较结果决定补 baseline 与否再升级。
+
+### 138. v33 SFT+DPO Qwen N=200 合并完成 — sanity 通过 +0.9pp
+
+`eval_v33_v3_qwen_dpo_v2_remaining100_ft.json` (Apr 30 19:20) 完成；与 first-100 patched 合并 → `eval_v33_v3_qwen_dpo_v2_200.json` (May 1 11:33, detailed_results=600)。
+
+**Qwen v33 SFT+DPO N=200 (canonical)**:
+
+| Persona | pass@1 | pass@3 | pass@5 | avg_turn | clarify_rate |
+|---|---|---|---|---|---|
+| Novice | 36/200 = **18.0** | 50/200 = 25.0 | 54/200 = **27.0** | 7.99 | 0.87 |
+| Exp | 28/200 = **14.0** | 37/200 = 18.5 | 47/200 = **23.5** | 2.42 | 0.59 |
+| Busy | 27/200 = **13.5** | 34/200 = 17.0 | 37/200 = **18.5** | 1.55 | 0.35 |
+| **All** | **91/600 = 15.2** | **121/600 = 20.2** | **138/600 = 23.0** | 3.99 | – |
+
+**N=100 patched → N=200 sanity check**:
+
+| Persona | N=100 | N=200 | Δ |
+|---|---|---|---|
+| Novice | 17.0 | 18.0 | +1.0 |
+| Exp | 12.0 | 14.0 | +2.0 |
+| Busy | 14.0 | 13.5 | -0.5 |
+| **All** | **14.3** | **15.2** | **+0.9** |
+
+全部 |Δ| ≤2pp（远小于 SE≈3.5pp），合并 sanity 通过。pass@5 ordering 仍健康 Nov 27 > Exp 23.5 > Busy 18.5。
+
+**vs Qwen baselines (overall pass@1)**:
+- Direct 15.3 / CF 16.0 / Base 11.0 / **TactfulLLM 15.2 (N=200)** / PO 13.0
+- TactfulLLM 比 Base **+4.2pp**；vs Direct/CF 几乎打平（-0.1 / -0.8，远在噪声内）
+
+---
+
+## 2026-04-30
+
+### 137. Decision: 让 DPO 跑 N=200，baseline 暂定 N=100 后再看
+
+合并方案确认：first-100 (旧模板+截断) vs remaining-100 (新模板+不截断) 总偏差 ≤2pp（远小于 SE≈3.5pp），sanity check 后直接合并报 N=200。Baseline 是否补到 200 等 DPO 完成后看 v33 N=200 vs N=100 差异是否显著再决定。
+
+### 136. v33 DPO remaining 100 起跑 (N=200 canonical)
+
+用户 06:30 决定先放 PO，把 v33 SFT+DPO 补到 200 state。重现 `random.Random(42).sample(states_200, 100)` 验证：first 100 与 v33 已评估 state_id 100/100 一致。剩余 100 → `data/seeds/test_states_v29_eval_200_remaining100.jsonl`。
+
+**Run**: PID 692635，输出 `outputs/eval_v33_v3_qwen_dpo_v2_remaining100_ft.json`，新模板 + 完整 code 保存。ETA 8-10h，wall Apr 30 ~14:00 完。
+
+**坑：PO kill 没杀干净** — `kill <wrapper_pid>` 只杀 bash 父进程，python 子进程 (PID 676539) 仍跑了 19 分钟才被发现，导致首次 DPO launch (PID 688779) crashed: `NotImplementedError: Cannot copy out of meta tensor`（GPU 抢占）。教训：以后 kill eval 进程要 `pkill -f evaluate_multi_turn_persona` 或同时 kill bash + python PID。
+
+### 135. Sanity check: v33 DPO 模型本身没问题（Exp<Busy 是噪声）
+
+用户质疑 Exp 12% < Busy 14% 反直觉。McNemar paired test：discordant pair = 6 (Busy-only) + 4 (Exp-only)，χ² = 0.4，**p ≈ 0.53 不显著**。pass@5 顺序反而是健康的 **Novice 25 > Exp 22 > Busy 19**——说明模型在 Exp 上做的 Clarify 拿到的 disclosure 确实让代码更好。
+
+**Exp 0/100 pure Execute 是正确行为**（用户 insight）：task uncertainty 高时先 clarify 是合理的 proactive 决策。之前我把它当 bug 是过度解读 N=100 噪声。
+
+### 134. patch_imports.py 失效：截断 bug 让 post-hoc patching 没法工作
+
+`scripts/patch_imports.py` 跑完所有 4 个 method，结果：
+
+| Method | n_failed_w_code | patched_imports | Δ pass@1 |
+|---|---|---|---|
+| Direct | 1292 | **0** | +0.0 |
+| Clarify-First | 1272 | 1 | +0.0 |
+| Base v2 | 1305 | **0** | +0.0 |
+| TactfulLLM v33 | 1294 | 8 | **+0.7** |
+
+根因：`evaluate_multi_turn_persona.py:355,377,807` 把 `code`/`assistant_msg` 保存为 `s[:200] + "..."` 截断版。patch script 拿到的是 200 字符片段，加 imports 也救不了截断代码。**记入 memory：feedback_eval_truncation.md**。
+
+**修复**：
+1. `eval/evaluate_multi_turn_persona.py:355,377,807` 三处去掉 `[:200] + "..."` → 保存完整 code
+2. 当前 PO/DPO run 已经用上不截断版本（重启后）
+
+### 133. Import 模板 bug → 修 `prompts/coding_execute.txt`
+
+发现大量 generated code 失败因为漏 imports。例如 task 用 `np.array` 但代码不写 `import numpy as np`。
+
+**Fix (Apr 30 04:56:44)**：在 `coding_execute.txt` 加 requirement #5 + 修 example：
+```
+5. Always include all necessary import statements at the top of the code block before the function definition.
+
+Format your response as:
+```python
+import <required_module_1>
+from <module> import <name>
+# ... (all imports needed)
+
+def function_name(...):
+    # Your code here
+```
+```
+
+**实测对 PO baseline 增益**：在同样前 27 个 state 上 v29 PO (旧模板) vs v2 PO (新模板) 都是 7/27 = 25.9%，**+0pp**（非 cherry-pick 比较，是 same-state apples-to-apples）。新模板对 base Qwen prompt-only 看不出帮助。但 v33 DPO 上是否有 lift 还要看 remaining-100 跑完。
+
+### 132. v33 first-100 patched 数字 + Δ vs Base 表格（更新主表）
+
+**Qwen v33 SFT+DPO 100-state patched (列顺序 Nov/Exp/Bus/All)**:
+
+| 维度 | Novice | Exp | Busy | All |
+|---|---|---|---|---|
+| pass@1 | 17.0 | 12.0 | 14.0 | **14.3** (vs Base 11.0, +3.3pp) |
+| pass@5 | 25.0 | 22.0 | 19.0 | 22.0 (vs Base 19.7, +2.3pp) |
+| avg_turn | 7.97 | 2.41 | 1.55 | 3.98 |
+| rejection rate | 0.46 | 0.38 | 0.89 | 0.47 |
+
+**vs baselines (overall pass@1):**
+- Direct 15.3 / Clarify-First 16.0 / Base 11.0 / **TactfulLLM 14.3** / PO (v29) 13.0
+- TactfulLLM 落后 Direct/CF 1-2pp（噪声内），但显著赢 Base + PO
+
+**论文表第 4 列**: clarification rejection rate（= 1 − answered_clarification）—— Novice 0.07/Bus 0.80/Exp 0.32 in CF (与 persona patience 设定吻合)。
+
+### 131. Display truncation 误判事件
+
+跑 PO 看到所有 candidate code len=203 chars，一度怀疑 `max_new_tokens` 没生效或 generation 截断。深入排查发现是 `evaluate_multi_turn_persona.py:355,377` 保存时做 `s[:200] + "..."` 显示截断，**pass/fail 是在截断前用 full text 算的**。Memory 记入 `feedback_eval_truncation.md`。
+
+后果：所有历史 eval JSON 的 `code` 字段都是 200 字符版本，无法做事后分析（patch import / 看哪些是 OOM / 看 prompt-template-induced 错）。修了，未来 eval 保存完整。
+
+---
+
+## 2026-04-29
+
+### 130. Qwen 100 SFT+DPO v2 eval 起跑 (canonical N) — 容器冻结 §104 重现
+
+`outputs/eval_v33_v3_qwen_dpo_v2_100.json` 起跑 (system 14:57)，ETA ~17h compute → wall Apr 30 ~16-18:00。
+
+**§104 重现警告**：用户半夜检查 (wall 02:00, 启动 ~3h 后) 发现 process ELAPSED 仅 8:37——容器被 autodl 冻结 ~2.5h。Process 仍 alive (Rl)，GPU 占用，但 cgroup 限速。Sample 1 刚完 Novice (7-turn 撞顶) + Busy (2-turn因 garbage)，Exp 跑中。
+
+**应对**：用户决定笔记本一直开着不睡眠，保 SSH 活直到 100 state 完。
+
+**Partial-resume 验证**：`random.Random(42).sample(states_200, 100)` 跟 `sample(states_200, 200)` 第 1-100 个 state_id 一致，所以 Qwen 100 完成后可直接 `cp ... .json.partial && python eval ... --max_samples 200` 续跑剩 100，再 ~17h compute。
+
+### 129. Qwen v33 v3 DPO v2 (epochs=1) 5-state = 13.3% — 同 SFT-only
+
+epochs=1 DPO refinement 部分救回 Busy collapse (vs v1 epochs=3 全部崩)。但 5-state pass@1 跟 SFT-only 持平。
+
+**Qwen DPO v2 5-state**:
+- Novice 1/5 = 20%, avg_t = 8.00 (撞顶)
+- Busy 0/5 = 0%, avg_t = 1.80 (mix of 1-turn 和 multi-turn 因 garbage)
+- Exp 1/5 = 20%, avg_t = 3.00 (DPO 让 Exp 比 SFT 多 1 turn)
+- Overall: 2/15 = 13.3% (跟 Qwen SFT-only 5-state 一致)
+
+**Cross-backbone 5-state 全景**:
+| Backbone × Method | pass@1 |
+|---|:---:|
+| Llama v33 SFT-only | 0/15 = 0% |
+| Llama v33 SFT+DPO | 1/15 = 6.7% |
+| Qwen v33 SFT-only | 2/15 = 13.3% |
+| Qwen v33 SFT+DPO v2 | 2/15 = 13.3% |
+
+N=5 太小（std ~6pp），需要 100-state stable 数字。
+
+### 128. Qwen DPO v1 (epochs=3) collapse — Busy 学坏
+
+直接复用 Llama hparam (epochs=3, alpha=32, β=0.1) 做 Qwen DPO refinement → over-fit collapse:
+- Train final loss 0.0005 (vs Llama 0.39, Llama 健康)
+- rewards/accuracies 1.0, rewards/margins 9.1 (over-amplified)
+- Sanity Busy 8/8 emit "Execute" then 停 / "Executeuibutable\n;\",\n;\"..." 乱码
+- Novice/Exp 仍 8/8 prefix correct（Busy 单独 collapse）
+
+**诊断**: Qwen2.5-Instruct 比 Llama-3.1-Instruct 对 DPO 更敏感，3 epochs 过头。
+
+**修复 v2**: epochs=3 → 1，部分救 Busy (4/8 valid code, 4/8 仍 garbage)。详见 §129。
+
+### 127. Qwen v33 v3 SFT 训练成功 + 5-state = 13.3%
+
+复用 Llama 同 hparam（KEEP_PREFIX=1, alpha=32, r=64, epochs=3, LR=5e-5）：
+
+```
+Qwen v33 v3 SFT train: 12 min, loss 0.37 (vs Llama 0.39，几乎一致)
+
+Sanity 24/24:
+  Novice: 8/8 "Clarify\n[直接问句]"  ✅
+  Busy:   8/8 "Execute\n[code]"      ✅
+  Exp:    8/8 "Clarify\n[直接问句]"  ← 比 Llama SFT (5/8) 更 Clarify-prone
+
+Method 跨 backbone generalize ✅
+```
+
+**Qwen 5-state SFT eval** (~50 min)：
+- Novice 1/5 = 20%, Busy 0/5, Exp 1/5 = 20%
+- Overall: **2/15 = 13.3%** （vs Llama SFT-only 0/15）
+- Per persona avg_t: Novice 8.0 / Busy 1.0 / Exp 2.0
+- 跟 Direct Qwen 100 (15.3%) 和 CF Qwen 100 (16.0%) 同 5-state subset 持平
+
+### 126. Llama v33 v3 DPO refinement: 18 min + sanity 24/24 + 5-state = 6.7%
+
+DPO refinement 从 SFT v33_v3_sft 继续训（INIT_ADAPTER），保 KEEP_PREFIX=1, alpha=32, r=64, beta=0.1, epochs=3。**18 min 跑完**（loss 0.39 ↓，无 collapse）。
+
+**Sanity 结果（24/24 perfect）**：
+- Novice 8/8 "Clarify\n[直接问句]" ✅ (preserved from SFT)
+- Busy 8/8 "Execute\n[code]" ✅ (preserved from SFT)
+- Exp 8/8 "Clarify\n[直接问句]" ← DPO 推从 SFT 5/8 → 8/8 Clarify
+
+**5-state DPO eval**：
+- Novice 1/5, Busy 0/5, Exp 0/5 → **1/15 = 6.7%**
+- Multi-turn 完美：Novice 7 turn / Busy 1 turn / Exp 2 turn
+
+**SFT-only vs SFT+DPO 对比**:
+- Llama SFT-only: 0/15 = 0%
+- Llama SFT+DPO: 1/15 = 6.7% (+1 pass)
+- 同 5 states 上 v29 DPO (v1 era) 3/15 = 20% (但 v1 误判 + multi-turn artifact)
+- 同 5 states 上 Direct/CF Llama 200 也 0/15 (这 5 状态本身 hard)
+
+### 125. Llama v33 v3 SFT 5-state eval = 0/15 (caveat: same 5 state Direct/CF 也 0)
+
+```
+v33 v3 SFT-only Llama 5-state (BigCodeBench/127, 202, 575, 784, 945):
+  Novice: 0/5  pass@5=1/5=20%  avg_t=7.40
+  Busy:   0/5  pass@5=0/5      avg_t=1.00
+  Exp:    0/5  pass@5=0/5      avg_t=2.40
+  Overall: 0/15 = 0%
+```
+
+**Apples-to-apples 同 5 state**:
+| Method | pass@1 |
+|---|:---:|
+| v29 DPO Llama (combined 200, v1 era) | **3/15 = 20%** ← 唯一非零 |
+| Direct Llama 200 | 0/15 = 0% |
+| CF Llama 200 | 0/15 = 0% |
+| v33 v3 SFT-only | 0/15 = 0% |
+
+**修正解读**：这 5 个 state 本身 hard（Direct/CF 也 0%）。v29 DPO 20% 是 v1 误判 + forced multi-turn → disclosure recovery 救的。**v33 SFT 0/15 不能据此判定 SFT 损 code**，需扩 N。
+
+**Behavior 完美**: Novice 7-turn 撞顶 / Busy 1-turn / Exp 2-3 turn (mixed) ← 持续验证 persona-aware 行为。
+
+### 124. v33 v3 DPO refinement: 18 min train + sanity 24/24 perfect + 5-state eval 跑中
+
+DPO refinement 从 SFT v33_v3_sft 继续训（INIT_ADAPTER），保 KEEP_PREFIX=1, alpha=32, r=64, beta=0.1, epochs=3。**18 min 跑完**（loss 0.39 ↓，无 collapse）。
+
+**Sanity 结果（24/24 perfect）**：
+
+```
+Novice: 8/8 "Clarify\n[直接问句]"  ✅ (preserved from SFT)
+Busy:   8/8 "Execute\n[code]"      ✅ (preserved from SFT)
+Exp:    8/8 "Clarify\n[直接问句]"  ← DPO 推从 SFT 5/8 → 8/8 Clarify
+```
+
+**Notable**：DPO 没破坏 SFT 学到的 prefix 行为，反而让 Exp 在 turn 0 上更 Clarify-prone（rejected pair 含 Execute responses，DPO 推 model 远离 Execute on Exp turn-0 state）。
+
+**5-state DPO eval** (~17:42 起跑 wall, ETA 19:00)：
+- Sample 1 完成: Novice 7-turn forced final, Busy 1-turn, Exp 2-turn (Clarify→Execute) ← persona-aware multi-turn 行为完美
+- Sample 2 完成: 类似 pattern
+- Sample 3-5 跑中
+
+等 5-state pass@1 数字决定 Qwen pipeline 起多大 N。
+
+### 123. v33 v3 SFT 5-state eval (Llama)：行为完美 + pass@1=0/15 (但 Direct/CF 也 0)
+
+```
+v33 v3 SFT-only Llama 5-state (BigCodeBench/127, 202, 575, 784, 945):
+  Novice: 0/5 = 0%  pass@5=1/5=20%  avg_t=7.40 (撞顶 7-turn 多轮)
+  Busy:   0/5 = 0%  pass@5=0/5=0%   avg_t=1.00 (1-turn execute)
+  Exp:    0/5 = 0%  pass@5=0/5=0%   avg_t=2.40 (mixed multi-turn)
+  Overall: 0/15 = 0% pass@1
+```
+
+**初始诊断错误**：以为 SFT 损害了 code 生成能力，但 apples-to-apples 对比同 5 state：
+
+| Method (same 5 states) | pass@1 |
+|---|:---:|
+| v29 DPO Llama (combined 200) | **3/15 = 20%** ← 唯一非零 |
+| Direct Llama 200 | 0/15 = 0% |
+| CF Llama 200 | 0/15 = 0% |
+| v33 v3 SFT-only | 0/15 = 0% |
+
+**修正解读**：这 5 个 state 本身就是 hard 状态，Direct/CF 也都 0%。v29 DPO 20% 是 v1 误判 → forced multi-turn → disclosure recovery 救的（v29 200 整体平均 14%，这 5 state 上 20% 高于平均）。**v33 SFT 0/15 不能据此判定 SFT 损 code，需扩 N 看真水平**。
+
+**Behavior 分化完美**：
+```
+Sample 1 (state 945):
+  Novice 7-turn (clarify forced final)  ← 高耐心多问
+  Busy 1-turn (Execute)                  ← 低耐心直 code
+  Exp 2-turn (Clarify→Execute)           ← 中耐心问一次
+
+Sample 2 (state 575): 类似 pattern
+```
+
+**结论**：Behavior 验证通过（persona-aware multi-turn），但 5-state pass@1 too noisy，等 DPO 5-state 数字 + 后续扩 N。
+
+### 122. v33 v3 SFT 训练成功：8/8 Novice "Clarify\n[直接问句]" 完美
+
+调参 plan 是 epochs 2→3, LR 2e-5→5e-5, alpha 16→32（其他保 v33 v2: KEEP_PREFIX=1, prompt masking, r=64）。
+
+```bash
+KEEP_PREFIX=1 LORA_ALPHA=32 LORA_R=64 \
+  python policy/train_sft_v33.py \
+  --data data/dpo/prefs_v29_100states.jsonl \
+  --model meta-llama/Llama-3.1-8B-Instruct \
+  --output models/v33_v3_sft \
+  --epochs 3 --lr 5e-5
+```
+
+12 min 训完（87 step × ~9s/step，loss 从 0.83 → 0.39 → ~0.1，健康）。
+
+**Sanity 数据（彻底突破）**：
+
+```
+Novice: Clarify_pfx = 8/8 (100%)  ✅
+Busy:   Execute_pfx = 8/8 (100%)  ✅
+Exp:    Clarify 5/8, Execute 3/8  (mixed, by state n_masked)
+```
+
+样本输出：
+- Novice: `"Clarify\nWhat format should the input data be in..."`  
+- Busy:   `"Execute\n```python\nimport re\nimport json..."`  
+- Exp:    `"Clarify\nWhat specific URL pattern should be used..."`
+
+**0/24 emit "I'd be happy to help"** preamble — pretrained RLHF tendency 完全 override。
+
+**关键 hparam 经验** (vs v33 v1/v2 失败配置)：
+
+| 配置 | v33 v1 | v33 v2 | v33 v3 |
+|---|---|---|---|
+| epochs | 1 | 2 | 3 |
+| LR | 1e-5 | 2e-5 | 5e-5 |
+| alpha | 16 | 16 | 32 |
+| prompt masking | ❌ no | ✅ yes | ✅ yes |
+| Novice Clarify_pfx | 0/8 | 0/8 | **8/8** |
+| Novice 真 clarify | 0/8 | 1/8 | **8/8** |
+
+prompt masking + 适度增强（alpha 32, LR 5e-5, epochs 3）是 sweet spot。
+
+### 121. v33 v1/v2 SFT iteration（失败诊断）
+
+#### v33 v1（existing train_sft.py，无 prompt masking）
+
+```
+配置: epochs=1, LR=1e-5, alpha=16, KEEP_PREFIX=1
+sanity: 0/8 Novice Clarify_pfx, 三 persona 输出几乎相同 ` ```python\nimport...`
+```
+
+**诊断**：existing `train_sft.py` 用 `DataCollatorForLanguageModeling(mlm=False)` 对全 token 算 loss，包括 prompt。"Clarify\n" 这 2 token 在 ~500 token 全文里被稀释 → 信号微弱。
+
+#### v33 v2（new train_sft_v33.py，加 prompt masking）
+
+```
+新写 policy/train_sft_v33.py，labels = -100 for prompt tokens, 真 labels for response only
+配置: epochs=2, LR=2e-5, alpha=16, prompt masking ✓
+sanity: 0/8 Novice Clarify_pfx, 1/8 Novice 真 clarify (state 7 "I can guide... However I need to clarify..." 真问 user 要 data)
+        三 persona 行为开始分化
+```
+
+**诊断**：prompt masking 有效（Novice 1/8 出现真 clarify），但参数还不够强。alpha=16 LoRA 输出衰减 4x，推不出 prefix learning。
+
+### 120. v33 SFT-then-DPO pipeline 启动（弃 §119 pure DPO 路径）
+
+§119 提的"无 SFT 路径"在测试中失败：
+
+- 起 v32 (alpha=128, KEEP_PREFIX=1, no SFT): collapse — Busy emit "Execute." 后停（degenerate）
+- 起 v32b (alpha=32, KEEP_PREFIX=1, no SFT): no collapse 但 0/8 Novice 学到 prefix
+- 结论：**纯 DPO + LoRA 在 cross-distribution learning 上结构性受限**
+
+数学根因：DPO loss 受 β 约束 KL gap 推不动（详见 `docs/sft_then_dpo_v33.md`）：
+```
+π_ref(Llama-Inst)("I'd be happy") = 0.5
+π_ref(Llama-Inst)("What should...") ≈ 1e-10
+DPO 即使 ratio 翻 1000x，π(chosen) 还是绝对小 → model 不学
+```
+
+**用户最初不愿做 SFT**（觉得不够 RL）。但实证 v32 失败 + 解释 SFT-then-DPO 是标准 industry recipe (DPO 原论文 Rafailov 2023, Llama-2-Chat, Zephyr 7B 都用) 后接受。
+
+**v33 SFT-then-DPO plan**:
+- Stage 1: SFT 跨 KL gap，model 学 chosen distribution
+- Stage 2: DPO 从 SFT 模型继续训，加 rejected 信号 refine
+
+详见 `docs/sft_then_dpo_v33.md`。
+
+### 119. Retrain 决策（无 SFT 路径）+ 数据扩展计划
+
+§118 数据已经决定方向：**必须 retrain，否则 paper claim 全崩**。但 v30/v31 已经 4 次失败 → 不能简单重复。新方案核心是**保留 prefix + 加数据 + 改 hparam**，不动 oracle。
+
+**不做 SFT**（用户决定）→ 替代方案是**保留 `Clarify\n` / `Execute\n` action prefix**，把"风格选择"拆成"prefix token 预测（easy）+ 条件生成（natural）"，理论上能跨 KL gap 不需单独 SFT 阶段。
+
+| 维度 | 现 v29 | 新方案 |
+|---|---|---|
+| 训练数据 | 500 pairs（100 state × 1 traj） | **~1500 pairs**（multi-traj × 3 temperatures: 0.7/0.9/1.1）|
+| Action prefix | strip | **保留** |
+| LoRA r / alpha | 64 / 16 (alpha/r=0.25) | **128 / 128** (alpha/r=1) |
+| DPO beta | 0.1 | **0.05** |
+| Epochs | 3 | **5** |
+| Filter weak pairs | 没 | **filter gap < 0.05** |
+| Oracle | v29 baseline | **不动**（避开 v30/v31 失败 path）|
+| Eval classifier | v1 prefix-30tok | **prefix-based "Clarify\n"/"Execute\n" 检测**（model emit 时直接读，规则 100% 准）|
+
+**v30/v31 失败的核心原因 vs 新方案修复**：
+- v30/v31 改 oracle 但保弱 hparam → DPO 推不动新规则，反而扰乱已 work 的 Busy/Execute 学习
+- 新方案保 oracle 不动，**改训练机制**（hparam + prefix + 数据量）→ 直接修根因
+
+**时间估算**：
+- 多轨迹生成（3 temperatures × 100 states × 3 personas = 900 traj）: ~6h API + GPU
+- DPO 训练（1500 pairs，alpha=128 r=128 epochs=5）: ~12h
+- Eval Llama 200 + Qwen 100 with prefix classifier: ~22h
+- **总 ~40h compute**，wall 2-3 天（SSH 保活）
+
+**风险**：仍可能 fail（pretrained tendency 太强）。但失败模式跟 v30/v31 不同——这次改的是机制不是 oracle，理论上应该能跨过 KL gap。如果 fail，下一步只能 SFT warmup（用户暂不想做）或弃 paper。
+
+### 118. v2 Llama DPO 30 中止（70% partial）：6.35% << Direct 12.3%，DPO 在 v2 下是 net negative
+
+§117 跑到 63/90 (70%) 时用户决定 kill——数据已经足够 lock 决策。
+
+**最终 partial 数字**：
+
+| Persona | n | pass@1 | pass@5 | avg_turns |
+|---|:---:|:---:|:---:|:---:|
+| Novice-Learner | 21 | 1/21 = 4.8% | 4/21 = 19.0% | 1.19 |
+| Busy-Developer | 21 | 3/21 = 14.3% | 3/21 = 14.3% | 1.00 |
+| Experienced-Engineer | 21 | **0/21 = 0.0%** | 2/21 = 9.5% | 1.00 |
+| **OVERALL** | **63** | **4/63 = 6.35%** | **9/63 = 14.29%** | 1.06 |
+
+**对比表（Llama）**：
+
+| | v1 数字（forced multi-turn artifact）| v2 真实数字 |
+|---|:---:|:---:|
+| DPO Llama | **14.0%** (200) | **6.35%** (63) ← 跌 7.65pp |
+| Direct Llama | 12.3% | 12.3%（不调 classifier，不变）|
+| Base Llama (per §47) | ~8% | 未跑 |
+
+**Per-persona 关键发现**：
+- **Busy 14.3% > Direct 12.3%** ← DPO 唯一帮上的 persona（学到 terse code style）
+- **Novice 4.8% << Direct 12.3%** ← DPO friendly preamble 在 v2 下没 multi-turn 帮，code 直接挂
+- **Exp 0/21** 异常严重 ← DPO LoRA 对 Exp 的 weight adjustment 严重扰乱 base code generation
+
+**结论 lock**：
+1. ❌ "DPO learned persona-aware proactive Clarify decision" — 数据反驳
+2. ❌ "DPO improves pass@1 over Direct" — v2 下反向（DPO -6pp from Direct）
+3. ⚠ DPO 实际 effect = **(Busy +2pp) + (Novice -7.5pp) + (Exp -12.3pp) = 平均 -6pp**
+4. v1 14% 数字 = **v1 误判 → forced multi-turn → disclosure recovery 把 LoRA 的损害补回来 + 顺便加一点**
+
+**含义**：
+- Llama DPO 在 v2 pipeline 下 net negative，复用 §111 / §116 的 Qwen 类似结论 → **两 backbone 一致：DPO 是 net negative on code generation in v2**
+- v1 数字全是 v1 误判产物，**不可作为论文 final 数字**
+- TactfulLLM 当前 contribution claim **必须 retrain 或 pivot narrative**
+
+**用户决定**：retrain（不做 SFT），新 plan 见 §119。
+
+**保留**：`outputs/eval_v29_dpo_30_v2.json.partial`（63/90 entries 数据，作为 v1 vs v2 对照证据）。
+
+### 117. v2 Llama DPO 30-state quick eval（跑中，directional 数字）
+
+启动 Llama DPO v29 LoRA + v2 classifier 30-state eval（PID 16512，00:20:38 系统时间起跑）：
+
+```bash
+CLASSIFIER_VERSION=v2 python eval/evaluate_multi_turn_persona.py \
+  --model_dir models/v29_100states \
+  --base_model meta-llama/Llama-3.1-8B-Instruct \
+  --test_states data/seeds/test_states_v29_eval_200.jsonl \
+  --max_samples 30 \
+  --output outputs/eval_v29_dpo_30_v2.json
+```
+
+ETA ~3-4h compute。Output 跟 100-state run 用同一文件名前缀（partial-resume 可扩到 100/200）。
+
+**关键看点**：
+- avg_turns ≈ 1.0 → 验证 v2 让 model turn 0 直接 Execute（一致 sanity）
+- pass@1 vs Direct 12.3% / v1 DPO 14.0% → 决定 DPO 在 v2 下有没有 effect
+- 如果 v2 DPO ≈ Direct → DPO Llama 跟 Qwen 同样在 v2 下没贡献（"learned proactiveness" 完全证伪）
+
+进度工具：`/tmp/llama_dpo_v2_progress.sh`。
+
+### 116. v2 Qwen Base 100 完成：11.00%（v1 15.67% 跌 4.67pp）
+
+v2 Base Qwen 100 跑完（wall 13:37→23:12 系统时间，9.5h compute）。Final 数字：
+
+| | avg_turns | clarify_rate | pass@1 | pass@5 |
+|---|:---:|:---:|:---:|:---:|
+| **v1 Base Qwen 200**（误判 + forced multi-turn）| 6.66 | 85% | **15.67%** | -- |
+| **v2 Base Qwen 100**（v2 turn 0 Execute）| **1.00** | **0%** | **11.00%** | 19.67% |
+| Direct Qwen 100 reference | 1.00 | 0% | 15.33% | -- |
+
+**Per persona (v2)**：Novice 11.0% / Busy 12.0% / Exp 10.0%（all 1-turn Execute）。
+
+**关键 finding**：v1 forced multi-turn 给 Base Qwen 拔高了 4.67pp。去掉 v1 误判后 Base 真实性能 = 11.00%。**v1 数字 15.67% 是 forced multi-turn artifact，不可信**。
+
+**Puzzle**：v2 Base 11% < Direct 15.33% (4pp)。功能上两者都 1-turn Execute 应该几乎相同。可能原因：
+- v2 classifier 200-token 生成消耗 GPU random state → 后续 5 candidate 采样跟 Direct 不同
+- 或 sampling variance（n=300 std ≈ 2pp，4pp ≈ 2σ 边缘）
+
+**含义**：post-v2 后 **Base = Direct**（功能 redundant）。这意味着 Base baseline 失去独立 narrative 价值——v1 的"Base 与 DPO 行为差异"是 v1 误判产生的虚假分化。
+
+### 115. v2 DPO Qwen 100 启动后被冻 + Kill（autodl 重现 §104 事故）
+
+23:33:45 系统时间起 v2 DPO Qwen 100（PID 993737, setsid wrapper）。预期 ~14h 完成，明早 ~10 AM。
+
+**重现 §104 事故**：用户 04-29 早上 10:35 真实墙钟登录，发现：
+- 系统时钟还停在 23:42（容器内时间，比真实 wall clock 慢 11h）
+- 进程 ELAPSED 仅 8 分 47 秒（其余时间 cgroup freeze）
+- 仅完成 sample 1/100 Novice（Turn 0: Execute ✓ 一致 sanity 预测）
+
+setsid wrapper 挡不住 autodl 的 cgroup 降级。**教训复现 §104**：bash 层无法替代 SSH 保活。
+
+用户决定 kill 进程释放 GPU 转跑更小批量验证：
+- `kill -9 993737 993734 993732 993729` → GPU 2 MiB / 0%
+- 改起 v2 DPO Llama 30 small batch（详见 §117）
+
+### 114. v1 Classifier Bug 诊断 + sanity 验证（核心 finding）
+
+**根因**：`policy/infer.py:_pick_action_v1` 只看生成的前 30 token 前缀。Llama/Qwen DPO Novice/Exp persona 都倾向 emit "I'd be happy to help / Sure! Let's break down..." 这种 friendly preamble 起手。30 token 窗口内全是自然语言 → v1 系统性误判 Clarify。但 200 token 全文里 model 实际写了完整代码（` ```python\nimport.../def task_func`）。
+
+详见 `docs/classifier_bug_2026-04-28.md`。
+
+**Sanity 数据**（双 backbone + sampling，详见 `scripts/sanity_classifier/`）：
+
+| 实验 | Total | v1=Clarify, v2=Execute（v1 误判）| 起手是 question word |
+|---|:---:|:---:|:---:|
+| Qwen DPO greedy 8 state × 3 persona | 24 | **16/24 (67%)** | 0/24 |
+| Llama DPO greedy 8 state × 3 persona | 24 | **16/24 (67%)** | 0/24 |
+| Llama DPO Novice sampling 8×5 | 40 | **40/40 (100%)** | 0/40 |
+| Qwen Base greedy 8 state × 3 persona | 24 | **24/24 (100%)** | 0/24 |
+
+**Pattern 完全一致**：
+- Novice/Exp 8/8 误判（preamble + code）
+- Busy 0/8 误判（DPO 后直接 ` ```python` 起手）
+- Sampling 40 个里 7.5% (3/40) 在 preamble 后真嵌问题，92.5% 后接代码
+
+**含义**：
+1. **v1 的 forced multi-turn 是误判产生的副作用**——不是 DPO learned behavior
+2. **DPO 没学到 proactive Clarify decision**——三个 persona turn 0 都倾向 Execute（只是 style 不同）
+3. **DPO 学到的是 persona-conditional style**：Busy=terse direct code, Novice/Exp=friendly preamble + code
+4. **Llama DPO 14% > Direct 12.3% 的真实 mechanism** 是 v1 误判 → forced multi-turn → disclosure recovery，不是 "learned proactiveness"
+
+**对论文 claim 的影响**：
+- ❌ "TactfulLLM learns persona-aware proactive Clarify decision-making" — 数据反驳
+- ⚠ "DPO is the only persona-adaptive method"（per §111）— 是 **style-adaptive** 不是 **action-adaptive**
+
+**未提交代码**：`policy/infer.py` 加 `_pick_action_v1` (legacy) + `_pick_action_v2` (200-token 全文扫描) + env var `CLASSIFIER_VERSION` dispatcher。默认 v1 保 Llama 复现性。
+
+**Sanity 脚本归档**：`scripts/sanity_classifier/` 含 6 个文件（3 py + 3 json）。
+
+### 113. v29 训练数据 distribution 审计：Busy/Clarify = 0 pair
+
+调查 DPO 失败原因，发现 **prefs_v29_100states.jsonl 严重失衡**：
+
+| (persona, chosen_action) | v29 pairs |
+|---|:---:|
+| Novice/Clarify | 226 |
+| Busy/Execute | 107 |
+| Exp/Clarify | 105 |
+| Exp/Execute | 61 |
+| **Busy/Clarify** | **0** ← 完全缺失 |
+| **Novice/Execute** | **1** ← 几乎缺失 |
+| Total | 500 |
+
+只有 29.2% (146/500) 有 reward gap >= 0.05（强信号）。Turn 分布偏 turn 0 (319/500)，turn 2+ 几乎空。
+
+**v30/v31/v31_4 distribution 对比**：
+
+| | v29 | v30 | v31 | v31_4 |
+|---|:---:|:---:|:---:|:---:|
+| Busy/Clarify | 0 | 73 | 30 | 30 |
+| Busy/Execute | 107 | 51 | 80 | 104 |
+| Novice/Clarify | 226 | 191 | 199 | 199 |
+| Novice/Execute | 1 | 28 | 21 | 21 |
+
+但 **v30/v31 系列 50-state pass@1 都比 v29 14% 低**（v30 partial 2.56%，v31 9.33%，v31_2a 8.67%, v31_4 8.00%）。说明改 oracle rule 但保 hparam 没用——LoRA alpha=16/r=64 (alpha/r=0.25) 输出衰减 4x，DPO 信号压不过 pretrained tendency。
+
+### 112. C 方案讨论：retrain DPO 修正 proactive failure
+
+用户决定试 C 方案（重训 DPO 修复 proactive 学习失败）。
+
+**根因诊断**：
+- LoRA `alpha/r=16/64=0.25`，标准应 alpha=r 或 2*r → DPO 输出被衰减 4 倍，压不过 pretrained "I'd be happy to help" 倾向
+- `_strip_action_prefix` 让 model 失去明确 action 信号，必须从零学一种新风格
+- DPO 优化 implicit reward，KL 约束保护 pretrained 行为 → 跨过 friendly preamble → "What should..." 直接问句的 KL gap 难
+
+**C 方案 hparam 改动**：
+
+| 参数 | 现 v29 | C 方案 |
+|---|---|---|
+| `lora_alpha` | 16 | **128** (alpha/r=2) |
+| `r` | 64 | 128 |
+| `beta` (DPO) | 0.1 | 0.05 |
+| `epochs` | 3 | 5 |
+| `_strip_action_prefix` | strip | **保留** |
+
+加 prefix-based eval classifier。但**风险**：v30/v31 4 次 retry 都失败的历史 → 第 5 次成功概率不高。可能仍然 degenerate。
+
+**SFT warmup → DPO** 是更可能 work 但代码改动大的方案：先 SFT 强制 model 输出问句风格（跨过 KL gap），DPO 再 refine。1-2 day 代码 + 训练。
+
+**当前 status**：暂不重训。先用 v2 跑现 v29 model 拿真数字（§115/§116/§117），看是否值得 spend GPU on retrain。
+
+---
+
 ## 2026-04-27
 
 ### 111. DPO Qwen 100 完成：Overall 11.67%，Qwen 上 last among baselines

@@ -92,7 +92,14 @@ def to_dpo_format(records, tokenizer):
         # with natural language). The base model never generates these prefixes, so
         # training with them caused DPO to operate on near-zero-probability sequences
         # and the LoRA adapter had zero effect on actual generation behavior.
+        #
+        # 2026-04-29 (v32 hypothesis test): KEEP_PREFIX=1 disables stripping. Keeps
+        # "Clarify\n" / "Execute\n" so DPO has explicit action-token signal — easier
+        # to optimize than the cross-distribution gap between Llama-Instruct's
+        # "I'd be happy to help..." tendency and a direct "What should..." question.
         def _strip_action_prefix(msg: str) -> str:
+            if os.environ.get("KEEP_PREFIX") == "1":
+                return msg
             for prefix in ("Clarify\n", "Execute\n"):
                 if msg.startswith(prefix):
                     return msg[len(prefix):]
@@ -234,25 +241,40 @@ def train(
             if use_qlora and prepare_model_for_kbit_training is not None:
                 model = prepare_model_for_kbit_training(model)
 
-            lora_config = LoraConfig(
-                r=64,
-                lora_alpha=16,
-                target_modules=[
-                    "q_proj",
-                    "v_proj",
-                    "k_proj",
-                    "o_proj",
-                    "gate_proj",
-                    "up_proj",
-                    "down_proj",
-                ],
-                lora_dropout=0.05,
-                bias="none",
-                task_type="CAUSAL_LM",
-            )
-            model = get_peft_model(model, lora_config)
-            print("✅ Applied LoRA (r=64, alpha=16)")
-            model.print_trainable_parameters()
+            # 2026-04-29 (v33): if INIT_ADAPTER env var set, load existing LoRA adapter
+            # (e.g., from SFT warmup) and continue DPO training on top. This is the
+            # standard SFT-then-DPO recipe (Rafailov et al. 2023).
+            init_adapter = os.environ.get("INIT_ADAPTER", "")
+            if init_adapter:
+                from peft import PeftModel
+                print(f"🔗 Loading init adapter (SFT warmup) from: {init_adapter}")
+                model = PeftModel.from_pretrained(model, init_adapter, is_trainable=True)
+                print(f"✅ Continuing DPO training from existing adapter")
+                model.print_trainable_parameters()
+            else:
+                # 2026-04-29 (v32): bump alpha 16→128 (alpha/r=2 standard).
+                # Set LORA_ALPHA env var to override.
+                _alpha = int(os.environ.get("LORA_ALPHA", "128"))
+                _r = int(os.environ.get("LORA_R", "64"))
+                lora_config = LoraConfig(
+                    r=_r,
+                    lora_alpha=_alpha,
+                    target_modules=[
+                        "q_proj",
+                        "v_proj",
+                        "k_proj",
+                        "o_proj",
+                        "gate_proj",
+                        "up_proj",
+                        "down_proj",
+                    ],
+                    lora_dropout=0.05,
+                    bias="none",
+                    task_type="CAUSAL_LM",
+                )
+                model = get_peft_model(model, lora_config)
+                print(f"✅ Applied LoRA (r={_r}, alpha={_alpha})")
+                model.print_trainable_parameters()
         except Exception as e:  # pragma: no cover - runtime safeguard
             print(f"⚠️  Failed to apply LoRA: {e}")
             print("⚠️  Continuing without LoRA (may use more GPU memory)")
