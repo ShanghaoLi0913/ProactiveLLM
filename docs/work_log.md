@@ -6,6 +6,60 @@
 
 ## 2026-05-02
 
+### 149. Qwen PO classifier 不一致 → 重跑 first-100 v2 (re-sequenced GPU 1 chain)
+
+Qwen PO 比较结果：
+- first-100 (Apr 26) avg_turn Novice **2.05** / Exp 1.07 / Busy 1.00
+- remaining-100 (May 2 partial) avg_turn 全 **1.00**
+
+根因：first-100 是 **Apr 26 跑的，v2 classifier Apr 28 才上线** → first-100 用的是 v1 classifier。v1 把 PO 的 "I'd be happy to help..." preamble 误判为 Clarify → 强制多轮（2.05 turn）。v2 严格 "Clarify\n" prefix → 都判 Execute（1.00 turn）。
+
+**影响**:
+- pass@1 N=200（合并 first-100 v1 + remaining-100 v2）: ✅ 有效（pass/fail 不依赖 classifier）
+- avg_turn / clarify_rate N=200: ❌ 不可用（classifier 不一致）
+
+**Fix**: 在 GPU 1 chain 中插入 Qwen PO first-100 v2 重跑，re-sequence 成：
+```
+GPU 1: Qwen PO rem-100 (跑中) → Qwen PO first-100 v2 (~5h) → Llama Base 200 (~10h)
+```
+
+实现：
+- `/tmp/qwen_po_first100_v2.sh`：v2 PO eval on `data/seeds/test_states_v29_eval_200_first100.jsonl`
+- `data/seeds/test_states_v29_eval_200_first100.jsonl`：从 `eval_v29_qwen_prompt_only_100.json` 反抽出的 100 state IDs，保持原始 first-100 集合
+- `/tmp/wait_then_qwen_po_first100.sh`：守 PID 159265（rem-100 python）退出后启动新 chain
+
+新 chain ETA：Llama Base 推迟到 ~08:48 ChiSat（vs 原 03:30），但仍在 user 醒来时（~09:00）前完成。
+
+### 148. Llama state set 审计 — 发现 CF 用了不同 state 集合 (unfair compare)
+
+用户质疑 Llama DPO partial Busy 5.4% 比 Direct 13.0% 差太多反直觉，要求严格 audit。结果发现：
+
+```
+Direct 200       eval_200    (BigCodeBench/122, /160, ..., /1010, /1015...)
+DPO partial 41   eval_200    ✓ 同
+PO partial 50    eval_200    ✓ 同
+Base partial 42  eval_150extra ✗ 不同
+v33 DPO running  eval_200    ✓ 同
+v29 DPO 150      eval_150extra ✗ 不同
+CF 150           eval_150extra ✗ 不同
+```
+
+**发现 eval_200 = eval_150extra (150) ∪ 50 个新 state**，DPO partial 41 都在新 50 里 → DPO 跟 CF state set 完全不重叠。**之前 "Llama DPO 在 Busy 5.4% 远低于 CF 19.3%" 完全是 unfair 比较**。
+
+**Paired comparison on same 40 states (DPO vs Direct)**:
+
+| Persona | DPO | Direct | Δ |
+|---|---|---|---|
+| Novice | 12.5% | 5.0% | **+7.5pp** ⭐ |
+| Exp | 12.5% | 5.0% | **+7.5pp** ⭐ |
+| Busy | 5.0% | 5.0% | 0 (tied) |
+
+McNemar χ² < 3.84（n=40 太小），但 direction 一致 — DPO ≥ Direct 在所有 persona 上。**修订**：DPO partial Busy 5% 是 state subset 难度问题，不是 LoRA alignment tax。这 40 state 在 Direct 全集上恰好是 hard subset（Direct 全集 Busy 13% vs 这 40 state 上 Direct 5%）。
+
+**Llama CF fix plan**: CF 当前在 eval_150extra 上，eval_200 ⊃ eval_150extra (150 overlap)，需要补跑 CF 在缺的 50 state（~3h 单 GPU）。等 Llama DPO 跑完（GPU 0 ~08:00 ChiSat 空闲）再起。
+
+**教训**: paper 必须用同 state set 做 paired comparison，不同集合做出来的 method 排名 misleading。
+
 ### 147. Codebase 第二轮清理（在 Llama 跑中安全归档）
 
 3 个 Llama eval 跑中借空隙整理：

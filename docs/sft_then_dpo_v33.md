@@ -89,6 +89,71 @@ SFT 跨过 KL gap:
 
 ## 📍 当前进度（2026-05-02）
 
+### May 2 (PM) — State set 一致性审计 + Qwen PO classifier inconsistency 发现
+
+#### Llama state set bug — CF 跟 DPO 不同 state set，之前对比 unfair
+
+Llama DPO partial（n=40）: Busy 5.4%。跟 Llama CF 150 (Busy 19.3%) 比，差 14pp 看似 disaster。审计发现：
+
+```
+File                                    State set         |Common with CF 150
+─────────────────────────────────────────────────────────|───────────────
+Llama Direct 200      eval_200          200 states        | 150 [eval_200 ⊃ eval_150extra]
+Llama CF 150          eval_150extra     150 states        | 150 (self)
+Llama v33 DPO 200     eval_200          200 (running)     | 150 (after full run)
+Llama Base v2 (queued) eval_200         200 (queued)      | 150
+Llama PO 200 v2       eval_200          200 (running)     | 150
+```
+
+**eval_200 = eval_150extra ∪ 50 new states**。DPO partial 41 恰好都在 "新 50" 里 → DPO partial ∩ CF 150 = 0。
+
+**Paired Llama DPO vs Direct on SAME 40 states**：
+
+| Persona | DPO | Direct | Δ | DPO_wins | Direct_wins |
+|---|---|---|---|---|---|
+| Novice | 12.5% | 5.0% | **+7.5pp** | 3 | 0 |
+| Exp | 12.5% | 5.0% | **+7.5pp** | 4 | 1 |
+| Busy | 5.0% | 5.0% | 0 | 1 | 1 |
+
+McNemar χ²<3.84（N=40 太小），但 direction 一致：**DPO ≥ Direct 在所有 persona 上**。partial Busy 5.4% 看似低是因为这 40 个 state 本身难（Direct 全集 200 Busy=13% vs 这 40 Busy=5%）。
+
+**对 Qwen 类似检查**：✅ Qwen 5 个 method 都在 eval_200 上（Direct 200, CF 200, Base 200, TactfulLLM 200, PO 100→200）。clean。
+
+**Llama CF fix plan**：CF 当前在 eval_150extra (150 states)，eval_200 = eval_150extra + 50 new。补跑 CF on 50 missing states (~3h on free GPU after Llama DPO finishes)，合并 → CF 200 on eval_200，跟其他 4 method paired-comparable。
+
+#### Qwen PO classifier inconsistency — first-100 是 v1, remaining-100 是 v2
+
+| File | Date | Classifier | avg_turn (Novice) |
+|---|---|---|---|
+| `eval_v29_qwen_prompt_only_100.json` | **Apr 26** | **v1** (Apr 28 才上 v2) | 2.05 |
+| `eval_v29_qwen_prompt_only_remaining100_ft.json` | May 2 | v2 | 1.00 |
+
+v1 把 PO 的 "I'd be happy to help..." preamble 误判为 Clarify → first-100 多轮（2.05 turn）。v2 严格 "Clarify\n" prefix → 都判 Execute（1.00 turn）。
+
+**影响**:
+- pass@1 N=200 合并: ✅ 有效（pass/fail 不依赖 classifier verdict）
+- avg_turn / clarify_rate N=200: ❌ 失效（classifier 不一致）
+
+**Fix（已部署）**: 重跑 Qwen PO first-100 on v2，replace 旧 first-100：
+- 新 GPU 1 chain：Qwen PO rem-100 (running) → Qwen PO first-100 v2 (~5h) → Llama Base 200 (~10h)
+- `/tmp/qwen_po_first100_v2.sh` 用 `data/seeds/test_states_v29_eval_200_first100.jsonl`（从原 first-100 file 反抽 100 state IDs，保 same set）
+- 完成后 Qwen PO N=200 全 v2 一致
+
+#### 教训 — methodology
+
+1. **paper 必须用同 state set** 做 method 间比较；不同 set 做的 ranking 是 misleading（Llama CF "vs" DPO 5.4 是不存在的差异）
+2. **classifier 版本一致性** 是 metric (avg_turn, clarify_rate) 的隐性前提；pass@1 不受影响但 turn-level 指标受影响
+3. **Audit 工具应在每次 method comparison 前自动跑**：检查 state_id set 重叠 + classifier 版本
+
+#### 修订 paper 论述（再次）
+
+之前修订过的 "TactfulLLM matches CF on accuracy" 加上：
+- **Llama 上 paired comparison 显示 DPO > Direct 在 Novice/Exp** (+7.5pp partial)
+- **Cross-backbone validation**：Qwen 上 DPO ≈ Direct (within noise), Llama 上 DPO > Direct (partial direction). 等 Llama N=200 完整 lock。
+- **CF Llama 必须重跑在 eval_200 上** 才能进 main table，否则 footnote 标注 state-set caveat
+
+---
+
 ### May 2 — Qwen N=200 method 比较的 honest 分析（重要 finding）
 
 跟 baseline N=200 数字 lock 后做 paired comparison，发现**之前的 "TactfulLLM 是最优 method" 主张站不住**。
