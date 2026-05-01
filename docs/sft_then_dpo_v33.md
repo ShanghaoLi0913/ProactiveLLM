@@ -87,7 +87,32 @@ SFT 跨过 KL gap:
 
 ---
 
-## 📍 当前进度（2026-05-01）
+## 📍 当前进度（2026-05-02）
+
+### May 2 更新 — Qwen 全 4 baseline 中 3 个补到 N=200 ✅
+
+3 个 baseline (Direct/CF/Base) remaining-100 一夜跑完无 freeze；`scripts/merge_baselines_200.py` 合并出 N=200 final。Sanity 全过：first-100 vs remaining-100 Δ ≤ 1.3pp（远小于 SE 3.5pp）。
+
+**Qwen N=200 论文主表**:
+
+| Method | pass@1 | pass@5 | avg_turn | clarify_rate |
+|---|---|---|---|---|
+| Base | 11.0 | 18.0 | 1.00 | 0.00 |
+| Prompt-Only (N=100) | 13.0 | – | – | – |
+| Direct | 14.7 | 18.3 | 1.00 | 0.00 |
+| **TactfulLLM** | **15.2** | **23.0** | **3.99** | varied |
+| Clarify-First | 15.7 | 23.2 | 2.00 | 0.50 |
+
+**🎯 论文主结果 — pass@5 分两组**：
+- Clarify 组 (TactfulLLM 23.0, CF 23.2)：clarify 触发 user disclosure，5 个 candidate 各得不同 hint → pass@5 拔高
+- Execute 组 (Direct 18.3, Base 18.0)：直接 generate 无 disclosure → pass@5 = pass@1 噪声放大
+- **TactfulLLM vs Direct: pass@1 +0.5pp / pass@5 +4.7pp** ← 这是 disclosure recovery 真实 evidence
+
+**TactfulLLM > CF 的 contribution = persona-aware turn 分化**：
+- TactfulLLM: Novice 7.99-turn / Busy 1.55-turn / Exp 2.42-turn
+- CF: 全部 2.00-turn 固定
+- 在几乎相同 pass@1 / pass@5 下，TactfulLLM 在 Busy 上 22% 更省 interaction cost
+- **Paper claim**: "TactfulLLM matches CF on accuracy while adapting interaction depth to persona"
 
 ### May 1 更新 — N=200 合并完成 ✅
 

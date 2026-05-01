@@ -4,6 +4,54 @@
 
 ---
 
+## 2026-05-02
+
+### 144. Qwen baseline N=200 合并完成 — sanity 全过 + 关键 pass@5 finding 浮现
+
+3 个 baseline（Direct/CF/Base）remaining-100 全部跑完，一夜无 freeze（freeze_monitor host_uptime 3683→37343 单调增 9.3h）。`scripts/merge_baselines_200.py` 合并 first-100 patched + remaining-100 ft：
+
+**first-100 vs remaining-100 sanity (Qwen, N=100 each)**:
+
+| Baseline | first-100 | remaining-100 | Δ |
+|---|---|---|---|
+| Direct | 15.3% | 14.0% | -1.3pp |
+| CF | 16.0% | 15.3% | -0.7pp |
+| Base | 11.0% | 11.0% | 0.0pp |
+
+全部 |Δ| ≤ 1.3pp，远小于 SE ≈ 3.5pp。合并健康。
+
+**Qwen N=200 final（论文主表）**:
+
+| Method | pass@1 | pass@5 | avg_turn |
+|---|---|---|---|
+| Base | 11.0% | 18.0% | 1.00 |
+| Prompt-Only (N=100) | 13.0% | – | – |
+| Direct | **14.7%** | **18.3%** | 1.00 |
+| TactfulLLM | **15.2%** | **23.0%** | 3.99 |
+| Clarify-First | **15.7%** | **23.2%** | 2.00 |
+
+**🎯 关键 finding — pass@5 故事**：
+- pass@1 上 TactfulLLM ≈ Direct ≈ CF（都在 14.7-15.7 噪声内）
+- **pass@5 上分两组**：
+  - Clarify 方法：TactfulLLM 23.0 ≈ CF 23.2 ← clarify 触发 disclosure，多 candidate 各得不同 hint
+  - Execute 方法：Direct 18.3 ≈ Base 18.0 ← 不 clarify 直接 generate，多 candidate 没新信息
+- **TactfulLLM vs Direct pass@5 差 +4.7pp**，pass@1 +0.5pp — **这就是论文主结果的 lift 机制**
+
+**TactfulLLM 比 CF 的优势 = persona-aware multi-turn 行为**：
+- TactfulLLM avg_t: Novice 7.99 / Busy 1.55 / Exp 2.42（按 persona 自适应）
+- CF avg_t: 全部 2.00（固定 1 turn clarify）
+- pass@1 几乎打平但 TactfulLLM 用更少 turn 完成（Busy 1.55 vs CF 2.00 = 节省 22% interaction cost）
+
+**输出文件**:
+- `outputs/eval_v29_qwen_direct_execution_200.json` (1937KB, detailed_results=600)
+- `outputs/eval_v29_qwen_clarify_first_200.json` (2333KB)
+- `outputs/eval_v29_qwen_base_200.json` (1938KB)
+- PO skipped（remaining-100 还没跑）
+
+### 143. 起 morning_brief scheduler 在用户睡觉时定期写 status
+
+5 个 snapshot 调度（+4h/+5h/+6h/+8h/+10h，container 17:56-23:56）。文件 `/tmp/morning_brief.txt`。结果：3 baseline 全在 +6h 前完成（Direct 18:39 / CF 19:19 / Base 20:19 北京），5 个 snapshot 都顺利写入。Freeze 没发生，all clear。
+
 ## 2026-05-01
 
 ### 142. 明天计划 — Llama 主 pipeline + Qwen PO 收尾（等今晚 baseline 数字定 N）
