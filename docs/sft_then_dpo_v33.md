@@ -128,6 +128,92 @@ SFT 跨过 KL gap:
 
 ---
 
+### 剩余实验分析（2026-05-01 决策快照，在跑 Qwen baseline 时整理）
+
+DDL 5/6 还 5 天。下面按"必跑 / 应跑 / 可跑"分类。
+
+#### 必跑（决定论文能不能投）
+
+##### A. Qwen N=200 baseline 收尾
+
+| Baseline | 当前 N | 状态 | 还要跑什么 |
+|---|---|---|---|
+| Direct | 100 (15.3%) | ⏳ remaining-100 跑中 (GPU 0) | 今晚完 + 合并 |
+| CF | 100 (16.0%) | ⏳ remaining-100 跑中 (GPU 1) | 今晚完 + 合并 |
+| Base | 100 (11.0%) | ⏳ remaining-100 跑中 (GPU 2) | 今晚完 + 合并 |
+| PO | 100 (13.0%) | ❌ remaining-100 没跑 | May 2 起跑 (~5h) |
+| TactfulLLM | 200 (15.2%) | ✅ 完成 | – |
+
+合并工具：`scripts/merge_v33_qwen_200.py`。Sanity 通过 = first-100 vs remaining-100 |Δ| ≤2pp（参考 v33 DPO 案例已成立）。
+
+##### B. Llama 主结果（cross-backbone validation）
+
+当前 Llama 状态：
+- ✅ v33 v3 SFT/DPO 模型已训完，sanity 24/24 perfect
+- ❌ 只有 **5-state eval = 1/15 = 6.7%**，N 太小论文不能用
+- ❌ Llama Base / PO 在 v2 classifier 下无 N=100/200 数字
+
+§118 已证 **v1 vs v2 数字偏差大**（v1 Llama DPO 14% → v2 6.35%），所以依赖 classifier 的 baseline 必须 v2 重测：
+
+| 任务 | N | 单卡时间 | v1 复用？ |
+|---|---|---|---|
+| Llama v33 SFT+DPO | 100/200 | 17h / 34h | ❌ 必跑 |
+| Llama Base | 100/200 | 17h / 34h | ❌ 必跑（§118 排除）|
+| Llama PO | 100/200 | 17h / 34h | ❌ 必跑（依赖 classifier）|
+| Llama Direct | 200 ✅ | – | ✅ 已有（不依赖 classifier）|
+| Llama CF | 150 → 200? | 17h | ⚠ 部分（150 缺 50）|
+
+##### C. 统计检验（不要 GPU，1h 离线）
+
+- McNemar paired test：DPO vs Base / Direct / CF / PO（每个 backbone 各 4 个对比）
+- Bonferroni multi-comparison 校正
+- 用现有 `outputs/eval_*.json` 的 `detailed_results` 字段直接算
+
+#### 应跑
+
+##### D. SFT-only vs SFT+DPO ablation（DPO refinement 单独 contribution）
+
+5-state 已有数字（Llama 0/15 vs 1/15, Qwen 13.3% vs 13.3%）但 N 小。**只在时间富余时扩 N=100**，否则 5-state 加 paragraph 解释即可。
+
+##### E. v1 vs v2 classifier ablation（classifier 设计的论文故事）
+
+`scripts/sanity/classifier/` 已有完整 sanity 数据（Llama + Qwen，24-output × 2 classifier）。**不用跑**，直接写 appendix 表 + sample 输出。
+
+#### 可跑（supplementary，时间富余）
+
+- Pareto tradeoff plots：现有 `scripts/plot_persona_tradeoffs_2panel.py` 等
+- Disclosure recovery analysis：`scripts/analyze_disclosure_recovery.py`
+- Qwen DPO v1 (epochs=3) collapse 案例：写成 "DPO over-refinement 负面例子"
+
+#### 时间排程（May 2-6）
+
+```
+今晚 (May 1)         3 baseline 跑完 (19:00 北京 = 06:00 芝加哥)
+
+May 2 早 (你醒来)     1) Qwen baseline N=200 合并 + sanity check
+                      2) GPU 0: PO Qwen rem-100 (5h) → Llama v33 SFT+DPO 100 (17h)
+                         GPU 1: Llama Base 100 (17h)
+                         GPU 2: Llama PO 100 (17h)
+
+May 3 早              Llama N=100 全完。决策点：扩 N=200 (+ 1 天) 还是直接写 paper？
+                      统计检验 + 表格生成 (1h)
+
+May 3-5               写 paper + ablation/supplement 图
+
+May 6                 提交
+```
+
+**关键 trade-off — Llama N=100 vs N=200**：
+
+- N=100 std ≈ 5pp，足够看 method 跨 backbone 是否 work（"Qwen 15.2 vs Llama X" 数量级对比）
+- N=200 std ≈ 3.5pp，paper-grade 严谨数字
+- Qwen first-100 vs N=200 飘 +0.9pp（< SE） → N=100 数字基本稳
+- **Llama 大概率也 stable**，N=100 够用；如果数字反直觉再扩
+
+**N=100 vs N=200 决策卡点**：等 Qwen 4 个 baseline N=200 数字定（May 2 早），看是否每个 baseline first-100 vs N=200 都飘 <SE。如果是，Llama 走 N=100；如果有大飘，Llama 必须 N=200。
+
+---
+
 ### Apr 30 更新（在 Apr 29 进度之上）
 
 **Qwen 100 SFT+DPO v2 完成 + patched**:

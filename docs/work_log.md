@@ -6,6 +6,75 @@
 
 ## 2026-05-01
 
+### 142. 明天计划 — Llama 主 pipeline + Qwen PO 收尾（等今晚 baseline 数字定 N）
+
+DDL 5/6 还 5 天。Qwen N=200 baseline 今晚跑完后看数字，决定 Llama N=100 还是 N=200。当前 Llama 状态：v33 v3 SFT+DPO 已训完（model + 24/24 sanity 都 ok），但**只有 5-state eval 数字（1/15 = 6.7%）**，N 太小论文不能用。
+
+**明天必跑（首跑，不是重跑）**：
+
+| 任务 | 单卡时间 | 备注 |
+|---|---|---|
+| Qwen PO remaining-100 | ~5h | 补 PO N=100→N=200，跟今晚 3 个 baseline 一起合并 |
+| Llama v33 SFT+DPO N=100 v2 | ~17h | 主 cross-backbone 结果 |
+| Llama Base N=100 v2 | ~17h | §118 已证 v1 不可复用，必须 v2 重测 |
+| Llama PO N=100 v2 | ~17h | 同上，依赖 classifier |
+
+**可复用 v1 数字（不依赖 classifier）**：
+- Llama Direct 200 ✅ `eval_v29_direct_execution_200.json`
+- Llama CF 150 ⚠️ `eval_v29_clarify_first_150extra.json`（N=150 不是 200，可能补）
+
+**Llama v29-era pure DPO 不再跑** — v33 论文里已被 SFT-then-DPO 替换（pure DPO 跨 KL gap 失败的 case study，§118 v2 partial 6.35% 已是 evidence）。
+
+**3 卡排程方案（明天起）**：
+```
+GPU 0:  Qwen PO rem-100 (~5h) ──→ Llama v33 SFT+DPO 100 (17h)   总 22h
+GPU 1:  Llama Base 100         (17h)
+GPU 2:  Llama PO 100           (17h)
+```
+后天早上完，留 May 3-5 写 paper + 统计检验。
+
+**N=100 vs N=200 决策点**：今晚 Qwen baseline N=200 数字定后，看 Δ vs N=100 是否 <SE。如果 stable，Llama N=100 就够；如果 first-100 vs remaining-100 飘 >2pp，Llama 也补 N=200（再加一天）。
+
+### 141. Codebase 清理 + git push 到新分支
+
+借 baseline 跑空隙整理项目结构 + 备份代码。
+
+**3 个 commit 推到 GitHub**：
+```
+4332df4 chore: persist /tmp wrappers + sanity scripts into scripts/
+663b8da chore: clean BCB artifact pollution + gitignore prevention
+da42159 v33: SFT-then-DPO pipeline + v2 classifier + truncation fix
+```
+
+**Highlights**:
+1. **da42159 主 commit**：v33 全套（train_sft_v33.py, train_dpo.py INIT_ADAPTER, infer.py v2 classifier, evaluate.py 截断 fix, coding_execute.txt import requirement, merge/patch_imports/sanity_classifier 工具，docs/sft_then_dpo_v33.md, docs/classifier_bug_2026-04-28.md）
+2. **663b8da 清理 BCB artifact**：删 `s/`, `source/`, `src/`, `d/`, `dst/`, `destination/`, `downloads/`, `ftp/`, `invalid_directory/`, `test_*/`, `test_data*/` + 顶层 `*.png`/`*.csv`/`*.txt.json` 杂物；扩 `.gitignore` 防再污染
+3. **4332df4 持久化 /tmp**：16 个 wrapper → `scripts/wrappers/`（含 README.md），4 个 v33 v3 sanity → `scripts/sanity/v33_v3/`，原 `scripts/sanity_classifier/` rename → `scripts/sanity/classifier/`
+
+**机器 freeze 担忧 → 双 branch 备份**：
+- push `v20_development`（延续历史）
+- push `v33-sft-dpo-pipeline`（NeurIPS 提交专题分支）— 当前 HEAD 在这分支，后续 commit 落这里
+
+### 140. 起 3 卡并行 Qwen baseline remaining-100 + freeze monitor
+
+3×4090 都空闲，并行跑 Direct/CF/Base remaining-100（state 101-200）：
+
+```
+GPU 0  Direct  qwen_direct_remaining100_ft.sh   PID 7084   ~17h ETA
+GPU 1  CF      qwen_cf_remaining100_ft.sh       PID 7186
+GPU 2  Base    qwen_base_remaining100_ft.sh     PID 7198
+```
+
+**实测 ~3 min/sample**（远低于 v33 DPO 的 17h，因为 baseline 都是 1-2 turn 不撞 max_turns），3 卡并行 ETA ~5h compute → 今晚 ~19:00 北京完。
+
+**Base 行为正常**: 5 sample × 3 persona = 15/15 turn 0 Execute（v2 classifier 下 Base Qwen 永不 emit "Clarify\n" prefix → 一致 §116 数字）。Base 实际功能上 ≈ Direct，4pp gap 是 random state divergence。
+
+**§104 / §115 freeze 担忧 → 起 freeze monitor**：
+- `/tmp/freeze_monitor.sh` 后台 PID 21190，每 20 min 写一行 CSV 到 `/tmp/freeze_monitor.log`
+- 字段：container_time, host_uptime, gpu0/1/2_util, sample_n × 3, elapsed × 3
+- 时间戳缺口 = autodl 冻结期；用户睡觉醒来直接 `cat /tmp/freeze_monitor.log` 看真实进度
+- 已 cp 到 `scripts/wrappers/freeze_monitor.sh` 持久化
+
 ### 139. GPU 升级讨论：单 4090 → 双 4090（待决策）
 
 DDL 5 天，剩下：Qwen baseline (Direct/CF/Base/PO) 100→200 ≈68h 单卡 + 可能的 Llama 100/200。双卡价值在并行跑两个 eval（每个吃满单卡，不做 DDP），4 个 baseline 从 68h → 34h 省 1.5 天。权衡：迁移成本（容器重启、env 重装、§104 冻结风险）vs 是否真要补 baseline 到 200。等 N=200 vs baseline N=100 比较结果决定补 baseline 与否再升级。
