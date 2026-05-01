@@ -6,6 +6,34 @@
 
 ## 2026-05-02
 
+### 147. Codebase 第二轮清理（在 Llama 跑中安全归档）
+
+3 个 Llama eval 跑中借空隙整理：
+
+**A. 顶层 BCB artifact 再清一次**
+今天 eval 又生成一批 (`histogram.png`, `qq_plot.png`, `*.txt.json`, `test_data_1-5/`, `log.csv`, `output.csv`, `word_counts.json` 等)。删了 21 文件 + 5 目录。已 gitignored 不入 git，但视觉清爽。
+
+**B. `models/` 11G → 7G（释放 4G）**
+
+删 7 个失败 retry/superseded checkpoints：
+- `v30_100states`（changed oracle, failed）
+- `v31_100states`, `v31_2a_100states`, `v31_4_100states`, `v31_4_qwen_100states`（failed v31 retries）
+- `v32_test_keep_prefix`, `v32b_alpha32_keep_prefix`（v32 alpha 调参 collapse）
+
+保留 11 个：v29 era (4) + v33 完整迭代 (7, 含 v1 v2 v3 + Qwen 同款)。Caveat: model checkpoint 是 gitignored，**GitHub 上没 backup**；若将来要复现，需 git checkout + retrain（数据 + 训练代码都在，理论可复现）。
+
+**C. `outputs/` archive (5.9MB)**
+
+移到 `outputs/archive/legacy_smalltest/`：50test/30test/5state 失败 era exploration（17 文件）
+移到 `outputs/archive/legacy_v29_misc/`：v29 misc + ablation 等（9 文件）
+留下 36 个 paper canonical（200/100_patched/remaining100_ft/150extra）。
+
+**D. `/tmp` 428 → 14 文件**
+
+只留 6 个活跃 wrapper + 它们的 log + freeze_monitor + morning_brief scheduler PID 文件。删的：旧 v33_v1/v2 sanity .py/.json/.log（已 cp 到 scripts/sanity/）、v32 sanity、v29-era pipeline scripts、status checkers、chain monitors，等等。
+
+**Eval 无影响**：cleanup 期间反复 `ps -ef | grep evaluate_multi_turn`，3 个进程一直 alive，sample 进度持续 +1 +1。
+
 ### 146. 起 Llama N=200 全 pipeline + Qwen PO 收尾（Option D 启动）
 
 23:25 北京（10:25 芝加哥）3 卡并行起 Llama N=200：
