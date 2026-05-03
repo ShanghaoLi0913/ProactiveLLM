@@ -448,6 +448,8 @@ def evaluate_multi_turn_conversation(
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
         try:
+            if os.environ.get("DISABLE_8BIT") == "1":
+                raise RuntimeError("8-bit disabled via env var")
             from transformers import BitsAndBytesConfig
             quantization_config = BitsAndBytesConfig(load_in_8bit=True)
             base_model_obj = AutoModelForCausalLM.from_pretrained(
@@ -477,6 +479,8 @@ def evaluate_multi_turn_conversation(
             tokenizer.pad_token = tokenizer.eos_token
         
         try:
+            if os.environ.get("DISABLE_8BIT") == "1":
+                raise RuntimeError("8-bit disabled via env var")
             from transformers import BitsAndBytesConfig
             quantization_config = BitsAndBytesConfig(load_in_8bit=True)
             base_model_obj = AutoModelForCausalLM.from_pretrained(
