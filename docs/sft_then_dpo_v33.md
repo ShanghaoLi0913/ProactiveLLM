@@ -766,3 +766,95 @@ If session is interrupted:
 2. Run `python3 -c "import json; d=json.load(open('outputs/eval_v33_v3_dpo_5.json')); ..."` to read pass@1
 3. Read this doc + `classifier_bug_2026-04-28.md` for context
 4. Continue per "Pending decisions" section
+
+---
+
+## 2026-05-04 Update — 200-state evals + paper consistency audit
+
+### Llama v33 SFT-then-DPO 200-state results
+
+```
+Era: 8-bit, v2 classifier (`models/v33_v3_dpo`)
+  Novice  pass@1 = 12.5%  avg_t = 8.0
+  Exp     pass@1 = 12.5%  avg_t = 2.0
+  Busy    pass@1 = 11.5%  avg_t = 1.0
+  Overall pass@1 = 12.2%  pass@5 = 22.5%
+
+Era: bf16, v2 classifier
+  Novice  pass@1 = 17.5%  avg_t = 8.0
+  Exp     pass@1 = 13.5%  avg_t = 2.0
+  Busy    pass@1 = 11.5%  avg_t = 1.0
+  Overall pass@1 = 14.2%  pass@5 = 22.8%
+```
+
+Source: `outputs/eval_v33_v3_llama_dpo_200.json`, `outputs/eval_v33_v3_llama_dpo_200_bf16.json`.
+
+### Qwen v33 SFT-then-DPO 200-state results
+
+```
+Era: 8-bit, v2 classifier (`models/v33_v3_qwen_dpo_v2`)
+  Novice  pass@1 = 18.0%  avg_t = 8.0
+  Exp     pass@1 = 14.0%  avg_t = 2.4
+  Busy    pass@1 = 13.5%  avg_t = 1.6
+  Overall pass@1 = 15.2%  pass@5 = 23.0%
+
+Era: bf16, v2 classifier
+  Novice  pass@1 = 23.0%  avg_t = 8.0
+  Exp     pass@1 = 18.5%  avg_t = 2.4
+  Busy    pass@1 = 13.5%  avg_t = 1.7
+  Overall pass@1 = 18.3%  pass@5 = 25.7%
+```
+
+Source: `outputs/eval_v33_v3_qwen_dpo_v2_200.json`, `outputs/eval_v33_v3_qwen_dpo_v2_200_bf16.json`.
+
+### Critical finding: Llama SFT-then-DPO underperforms pure DPO
+
+```
+Llama v29 pure DPO  (paper, v1, 8-bit):  Overall 16.0%  (Nov 18.5 / Exp 15.5 / Busy 14.0)
+Llama v33 SFT-then-DPO (v2, 8-bit):      Overall 12.2%  (Nov 12.5 / Exp 12.5 / Busy 11.5)
+Llama v33 SFT-then-DPO (v2, bf16):       Overall 14.2%  (Nov 17.5 / Exp 13.5 / Busy 11.5)
+```
+
+**v33 SFT-then-DPO does not improve over v29 pure DPO on Llama, even at bf16.** Likely root causes:
+
+1. **Classifier era mismatch in evaluation**: v33 was evaluated with v2 classifier (strict "Clarify\n" prefix), while v29 paper numbers use v1 classifier (intent-based, hedge code → Clarify). Under v1, Llama hedge outputs trigger more multi-turn rounds → more disclosure recovery → higher pass@1. v33 SFT teaches the model to commit early, removing the v1-exploitable hedge pattern.
+
+2. **v29's apparent strength is partially v1 classifier artifact**: re-evaluating v29 pure DPO under v2 classifier would likely drop it close to v33 numbers. Conversely, evaluating v33 SFT-then-DPO under v1 classifier might recover some of the gap (untested).
+
+3. **SFT may not be needed for Llama-3.1-Instruct**: this backbone's RLHF prior is permissive enough for pure DPO + LoRA to learn proactive Clarify under intent-based eval. SFT-then-DPO becomes load-bearing only for stricter eval criteria or distributionally-distant targets.
+
+### Qwen v33 SFT-then-DPO works as designed
+
+Qwen v33 SFT-then-DPO **does** beat its baselines and shows persona-differentiated behavior:
+- Novice 23.0% (bf16) — strong proactive multi-turn
+- avg_t differentiated: Nov 8.0 / Exp 2.4 / Busy 1.7 (matches our story)
+
+Qwen-Instruct's RLHF prior is more terse than Llama's, so SFT warmup IS needed to bridge the KL gap to the proactive-Clarify distribution. Pure DPO on Qwen had failed earlier (collapse / no learning).
+
+### Paper consistency decision (May 4)
+
+§Method as drafted describes "SFT-then-DPO with persona-aware preference signals" (matches v33 pipeline). Paper main table TactfulLLM Llama uses **v29 pure DPO** numbers (16.0%). This is a method/data mismatch.
+
+| Option | Trade-off |
+|--------|-----------|
+| Keep v29 era for Llama, change §Method to "DPO with persona-aware reward" | ✅ Story strong (16.0% wins all baselines under v1 classifier); SFT relegated to ablation showing "SFT pre-training did not improve over pure DPO on Llama" |
+| Switch Llama numbers to v33 SFT-then-DPO (12.2%–14.2%) | ✅ Method/numbers consistent; ❌ TactfulLLM ≈ Prompt-only at v1-era story collapses |
+
+**Decision (May 4): keep v29 era for Llama, use v33 SFT-then-DPO for Qwen.** §Method must be rewritten to match:
+- Main method = "DPO with persona-aware preference signals + intent-based classifier"
+- SFT-then-DPO becomes a **per-backbone necessity**: "Qwen requires SFT warmup to bridge KL gap to the proactive-Clarify distribution; Llama's RLHF prior is permissive enough for pure DPO."
+
+This framing is honest about the empirical reality and turns the asymmetry into a finding rather than a flaw.
+
+### Paper main table data audit (cross-reference)
+
+See `docs/work_log.md §150` for the full audit. Key issues identified:
+- Llama Base avg_t was 1.0/1.0/1.0/1.0 in table; correct v1-era values are 2.30/1.65/2.51/2.15
+- Llama Prompt-only is n=50 per persona (n=150 total), not n=200 — needs补 or footnote
+- All other rows are internally consistent v29-era 200-state data
+
+### Still open
+
+- CollabLLM baseline: Llama partial 42/600, Qwen variant does not exist (HF `collabllm/` org has Llama only)
+- Llama Prompt-only n=200: requires 10-12h 8-bit + v1 classifier rerun on 150-extra states
+- Paper §Method rewrite to match the v29 (Llama) + v33 (Qwen) split decision

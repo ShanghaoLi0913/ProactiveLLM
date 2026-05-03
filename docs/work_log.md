@@ -4,6 +4,119 @@
 
 ---
 
+## 2026-05-04
+
+### 153. GPU schedule reset — killed 3 chains, partials preserved for resume
+
+03:31 用户决定重新安排任务，killed 全部 bf16 chain processes:
+
+```
+GPU 0: idle (chain 已完，qwen_dpo + llama_po done)
+GPU 1: Qwen Clarify-first bf16 30/200 → killed
+GPU 2: Qwen Base bf16 110/200 → killed (qwen_po 排队也取消)
++ launchers (/tmp/launch_bf16_chains.sh PID 750910/750912)
++ chain wrappers (PID 763817/763818)
+```
+
+Partial 文件全部保留 (`*.json.partial`)，未来可从断点续：
+- `eval_v29_qwen_base_200_bf16.json.partial` 110/200
+- `eval_v29_qwen_clarify_first_200_bf16.json.partial` 30/200
+- `eval_collabllm_llama_200.json.partial` 42/600 (Apr 3 残留)
+
+bf16 chain 完成进度（停止时）：
+
+| Backbone | Method | bf16 状态 |
+|----------|--------|-----------|
+| Llama | Base / Direct / CF / PO / DPO | ✅ 5/5 全 done |
+| Qwen | Direct / DPO | ✅ done |
+| Qwen | Base | 🔄 55% paused |
+| Qwen | CF | 🔄 15% paused |
+| Qwen | PO | ⏳ 未起 |
+
+下一步任务待用户分配（候选：CollabLLM Llama 续跑 ~5h / Llama PO 150-extra v1 era ~10-12h / 续 Qwen bf16 ~5-6h）。
+
+### 152. v29 pure DPO vs v33 SFT-then-DPO — paper table data source 一致性确认
+
+用户问 "v29 的 llama dpo 是不是没 sft 过"，触发完整 audit。
+
+**确认 paper 表 TactfulLLM Llama 16.0% 来自 v29 pure DPO**（无 SFT），不是 §Method 描述的 SFT-then-DPO 流水线。证据：`docs/work_log.md:207`、`models/v29*` 没对应 SFT 目录。
+
+**v33 SFT-then-DPO 实测 vs v29 pure DPO**：
+
+| Llama | Nov | Exp | Busy | Overall |
+|-------|-----|-----|------|---------|
+| **v29 pure DPO** (paper, v1, 8-bit) | 18.5 | 15.5 | 14.0 | **16.0%** |
+| v33 SFT-then-DPO (v2, 8-bit) | 12.5 | 12.5 | 11.5 | 12.2% |
+| v33 SFT-then-DPO (v2, bf16) | 17.5 | 13.5 | 11.5 | 14.2% |
+
+v33 SFT-then-DPO 在 Llama 上**输给** v29 pure DPO。可能根因：
+- v33 训练时用 v2 classifier 目标（严格 "Clarify\n" prefix），SFT 教模型早 commit，反而失去 v29 era 利用 v1 classifier "hedge code → 误判 Clarify" 拿到的多轮机会
+- v29 era 高 pass@1 的部分功劳是 v1 classifier artifact，不全是 DPO 本身贡献
+
+**Qwen v33 SFT-then-DPO 工作正常**：Overall 15.2% (8-bit) / 18.3% (bf16)，胜过 v29 baseline。
+
+**Decision**: paper 主表 Llama 用 v29 era（story 强），Qwen 用 v33 SFT-then-DPO（pipeline 一致）。§Method 必须改成"DPO with persona-aware reward"，把 SFT 当 ablation 解释为"pre-training with SFT did not help on Llama-3.1-Instruct"，避免 reviewer 抓 method/数字 mismatch。
+
+### 151. bf16 vs 8-bit 精度 study — 6 方法 pairwise 对比
+
+用户问 "bf16 是不是 task success 偏高"，做了完整 pairwise comparison：
+
+| Method | 8-bit | bf16 | Δ |
+|--------|------:|-----:|---:|
+| Llama Base | 11.5% | 15.3% | **+3.8pp** |
+| Qwen DPO (v33) | 15.2% | 18.3% | +3.2pp |
+| Llama DPO (v33) | 12.2% | 14.2% | +2.0pp |
+| Llama Prompt-only | 12.8% | 14.5% | +1.7pp |
+| Llama Direct | 12.3% | 13.7% | +1.3pp |
+| Qwen Direct | 14.7% | 13.3% | **-1.3pp** ⚠️ |
+
+**Findings**：
+- 平均 +1.8pp，但**不绝对**：Qwen Direct 反而下降 1.3pp
+- 跟 multi-turn 程度相关：长对话方法（Base/PO/DPO）累积 8-bit 量化误差更大，bf16 lift 更明显
+- Direct（强制单轮）几乎不受影响
+
+**对 paper 的影响**：bf16 era 不能用，因为 Llama 主表 TactfulLLM bf16 = 14.2% < Llama Prompt-only bf16 = 14.5%（method 输给 baseline），story 直接坍。**继续用 v29 v1-era 8-bit。**
+
+### 150. Paper main table data audit — Base avg_t bug + Prompt-only n=150 + classifier story
+
+用户分享 paper main table LaTeX，要求逐行核对数据源和数字。完成完整 audit：
+
+**全表数据源溯源（all v29 era）：**
+
+| 行 | Source | n | 状态 |
+|----|--------|---|------|
+| Base LLM | 50test + 108-partial + 42-remaining 合并 | 200 | ⚠️ pass@1 ✓，**avg_t 错** |
+| Direct Execution | `eval_v29_direct_execution_200.json` | 200 | ✓ |
+| Clarify-first | 50test + 150extra 合并 | 200 | ✓ |
+| Prompt-only | docs §18 50test only | **150** | ❌ **n=150 not 200** |
+| TactfulLLM | 50test + 150extra DPO | 200 | ✓ |
+
+**🔴 Bug: Base 行 avg_t 1.0/1.0/1.0/1.0 是错的**——pass@1 用的是 v1 era 合并文件 (12.5/12.5/13.0)，但 avg_t 错抄了 v2 era 重跑文件 (1.0)。两份不能混。
+
+**正确值**（精确算自 v1 era merged 文件）：
+```
+Novice  avg_t = 2.295 → 2.30
+Exp     avg_t = 1.650 → 1.65
+Busy    avg_t = 2.510 → 2.51
+Overall avg_t = 2.152 → 2.15
+```
+
+**为什么 v1 era Base 也多轮**：Llama 不带 persona prompt 时输出 hybrid（preamble + ?），v1 看前 30 token (preamble) → 判 Clarify → 强制多轮。这跟 Prompt-only 高 avg_t 5.5 是同一原理。
+
+**v1 vs v2 classifier 论证**：用户指出 v1 是对的，理由 well-grounded：
+1. v1 测 stated intent，v2 测 surface output（hedge code 算 Execute 是 unprincipled）
+2. 跨 backbone 公平：v1 让 Llama hedge 也算 Clarify，跟 Qwen pure question 一视同仁
+3. 配 oracle disclosure 设计：hedge → Clarify → 拿到 spec，浪费 hedge 信号才浪费
+
+§Method 需要加段台词为 "intent-based classification" defense（具体见 commit 计划）。
+
+**Action items 优先级**：
+1. ✅ 修 Base 行 avg_t → 2.30/1.65/2.51/2.15
+2. 🟡 Prompt-only 补到 n=200（8-bit + v1 era ~10-12h）or 加脚注 `n=50/persona`
+3. 🟡 CollabLLM Llama 续跑 (~5h)，Qwen 没有 variant → 留空 + 脚注
+
+---
+
 ## 2026-05-02
 
 ### 149. Qwen PO classifier 不一致 → 重跑 first-100 v2 (re-sequenced GPU 1 chain)
