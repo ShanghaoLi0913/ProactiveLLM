@@ -1013,8 +1013,11 @@ if __name__ == "__main__":
     llm_for_user = None if args.user_dummy else (args.llm_model.strip() or None)
     
     # prompt_only, direct_execution, always_clarify, oracle, ideal_disclosed imply no_lora (uses base model)
+    # EXCEPT when --model_dir is also given: allows LoRA-adapter checkpoints (e.g., CollabLLM)
+    # to be loaded as base + adapter while still using the persona-prompt action selector.
     if args.prompt_only or args.direct_execution or args.always_clarify is not None or args.oracle or args.ideal_disclosed:
-        args.no_lora = True
+        if not args.model_dir:
+            args.no_lora = True
 
     evaluate_multi_turn_conversation(
         model_dir=args.model_dir,

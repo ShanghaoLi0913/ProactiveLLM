@@ -18,9 +18,15 @@ echo "[$(date)] CollabLLM Llama 200 (GPU=$CUDA_VISIBLE_DEVICES)"
 echo "  output: $OUT"
 echo
 
+SNAPSHOT=/root/autodl-tmp/hf_cache/hub/models--collabllm--CollabLLM-code-Llama-3.1-8B-Instruct/snapshots/4de9e9b4061a520b40c34245b0b0f20a35c4197a
+
+# CollabLLM is a LoRA adapter; use --model_dir to load it on top of Llama base.
+# --prompt_only triggers the persona-aware natural-language action selector
+# (instead of the DPO state-rendering selector, which CollabLLM doesn't recognize).
 python eval/evaluate_multi_turn_persona.py \
-  --no_lora --prompt_only \
-  --base_model "collabllm/CollabLLM-code-Llama-3.1-8B-Instruct" \
+  --model_dir "$SNAPSHOT" \
+  --base_model meta-llama/Llama-3.1-8B-Instruct \
+  --prompt_only \
   --test_states data/seeds/test_states_v29_eval_200.jsonl \
   --output "$OUT" \
   --max_turns 7 \
