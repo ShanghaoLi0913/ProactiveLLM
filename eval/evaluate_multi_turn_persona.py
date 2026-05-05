@@ -131,6 +131,30 @@ def select_action_with_model(
     return pick_action_from_generation(model, tokenizer, prompt, max_new_tokens=30)
 
 
+FEW_SHOT_PERSONA_EXAMPLES = """
+
+Here are examples of how to respond differently based on user persona:
+
+Example 1 (Novice-Learner: high patience, low expertise — ASK clarifying questions):
+User: I need a function to compute the average of each row in a dataframe.
+Assistant: I'd be happy to help! To make sure I write the right function, could you clarify:
+- What's the expected input format (pandas DataFrame, numpy array)?
+- Should missing values be excluded or filled before averaging?
+
+Example 2 (Experienced-Engineer: mid patience, high expertise — ask ONE quick clarifying question):
+User: I need a function to compute the average of each row in a dataframe.
+Assistant: Quick check: should the result be a pandas Series or a numpy array?
+
+Example 3 (Busy-Developer: low patience, mid expertise — write code immediately):
+User: I need a function to compute the average of each row in a dataframe.
+Assistant: ```python
+import pandas as pd
+def task_func(df):
+    return df.mean(axis=1)
+```
+"""
+
+
 def select_action_prompt_only(
     state: Dict,
     tokenizer: AutoTokenizer,
@@ -143,6 +167,9 @@ def select_action_prompt_only(
     explicitly describes how each persona should decide between Clarify and Execute.
     The model generates a short response; action is detected from content style
     (same as select_action_with_model).
+
+    If FEW_SHOT_PERSONA env var = "1", inject 3 in-context examples demonstrating
+    persona-specific Clarify/Execute behavior (for the few-shot persona-prompt baseline).
     """
     from policy.infer import pick_action_from_generation
     from policy.render_state import render_state as render_state_with_persona
@@ -170,6 +197,8 @@ def select_action_prompt_only(
     ablation_mode = os.environ.get("ABLATION_MODE", None)
     state_text = render_state_with_persona(state, persona=persona, ablation_mode=ablation_mode)
 
+    use_few_shot = os.environ.get("FEW_SHOT_PERSONA") == "1"
+
     # System prompt: persona description + task framing, no decision rules
     system_msg = (
         f"{persona_desc}\n\n"
@@ -180,6 +209,9 @@ def select_action_prompt_only(
         "(start with ```python or def or import).\n\n"
         "Consider the user's characteristics when deciding."
     )
+    if use_few_shot:
+        system_msg = system_msg + FEW_SHOT_PERSONA_EXAMPLES
+
     messages = [
         {"role": "system", "content": system_msg},
         {"role": "user", "content": state_text},
@@ -405,6 +437,8 @@ def evaluate_multi_turn_conversation(
     oracle: bool = False,
     ideal_disclosed: bool = False,
     busy_t1_execute: bool = False,
+    persona_whitelist: Optional[set] = None,
+    random_policy: bool = False,
 ):
     """Evaluate model's multi-turn behavior with different personas.
 
@@ -451,7 +485,17 @@ def evaluate_multi_turn_conversation(
             if os.environ.get("DISABLE_8BIT") == "1":
                 raise RuntimeError("8-bit disabled via env var")
             from transformers import BitsAndBytesConfig
-            quantization_config = BitsAndBytesConfig(load_in_8bit=True)
+            if os.environ.get("USE_4BIT") == "1":
+                # 4-bit NF4, matches QLoRA training distribution exactly
+                quantization_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_compute_dtype=torch.bfloat16,
+                    bnb_4bit_use_double_quant=True,
+                    bnb_4bit_quant_type="nf4",
+                )
+                print("📊 Loading at 4-bit NF4 (matching QLoRA training)")
+            else:
+                quantization_config = BitsAndBytesConfig(load_in_8bit=True)
             base_model_obj = AutoModelForCausalLM.from_pretrained(
                 base_model,
                 quantization_config=quantization_config,
@@ -482,7 +526,17 @@ def evaluate_multi_turn_conversation(
             if os.environ.get("DISABLE_8BIT") == "1":
                 raise RuntimeError("8-bit disabled via env var")
             from transformers import BitsAndBytesConfig
-            quantization_config = BitsAndBytesConfig(load_in_8bit=True)
+            if os.environ.get("USE_4BIT") == "1":
+                # 4-bit NF4, matches QLoRA training distribution exactly
+                quantization_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_compute_dtype=torch.bfloat16,
+                    bnb_4bit_use_double_quant=True,
+                    bnb_4bit_quant_type="nf4",
+                )
+                print("📊 Loading at 4-bit NF4 (matching QLoRA training)")
+            else:
+                quantization_config = BitsAndBytesConfig(load_in_8bit=True)
             base_model_obj = AutoModelForCausalLM.from_pretrained(
                 base_model,
                 quantization_config=quantization_config,
@@ -496,7 +550,7 @@ def evaluate_multi_turn_conversation(
                 device_map="auto",
                 token=hf_token if hf_token else None,
             )
-        
+
         if len(tokenizer) != base_model_obj.get_input_embeddings().num_embeddings:
             base_model_obj.resize_token_embeddings(len(tokenizer))
         
@@ -566,7 +620,12 @@ def evaluate_multi_turn_conversation(
             # A state is complete only if all personas finished (or 1 for persona-independent)
             from collections import Counter as _Counter
             _state_counts = _Counter(r["state_id"] for r in existing_results)
-            _required = 1 if persona_independent else len(PERSONAS)
+            if persona_independent:
+                _required = 1
+            elif persona_whitelist:
+                _required = len(persona_whitelist)
+            else:
+                _required = len(PERSONAS)
             completed_state_ids = {sid for sid, cnt in _state_counts.items() if cnt >= _required}
             results = [r for r in existing_results if r["state_id"] in completed_state_ids]
             print(f"🔄 Resume: 从 {_resume_file} 恢复 {len(completed_state_ids)} 个已完成 state，跳过", flush=True)
@@ -723,6 +782,8 @@ def evaluate_multi_turn_conversation(
 
         for persona_idx, persona_obj in enumerate(PERSONAS):
             persona_name = persona_obj.name
+            if persona_whitelist and persona_name not in persona_whitelist:
+                continue
             print(f"\n  Persona: {persona_name}", flush=True)
 
             # Initialize state with persona; keep a clean snapshot for Execute query
@@ -740,7 +801,13 @@ def evaluate_multi_turn_conversation(
 
             for turn in range(max_turns):
                 # Select action using trained model, prompt-only, direct execution, or always-clarify
-                if direct_execution:
+                if random_policy:
+                    # Random baseline: 50/50 Clarify or Execute, seeded per (state, persona, turn)
+                    import random as _rand
+                    _seed = hash((current_state["id"], persona_name, turn)) & 0xFFFFFFFF
+                    _r = _rand.Random(_seed)
+                    action = "Clarify" if _r.random() < 0.5 else "Execute"
+                elif direct_execution:
                     action = "Execute"
                 elif always_clarify is not None:
                     action = "Clarify" if turn < always_clarify else "Execute"
@@ -894,7 +961,8 @@ def evaluate_multi_turn_conversation(
     print("📊 评估结果总结")
     print("=" * 80)
     
-    for persona_name in ["Busy-Developer", "Experienced-Engineer", "Novice-Learner"]:
+    _summary_personas = sorted(persona_whitelist) if persona_whitelist else [p.name for p in PERSONAS]
+    for persona_name in _summary_personas:
         if persona_name in persona_stats:
             stats = persona_stats[persona_name]
             print(f"\n{persona_name}:")
@@ -1001,11 +1069,25 @@ if __name__ == "__main__":
         help="Post-hoc patch: force Busy-Developer to Execute at turn>=1 regardless of model decision. "
              "Tests the hypothesis that v31.1 Busy pass@1 loss is driven by the 7-turn long tail.",
     )
+    parser.add_argument(
+        "--persona_filter",
+        type=str,
+        default=None,
+        help="Comma-separated whitelist of persona names to evaluate (e.g. 'Time-Pressured-Expert'). "
+             "When set, skips other personas in the loop and adjusts resume-required count accordingly. "
+             "Used for held-out persona OOD experiments (§6.3).",
+    )
+    parser.add_argument(
+        "--random_policy",
+        action="store_true",
+        help="Random baseline: at each turn, choose Clarify or Execute uniformly at random "
+             "(seeded per (state, persona, turn) for reproducibility). Establishes lower bound.",
+    )
 
     args = parser.parse_args()
 
-    if not args.no_lora and not args.prompt_only and not args.direct_execution and args.always_clarify is None and not args.oracle and not args.ideal_disclosed and not args.model_dir:
-        parser.error("需要 --model_dir（LoRA 目录），或使用 --no_lora / --prompt_only / --direct_execution / --always_clarify / --oracle / --ideal_disclosed 评估 Base 模型")
+    if not args.no_lora and not args.prompt_only and not args.direct_execution and args.always_clarify is None and not args.oracle and not args.ideal_disclosed and not args.model_dir and not args.random_policy:
+        parser.error("需要 --model_dir（LoRA 目录），或使用 --no_lora / --prompt_only / --direct_execution / --always_clarify / --oracle / --ideal_disclosed / --random_policy 评估 Base 模型")
     if args.no_lora and args.model_dir:
         print("ℹ️  已指定 --no_lora，忽略 --model_dir", flush=True)
 
@@ -1018,6 +1100,14 @@ if __name__ == "__main__":
     if args.prompt_only or args.direct_execution or args.always_clarify is not None or args.oracle or args.ideal_disclosed:
         if not args.model_dir:
             args.no_lora = True
+
+    # random_policy implies no_lora (no model-based action selection used)
+    if args.random_policy:
+        args.no_lora = True
+
+    persona_whitelist = None
+    if args.persona_filter:
+        persona_whitelist = {p.strip() for p in args.persona_filter.split(",") if p.strip()}
 
     evaluate_multi_turn_conversation(
         model_dir=args.model_dir,
@@ -1037,4 +1127,6 @@ if __name__ == "__main__":
         oracle=args.oracle,
         ideal_disclosed=args.ideal_disclosed,
         busy_t1_execute=args.busy_t1_execute,
+        persona_whitelist=persona_whitelist,
+        random_policy=args.random_policy,
     )

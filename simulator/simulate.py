@@ -51,6 +51,15 @@ PERSONAS = [
     # - 中等耐心（mid patience），有一定容忍度
     # - 行为：如果问题合理会回答，但如果问太多会不耐烦
     Persona("Experienced-Engineer", "coding", "high", "mid"),
+
+    # 4. Time-Pressured Expert: OOD persona for §6.3 generalization test
+    # - High expertise (clear answers) + LOW patience (rejects easily)
+    # - Combination not seen during training: tests whether model disentangles
+    #   expertise from patience signals rather than memorizing 3 fixed personas.
+    # - Expected behavior: TactfulLLM should clarify minimally (patience-driven),
+    #   even though answers would be high-quality if asked (expertise-irrelevant
+    #   given low patience).
+    Persona("Time-Pressured-Expert", "coding", "high", "low"),
 ]
 
 
