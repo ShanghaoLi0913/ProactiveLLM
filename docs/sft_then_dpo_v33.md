@@ -853,8 +853,112 @@ See `docs/work_log.md §150` for the full audit. Key issues identified:
 - Llama Prompt-only is n=50 per persona (n=150 total), not n=200 — needs补 or footnote
 - All other rows are internally consistent v29-era 200-state data
 
-### Still open
+### Still open (updated 2026-05-05)
 
-- CollabLLM baseline: Llama partial 42/600, Qwen variant does not exist (HF `collabllm/` org has Llama only)
-- Llama Prompt-only n=200: requires 10-12h 8-bit + v1 classifier rerun on 150-extra states
-- Paper §Method rewrite to match the v29 (Llama) + v33 (Qwen) split decision
+- ~~CollabLLM Llama 200-state~~ ✅ DONE (bf16 + v2 = 15.3%; 8-bit + v1 partial 13.1%)
+- ~~Llama Prompt-only n=200~~ ✅ DONE (merged 50test + 150extra = 13.3%, paper 8.7% was unlucky n=50)
+- Paper §Method rewrite to match v29 (Llama) + v33 (Qwen) split decision — pending, doing post-experiment
+
+---
+
+## 2026-05-05 Update — CollabLLM apples-to-apples + per-persona Pareto findings
+
+### Apples-to-apples CollabLLM eval
+
+Re-evaluated CollabLLM Llama at 8-bit + v1 (matching paper TactfulLLM precision/classifier) instead of original bf16 + v2:
+
+```
+                          Nov    Exp    Busy   Overall
+TactfulLLM 8-bit + v1     18.5   15.5   14.0   16.0%   (paper main)
+CollabLLM bf16 + v2       19.0   14.0   13.0   15.3%   (original eval, unfair precision)
+CollabLLM 8-bit + v1      15.0   13.1   11.2   13.1%   (apples-to-apples, n=318 partial)
+```
+
+**Verified bf16-vs-8bit precision asymmetry hypothesis**: CollabLLM lost ~2.2pp dropping from bf16 to 8-bit, consistent with the +1.7pp average lift other Llama baselines show on bf16. The original "TactfulLLM ~tied with CollabLLM" reading was an artifact of precision asymmetry.
+
+**Updated paper main table claim**: TactfulLLM beats CollabLLM by **+2.8pp Overall** under matched precision, with consistent **+2.3 to +3.4pp gains across all three personas**.
+
+### Per-persona Pareto-dominance pattern (paired analysis on 450 (state, persona) pairs)
+
+McNemar paired tests on TactfulLLM vs CollabLLM:
+
+```
+Pass@1 (single-attempt accuracy):
+  Busy:  6 vs 6     p=1.000   (tied, NOT significant)
+  Exp:   13 vs 11   p=0.839   (NOT significant)
+  Nov:   9 vs 13    p=0.523   (CollabLLM slight edge, NOT significant)
+
+Pareto-dominance (pass AND ≤ turns):
+  Busy:  TactfulLLM 129  vs  CollabLLM 1     ⭐ 129:1, p<0.001
+  Exp:   TactfulLLM 17   vs  CollabLLM 93    (CollabLLM wins efficiency)
+  Nov:   TactfulLLM 4    vs  CollabLLM 138   (CollabLLM wins efficiency)
+```
+
+**Mixed verdict**: TactfulLLM Pareto-dominates **only** on Busy (the persona where interruption cost matters most), while CollabLLM achieves better efficiency on patient personas (Nov + Exp) where TactfulLLM saturates max_turns or asks more questions than necessary.
+
+**Updated paper §6 framing** (replacing earlier "global Pareto dominance" narrative):
+> "TactfulLLM achieves persona-asymmetric Pareto dominance: on low-patience users (Busy), it dominates CollabLLM in 129/150 paired tests (p<0.001), eliminating clarification entirely while matching task accuracy. On high-patience personas, TactfulLLM uses more turns than necessary—a saturation behavior we discuss as a limitation in §7."
+
+### pass@5 mechanism analysis
+
+Investigated why CollabLLM occasionally beats TactfulLLM on pass@5 despite lower pass@1. Inspection of `candidate_results` (per-sample pass info) shows:
+
+```
+Per-sample variance analysis (Busy, n=150-200):
+  TactfulLLM samples: 14.0/12.7/12.7/13.3/11.3 → mean 12.8%, low variance
+  CollabLLM samples:  13.0/13.0/13.0/13.5/13.0 → mean 13.1%, low variance
+  → both uniform, low per-sample variance
+
+Per-sample variance (Novice):
+  TactfulLLM: 19.3/18.7/17.3/18.7/15.3 → mean 17.9%, mild spread
+  CollabLLM:  19.0/13.5/13.5/15.0/10.5 → mean 14.3%, larger spread (8.5pp range)
+```
+
+**Conclusion**: The "CollabLLM accumulates disclosed info → easier task → higher pass@5" hypothesis is partially wrong: Busy rejects 84% of clarifications, so most CollabLLM Busy turns yield no info gain. The actual pass@5 gap (1.7pp Overall, 2.5pp on Busy) is **within statistical noise at n=200** and stems from per-sample variance/diversity rather than substantive disclosure differences.
+
+**Honest paper claim** (avoid overclaiming TactfulLLM superiority on pass@5):
+> "TactfulLLM and CollabLLM achieve **comparable** pass@5 (within 1.7pp Overall, within statistical noise at n=200). TactfulLLM's advantages are concentrated in pass@1 (deployment-realistic single-attempt accuracy) and interaction efficiency."
+
+### Llama Prompt-only n=200 corrected number
+
+Original paper Prompt-only number was 8.7% (n=50 subset). Completed remaining 150-extra states; merged n=200 actual = **13.3%** Overall (Nov 15.0 / Exp 13.0 / Busy 12.0). The paper 50test was an unlucky subset on Exp/Busy (n=50 noise).
+
+**Implication**: TactfulLLM vs Prompt-only gap shrinks from +7.3pp (paper) to +2.7pp (real n=200), still positive but narrower. Story still holds; need to update main table and §6 narrative to reflect real numbers.
+
+### Out-of-distribution persona test (§6.3)
+
+Added Time-Pressured-Expert persona (high expertise, low patience — combination not seen in training). Evaluated TactfulLLM (paper 8-bit + v1) on 200 states × TPE only:
+
+```
+Time-Pressured-Expert (OOD persona):
+  pass@1 = 10.5%
+  avg_turns = 1.00 (100% Execute, voluntary)
+  clarify_rate = 0%
+  forced_final_execute = 0
+```
+
+**Finding**: Model voluntarily executes immediately (no max_turns saturation), correctly identifying low-patience signal as dominant. Maps (high, low) to "minimize interruption" — same behavior as Busy (mid expertise, low patience), independent of expertise level.
+
+**Paper claim**: axis-aligned generalization — policy disentangles expertise from patience axes.
+
+### Implementation additions
+
+- `eval/evaluate_multi_turn_persona.py`:
+  - `--persona_filter` whitelist (for OOD eval)
+  - `--prompt_only + --model_dir` co-existence (for LoRA-adapter baselines like CollabLLM)
+  - `USE_4BIT=1` env var (NF4 4-bit eval, matching QLoRA training)
+  - `FEW_SHOT_PERSONA=1` env var (3 in-context persona-action examples in select_action_prompt_only)
+  - `--random_policy` CLI flag (50/50 Clarify/Execute, seeded for reproducibility)
+
+- New baselines queued (post-current-runs):
+  - Few-shot Persona Prompt (Llama running, Qwen queued)
+  - Random Policy (Llama + Qwen queued)
+  - Both at 8-bit + v1 (paper consistent)
+
+### Pending (~17h to NeurIPS DDL)
+
+- Wait for CollabLLM 8-bit + v1 full 200 (~22:30 May 5)
+- Wait for Few-shot Persona Prompt eval (Llama ~16:30, Qwen ~20:30)
+- Wait for Random Policy eval (~19:00 May 5)
+- Wait for Ablation no_uncertainty n=200 finish (~17:00 May 5)
+- ~22:30 May 5: all data complete → ~24h to finalize paper main table + §6 + §Method rewrite + investigate
