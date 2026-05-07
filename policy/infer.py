@@ -206,7 +206,9 @@ def select_action(state_text: str, policy_model_dir: str, base_model: Optional[s
 
 def get_template(action: str, domain: str) -> str:
     """Get template for the given action and domain."""
-    base = Path(__file__).resolve().parent.parent / "prompts"
+    import os
+    prompt_dir = os.environ.get("PROMPT_DIR", "prompts")
+    base = Path(__file__).resolve().parent.parent / prompt_dir
     if domain == "coding":
         fname = {
             "Clarify": "coding_clarify.txt",
